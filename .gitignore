@@ -1,0 +1,13 @@
+# python
+__pycache__/
+*.pyc
+
+# data & outputs
+logs/
+experiments/
+*.pth
+*.pt
+*.ckpt
+
+# OS / IDE junk
+.vscode/
