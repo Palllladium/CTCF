@@ -316,32 +316,3 @@ def get_3DTransMorphTiny_config():
     config.reg_head_chan = 16
     config.img_size = (160, 192, 224)
     return config
-    
-def get_3DTransMorphTinyDebug_config():
-    """
-    Урезанная сборка для GTX 1050 Ti (4 ГБ).
-    Цель: отладить полный цикл на OASIS с минимальной VRAM.
-    """
-    config = ml_collections.ConfigDict()
-    config.if_transskip = True         # оставить только трансформерные скипы
-    config.if_convskip  = False        # отключить conv-skip (экономия каналов)
-    config.patch_size   = 4
-    config.in_chans     = 2
-    config.embed_dim    = 32           # было 48/96 → сильно уменьшаем
-    config.depths       = (1, 1, 2, 1) # было (2,2,4,2) → урезаем глубину
-    config.num_heads    = (2, 2, 4, 4) # меньше голов внимания
-    config.window_size  = (4, 4, 4)    # меньшие окна резко экономят VRAM
-    config.mlp_ratio    = 4
-    config.pat_merg_rf  = 4            # агрессивнее сжимать при PatchMerging
-    config.qkv_bias     = False
-    config.drop_rate    = 0
-    config.drop_path_rate = 0.1
-    config.ape          = False
-    config.spe          = False
-    config.rpe          = True
-    config.patch_norm   = True
-    config.use_checkpoint = True       # включаем чекпоинтинг (экономит память)
-    config.out_indices  = (0, 1, 2, 3)
-    config.reg_head_chan= 32           # было 16/96 → ставим 32, можно 16 если нужно
-    config.img_size     = (160, 192, 224)  # оставить как в ваших pkl
-    return config

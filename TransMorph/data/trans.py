@@ -62,26 +62,6 @@ class Rot90(Base):
     def __str__(self):
         return 'Rot90(axes=({}, {})'.format(*self.axes)
 
-# class RandomRotion(Base):
-#     def __init__(self, angle=20):# angle :in degress, float, [0,360]
-#         assert angle >= 0.0
-#         self.axes = (0,1) # 只对HW方向进行旋转
-#         self.angle = angle #
-#         self.buffer = None
-#
-#     def sample(self, *shape):# shape : [H,W,D]
-#         shape = list(shape)
-#         self.buffer = round(np.random.uniform(low=-self.angle,high=self.angle),2) # 2个小数点
-#         if self.buffer < 0:
-#             self.buffer += 180
-#         return shape
-#
-#     def tf(self, img, k=0): # img shape [1,H,W,D,c] while label shape is [1,H,W,D]
-#         return ndimage.rotate(img, angle=self.buffer, reshape=False)
-#
-#     def __str__(self):
-#         return 'RandomRotion(axes=({}, {}),Angle:{}'.format(*self.axes,self.buffer)
-
 class RandomRotion(Base):
     def __init__(self,angle_spectrum=10):
         assert isinstance(angle_spectrum,int)

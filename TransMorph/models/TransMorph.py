@@ -18,17 +18,11 @@ Johns Hopkins University
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
-# from timm.models.layers import DropPath, trunc_normal_, to_3tuple
 from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
 import numpy as np
-from TransMorph.models import configs_TransMorph as configs
-
-try:
-    from timm.layers import DropPath, trunc_normal_, to_3tuple
-except Exception:
-    # fallback для старых версий timm (<0.9)
-    from timm.models.layers import DropPath, trunc_normal_, to_3tuple
+import TransMorph.models.configs_TransMorph as configs
+from timm.layers import DropPath, trunc_normal_, to_3tuple
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -110,7 +104,6 @@ class WindowAttention(nn.Module):
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
         coords_t = torch.arange(self.window_size[2])
-        # явный порядок индексов, чтобы не было ворнинга
         mh, mw, mt = torch.meshgrid(coords_h, coords_w, coords_t, indexing='ij')
         coords = torch.stack((mh, mw, mt))  # 3, Wh, Ww, Wt
         coords_flatten = torch.flatten(coords, 1)  # 3, Wh*Ww*Wt
@@ -405,7 +398,7 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             blk.H, blk.W, blk.T = H, W, T
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, attn_mask)
+                x = checkpoint.checkpoint(blk, x, attn_mask, use_reentrant=False)
             else:
                 x = blk(x, attn_mask)
         if self.downsample is not None:
@@ -887,6 +880,5 @@ CONFIGS = {
     'TransMorph-No-RelPosEmbed': configs.get_3DTransMorphNoRelativePosEmbd_config(),
     'TransMorph-Large': configs.get_3DTransMorphLarge_config(),
     'TransMorph-Small': configs.get_3DTransMorphSmall_config(),
-    'TransMorph-Tiny': configs.get_3DTransMorphTiny_config(),
-    'TransMorph-TinyDebug': configs.get_3DTransMorphTinyDebug_config(),
+    'TransMorph-Tiny': configs.get_3DTransMorphTiny_config()
 }
