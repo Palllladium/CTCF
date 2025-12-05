@@ -519,7 +519,7 @@ def main():
                 def_seg_xy = torch.cat(def_segs_xy, dim=1)  # [B,36,D,H,W]
 
                 # NCC must be evaluated in full float32 precision to avoid AMP-induced NaNs
-                with autocast("cuda", enabled=False):
+                with torch.amp.autocast("cuda", enabled=False):
                     L_ncc_xy = criterion_ncc(out_xy.float(), y.float())
                 
                 L_dsc_xy = multiclass_soft_dice_loss(def_seg_xy, y_seg, num_classes=36)
@@ -540,7 +540,7 @@ def main():
                 def_seg_yx = torch.cat(def_segs_yx, dim=1)
 
                 # NCC must be evaluated in full float32 precision to avoid AMP-induced NaNs
-                with autocast("cuda", enabled=False):
+                with torch.amp.autocast("cuda", enabled=False):
                     L_ncc_yx = criterion_ncc(out_yx.float(), x.float())
                     
                 L_dsc_yx = multiclass_soft_dice_loss(def_seg_yx, x_seg, num_classes=36)
