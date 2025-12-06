@@ -477,7 +477,7 @@ def main():
     for epoch in range(epoch_start, max_epoch):
         print('Training Starts (epoch {})'.format(epoch))
         
-         # --- perf: start timing & reset peak memory ---
+        # --- perf: start timing & reset peak memory ---
         epoch_start_time = time.perf_counter()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -654,14 +654,33 @@ def main():
                 eval_dsc.update(dsc.item(), x.size(0))
                 print('val DSC running avg: {:.4f}'.format(eval_dsc.avg))
 
-        best_dsc = max(eval_dsc.avg, best_dsc)
+        # ---------- Checkpoints: save BEST + LAST ----------
+        # 1) BEST: only when DSC improved
+        if eval_dsc.avg >= best_dsc:
+            best_dsc = eval_dsc.avg
+            save_checkpoint(
+                {
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'best_dsc': best_dsc,
+                    'optimizer': optimizer.state_dict(),
+                },
+                save_dir=exp_dir,
+                filename='best.pth.tar'
+            )
+            print(f"Saved new BEST checkpoint (DSC={best_dsc:.4f})")
 
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'best_dsc': best_dsc,
-            'optimizer': optimizer.state_dict(),
-        }, save_dir=exp_dir, filename='dsc{:.4f}.pth.tar'.format(eval_dsc.avg))
+        # 2) LAST: always save latest model state
+        save_checkpoint(
+            {
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'best_dsc': best_dsc,
+                'optimizer': optimizer.state_dict(),
+            },
+            save_dir=exp_dir,
+            filename='last.pth.tar'
+        )
 
         writer.add_scalar('DSC/validate', eval_dsc.avg, epoch)
 
