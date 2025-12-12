@@ -33,19 +33,24 @@ from utils import (
     validate_oasis
 )
 
+
 # ---------- Adapter for validate_oasis() ---------- #
 
 def forward_flow_tm_dca(model, x, y):
     x_half = F.avg_pool3d(x, 2)
     y_half = F.avg_pool3d(y, 2)
 
-    flow_half = model((x_half.half(), y_half.half()))
+    use_amp = torch.cuda.is_available()
+    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+        flow_half = model((x_half, y_half))
+
     flow_full = F.interpolate(
         flow_half.float(),
         scale_factor=2,
         mode="trilinear",
         align_corners=False
     ) * 2.0
+
     return flow_full
 
 
@@ -175,6 +180,7 @@ def main():
             idx += 1
             model.train()
             iter_t0 = time.perf_counter()
+            
             batch = [t.to(device, non_blocking=True) for t in batch]
             x, y, x_seg_idx, y_seg_idx = batch  # x: moving, y: fixed
 

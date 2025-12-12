@@ -148,7 +148,7 @@ def perf_epoch_end(t0: float, iters: int, iter_time_sum: float) -> PerfInfo:
     mean_iter_ms = (iter_time_sum / max(1, iters)) * 1000.0
     peak = None
     if torch.cuda.is_available():
-        peak = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        peak = torch.cuda.max_memory_reserved() / (1024 ** 3)
     return PerfInfo(epoch_time_sec=epoch_time, mean_iter_time_ms=mean_iter_ms, peak_gpu_mem_gib=peak)
 
 

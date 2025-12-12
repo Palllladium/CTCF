@@ -60,9 +60,9 @@ def get_UTSRMorph_debug_config():
     config.if_convskip = True
     config.patch_size = 4
     config.in_chans = 2
-    config.embed_dim = 48
-    config.depths = (2, 2, 2, 2)
-    config.num_heads = (4, 4, 4, 4)
+    config.embed_dim = 40
+    config.depths = (2, 2, 18, 2)
+    config.num_heads = (4, 4, 8, 16)
     config.window_size = (5, 6, 7)
     config.mlp_ratio = 4
     config.pat_merg_rf = 4
@@ -75,8 +75,8 @@ def get_UTSRMorph_debug_config():
     config.patch_norm = True
     config.use_checkpoint = False
     config.out_indices = (0, 1, 2, 3)
-    config.reg_head_chan = 16
-    config.img_size = (80, 96, 112)
+    config.reg_head_chan = 4
+    config.img_size = (160, 192, 224)
     return config
 
 
