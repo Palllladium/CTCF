@@ -20,9 +20,14 @@ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 ## Запуск
 
 1. На Windows на моей машине:
-CTCF: `python -m TransMorph.train_CTCF_v2 --train_dir "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/All" --val_dir "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/Test"`
-TM: `python -m TransMorph.train_TransMorph_v2 --train_dir "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/All" --val_dir "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/Test"`
+Общее: `python -m experiments.`*имя файла*` --train_dir "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/All" --val_dir "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/Test"`
+- train_CTCF
+- train_TM-DCA
+- train_UTSRMorph
+
 
 2. Для Linux на вашей машине:
-CTCF: `python -m TransMorph.train_CTCF_v2 --train_dir "/home/roman/P/OASIS_L2R_2021_task03/All" --val_dir "/home/roman/P/OASIS_L2R_2021_task03/Test"`
-TM: `python -m TransMorph.train_TransMorph_v2 --train_dir "/home/roman/P/OASIS_L2R_2021_task03/All" --val_dir "/home/roman/P/OASIS_L2R_2021_task03/Test"`
+Общее: `python -m experiments.`*имя файла*` --train_dir "/home/roman/P/OASIS_L2R_2021_task03/All" --val_dir "/home/roman/P/OASIS_L2R_2021_task03/Test"`
+- train_CTCF
+- train_TM-DCA
+- train_UTSRMorph
