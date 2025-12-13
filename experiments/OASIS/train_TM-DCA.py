@@ -41,7 +41,7 @@ def forward_flow_tm_dca(model, x, y):
     y_half = F.avg_pool3d(y, 2)
 
     use_amp = torch.cuda.is_available()
-    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+    with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
         flow_half = model((x_half, y_half))
 
     flow_full = F.interpolate(

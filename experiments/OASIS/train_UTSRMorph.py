@@ -42,7 +42,8 @@ def forward_flow_utsrmorph(model, x, y):
       model(inp=[B,2,D,H,W]) -> (out, flow) where flow: [B,3,D,H,W]
     """
     inp = torch.cat((x, y), dim=1)  # [B,2,D,H,W]
-    _, flow = model(inp)
+    with torch.amp.autocast(enabled=torch.cuda.is_available()):
+        _, flow = model(inp)
     return flow
 
 
@@ -186,10 +187,10 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 inp = torch.cat((src, tgt), dim=1)  # [B,2,D,H,W]
-                out, flow = model(inp)              # out ~ warped src->tgt, flow: [B,3,D,H,W]
 
                 # NCC stability: compute in float32 (same idea as TM-DCA)
                 with torch.amp.autocast("cuda", enabled=False):
+                    out, flow = model(inp)
                     L_ncc = criterion_ncc(out.float(), tgt.float()) * W_ncc
 
                 # regularization
