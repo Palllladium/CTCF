@@ -36,13 +36,8 @@ from utils import (
 # ---------- Adapter for validate_oasis() ---------- #
 
 def forward_flow_utsrmorph(model, x, y):
-    """
-    Expected:
-      x,y: [B,1,D,H,W]
-      model(inp=[B,2,D,H,W]) -> (out, flow) where flow: [B,3,D,H,W]
-    """
     inp = torch.cat((x, y), dim=1)  # [B,2,D,H,W]
-    with torch.amp.autocast(enabled=torch.cuda.is_available()):
+    with torch.amp.autocast(device_type='cuda', enabled=torch.cuda.is_available()):
         _, flow = model(inp)
     return flow
 
