@@ -238,6 +238,9 @@ def main():
 
         # -------------------- Validation (unified) -------------------- #
 
+        # OOM on 32 GB config:
+        torch.cuda.empty_cache()
+
         val = validate_oasis(
             model=model,
             val_loader=val_loader,
@@ -256,6 +259,10 @@ def main():
         def_grid = val.last_vis.get("def_grid", None)
         x_vis = val.last_vis.get("x_seg", None)
         y_vis = val.last_vis.get("y_seg", None)
+
+        # OOM on 32 GB config:
+        del flow, out
+        torch.cuda.empty_cache()
 
         # -------------------- Checkpoints (BEST + LAST) -------------------- #
 
@@ -286,17 +293,18 @@ def main():
 
         # -------------------- Visuals -------------------- #
 
-        plt.switch_backend("agg")
-        if def_out is not None and def_grid is not None and x_vis is not None and y_vis is not None:
-            pred_fig = comput_fig(def_out)
-            grid_fig = comput_fig(def_grid)
-            x_fig = comput_fig(x_vis)
-            tar_fig = comput_fig(y_vis)
+        if epoch % 10 == 0:
+            plt.switch_backend("agg")
+            if def_out is not None and def_grid is not None and x_vis is not None and y_vis is not None:
+                pred_fig = comput_fig(def_out)
+                grid_fig = comput_fig(def_grid)
+                x_fig = comput_fig(x_vis)
+                tar_fig = comput_fig(y_vis)
 
-            writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
-            writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
-            writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
-            writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
+                writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
+                writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
+                writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
+                writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
 
     writer.close()
 
