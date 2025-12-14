@@ -269,18 +269,18 @@ def main():
                 print(
                     f"Iter {idx:4d}/{len(train_loader):4d} | "
                     f"loss(avg)={loss_all.avg:.4f} | "
-                    f"NCC={float(L_ncc):.4f} DSC={float(L_dsc):.4f} REG={float(L_reg):.4f} "
-                    f"ICON={float(L_icon):.4f} CYC={float(L_cyc):.4f} JAC={float(L_jac):.4f} | "
+                    f"NCC={L_ncc.detach().item():.4f} DSC={L_dsc.detach().item():.4f} REG={L_reg.detach().item():.4f} "
+                    f"ICON={L_icon.detach().item():.4f} CYC={L_cyc.detach().item():.4f} JAC={L_jac.detach().item():.4f} | "
                     f"lr={cur_lr:.1e}"
                 )
 
         writer.add_scalar('Loss/train_total', loss_all.avg, epoch)
-        writer.add_scalar('Loss/train_ncc', float(L_ncc), epoch)
-        writer.add_scalar('Loss/train_dsc', float(L_dsc), epoch)
-        writer.add_scalar('Loss/train_reg', float(L_reg), epoch)
-        writer.add_scalar('Loss/train_icon', float(L_icon), epoch)
-        writer.add_scalar('Loss/train_cyc', float(L_cyc), epoch)
-        writer.add_scalar('Loss/train_jac', float(L_jac), epoch)
+        writer.add_scalar('Loss/train_ncc', L_ncc.detach().item(), epoch)
+        writer.add_scalar('Loss/train_dsc', L_dsc.detach().item(), epoch)
+        writer.add_scalar('Loss/train_reg', L_reg.detach().item(), epoch)
+        writer.add_scalar('Loss/train_icon', L_icon.detach().item(), epoch)
+        writer.add_scalar('Loss/train_cyc', L_cyc.detach().item(), epoch)
+        writer.add_scalar('Loss/train_jac', L_jac.detach().item(), epoch)
 
         print(f'Epoch {epoch} loss {loss_all.avg:.4f}')
 
