@@ -42,14 +42,19 @@ from utils import (
 
 @torch.no_grad()
 def forward_flow_ctcf(model, x, y):
-    """
-    Expected:
-      x,y: [B,1,D,H,W]
-      model((x,y)) -> (out, flow) OR flow
-    """
+    x_half = F.avg_pool3d(x, 2)
+    y_half = F.avg_pool3d(y, 2)
     use_amp = torch.cuda.is_available()
     with torch.amp.autocast("cuda", enabled=use_amp):
-        _, flow = model((x, y))
+        out_h, flow_h = model((x_half, y_half))
+
+    flow = F.interpolate(
+        flow_h.float(),
+        scale_factor=2,
+        mode='trilinear',
+        align_corners=False
+    ) * 2.0
+    
     return flow
 
 # ---------------------- CLI ----------------------

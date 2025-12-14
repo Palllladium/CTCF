@@ -21,7 +21,9 @@ def cycle_image_loss(model,
     x -> y -> x and y -> x -> y.
     """
     # Prefer spatial_trans_full if exists, else spatial_trans
-    if hasattr(model, 'spatial_trans_full'):
+    if hasattr(model, 'spatial_trans_down'):
+        warp_fn = model.spatial_trans_down
+    elif hasattr(model, 'spatial_trans_full'):
         warp_fn = model.spatial_trans_full
     else:
         warp_fn = model.spatial_trans
