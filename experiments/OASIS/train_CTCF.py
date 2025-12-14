@@ -129,7 +129,7 @@ def main():
     # ---------- model config ----------
 
     config = CONFIGS_CTCF['CTCF-DCA-SR']
-    full_size = tuple(config.img_size)  # (D,H,W)
+    full_size = (160, 192, 224)  # (D,H,W)
     model = CTCF.CTCF_DCA_SR(config, time_steps).to(device)
 
     # ---------- spatial transformers for visuals/seg warp ----------
