@@ -112,7 +112,7 @@ class CTCF_DCA_SR(nn.Module):
 
         x_cat = torch.cat((mov, fix), dim=1)
         x_s1 = self.avg_pool(x_cat)
-        f3 = self.c1(x_s1) if self.if_convskip else None
+        f3 = self.c1(x_s1.float()).to(x_s1.dtype) if self.if_convskip else None
         out_feats = self.transformer((mov, fix))
         if self.if_transskip:
             mov_f1, fix_f1 = out_feats[-2]
