@@ -196,12 +196,18 @@ def main():
             batch = [t.to(device, non_blocking=True) for t in batch]
             x, y, x_seg_idx, y_seg_idx = batch  # x: moving, y: fixed ; seg are label indices [B,1,D,H,W]
 
-            if not unsup:
-                with torch.no_grad():
+            with torch.no_grad():
+                x = x.half()
+                y = y.half()
+
+                x_half = F.avg_pool3d(x, 2).half()
+                y_half = F.avg_pool3d(y, 2).half()
+
+                if not unsup:
                     x_seg_oh = F.one_hot(x_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
                     y_seg_oh = F.one_hot(y_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
-            else:
-                x_seg_oh, y_seg_oh = None, None
+                else:
+                    x_seg_oh, y_seg_oh = None, None
 
             # ---------------- bidirectional step (x->y and y->x) ----------------
 
@@ -209,8 +215,13 @@ def main():
             autocast_ctx = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
 
             with autocast_ctx:
-                out_xy, flow_xy = model((x, y))
-                out_yx, flow_yx = model((y, x))
+                out_xy_h, flow_xy_h = model((x_half, y_half))
+                out_yx_h, flow_yx_h = model((y_half, x_half))
+
+                out_xy = F.interpolate(out_xy_h, scale_factor=2, mode='trilinear', align_corners=False)
+                out_yx = F.interpolate(out_yx_h, scale_factor=2, mode='trilinear', align_corners=False)
+                flow_xy = F.interpolate(flow_xy_h, scale_factor=2, mode='trilinear', align_corners=False) * 2.0
+                flow_yx = F.interpolate(flow_yx_h, scale_factor=2, mode='trilinear', align_corners=False) * 2.0
 
                 # NCC in float32 for stability
                 with torch.amp.autocast('cuda', enabled=False):

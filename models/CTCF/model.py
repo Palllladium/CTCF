@@ -144,8 +144,8 @@ class CTCF_DCA_SR(nn.Module):
             flow_prev = flow_new
 
         if return_all_flows:
-            return flow_prev, flows
-        return flow_prev
+            return def_x, flow_prev, flows
+        return def_x, flow_prev
 
 
 CONFIGS = {
