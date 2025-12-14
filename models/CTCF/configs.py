@@ -24,7 +24,8 @@ def get_CTCF_config():
     config.use_checkpoint = False
     config.out_indices = (0, 1, 2)
     config.reg_head_chan = 16
-    config.img_size = (160, 192, 224)
+    # config.img_size = (160, 192, 224)
+    config.img_size = (80, 96, 112)
     config.time_steps = 10
     return config
 
