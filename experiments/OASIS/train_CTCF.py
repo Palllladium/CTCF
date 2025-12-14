@@ -241,7 +241,7 @@ def main():
                 L_reg = (criterion_reg(flow_xy) + criterion_reg(flow_yx)) * 0.5
                 L_reg = L_reg * W_reg
                 L_icon = icon_loss(flow_xy, flow_yx) * W_icon
-                L_cyc = cycle_image_loss(model, x, y, out_xy, out_yx, flow_xy, flow_yx) * W_cyc
+                L_cyc = cycle_image_loss(model, x_half, y_half, out_xy_h, out_yx_h, flow_xy_h, flow_yx_h) * W_cyc
                 L_jac = (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * 0.5
                 L_jac = L_jac * W_jac
 
