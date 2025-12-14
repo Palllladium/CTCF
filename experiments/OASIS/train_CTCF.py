@@ -1,420 +1,321 @@
-import warnings
-warnings.filterwarnings(
-    "error",
-    message=r".*grid_sample.*align_corners.*",
-)
-
 from torch.utils.tensorboard import SummaryWriter
-import os, glob, sys, argparse
+import os, glob, argparse, time
 import numpy as np
 import torch
+import contextlib
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torch import optim
-import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from natsort import natsorted
-import time
 
-from utils import ctcf_losses, field, utils, trans
-import datasets
-
+from experiments.OASIS import datasets
 from models.CTCF.model import CONFIGS as CONFIGS_CTCF
-from models.CTCF.model import CTCF_DCA_SR_Cascade
-from utils import losses
+import models.CTCF.model as CTCF
+
+from utils import (
+    AverageMeter,
+    setup_device,
+    make_exp_dirs,
+    attach_stdout_logger,
+    save_checkpoint,
+    load_checkpoint_if_exists,
+    perf_epoch_start,
+    perf_epoch_end,
+    adjust_learning_rate_poly,
+    NCC_vxm,
+    DiceLoss,
+    Grad3d,
+    NumpyType,
+    dice_val_VOI,
+    register_model,
+    mk_grid_img,
+    comput_fig,
+    validate_oasis,
+    icon_loss,
+    cycle_image_loss,
+    neg_jacobian_penalty,
+)
 
 
-# ---------------------- logger ---------------------- #
+# -------------------- Validation adapter --------------------
 
-class Logger(object):
-    """
-    Mirrors stdout to a log file.
-    """
-    def __init__(self, save_dir: str):
-        self.terminal = sys.stdout
-        os.makedirs(os.path.dirname(save_dir), exist_ok=True)
-        self.log = open(save_dir + "logfile.log", "a", encoding="utf-8")
-
-    def write(self, message: str):
-        self.terminal.write(message)
-        self.log.write(message)
-
-    def flush(self):
-        pass
+@torch.no_grad()
+def forward_flow_ctcf(model, x, y):
+    inp = torch.cat((x, y), dim=1)
+    use_amp = torch.cuda.is_available()
+    with torch.amp.autocast("cuda", enabled=use_amp):
+        _, flow = model(inp)
+    return flow
 
 
-# ---------------------- helpers ---------------------- #
-
-def comput_fig(img: torch.Tensor) -> plt.Figure:
-    """
-    Visualize 16 axial slices from [B,1,D,H,W] (z=48..63).
-    """
-    img = img.detach().cpu().numpy()[0, 0, 48:64, :, :]
-    fig = plt.figure(figsize=(12, 12), dpi=180)
-    for i in range(img.shape[0]):
-        plt.subplot(4, 4, i + 1)
-        plt.axis('off')
-        plt.imshow(img[i, :, :], cmap='gray')
-    fig.subplots_adjust(wspace=0, hspace=0)
-    return fig
-
-
-def adjust_learning_rate(optimizer: optim.Optimizer,
-                         epoch: int,
-                         max_epochs: int,
-                         init_lr: float,
-                         power: float = 0.9) -> float:
-    """
-    Polynomial LR schedule:
-        lr(epoch) = init_lr * (1 - epoch / max_epochs)^power
-    """
-    new_lr = round(init_lr * np.power(1 - (epoch / max_epochs), power), 8)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = new_lr
-    return new_lr
-
-
-def mk_grid_img(grid_step: int,
-                line_thickness: int = 1,
-                grid_sz=(160, 192, 224)) -> torch.Tensor:
-    """
-    3D binary grid [1,1,D,H,W] for deformation visualization.
-    """
-    grid_img = np.zeros(grid_sz, dtype=np.float32)
-    for j in range(0, grid_img.shape[1], grid_step):
-        grid_img[:, j + line_thickness - 1, :] = 1.0
-    for i in range(0, grid_img.shape[2], grid_step):
-        grid_img[:, :, i + line_thickness - 1] = 1.0
-    grid_img = grid_img[None, None, ...]
-    grid_img = torch.from_numpy(grid_img).cuda()
-    return grid_img
-
-
-def save_checkpoint(state: dict,
-                    save_dir: str,
-                    filename: str,
-                    max_model_num: int = 8) -> None:
-    """
-    Save checkpoint and keep only last N files.
-    """
-    os.makedirs(save_dir, exist_ok=True)
-    ckpt_path = os.path.join(save_dir, filename)
-    torch.save(state, ckpt_path)
-    model_lists = natsorted(glob.glob(os.path.join(save_dir, '*')))
-    while len(model_lists) > max_model_num:
-        os.remove(model_lists[0])
-        model_lists = natsorted(glob.glob(os.path.join(save_dir, '*')))
-
-
-# ---------------------- CLI ---------------------- #
+# ---------------------- CLI ----------------------
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument('--train_dir', required=True, help='Path to OASIS training .pkl files (e.g. .../All)')
+    p.add_argument('--val_dir', required=True, help='Path to OASIS validation/test .pkl files (e.g. .../Test)')
+    p.add_argument('--exp', default='CTCF_v1', help='Experiment name (results/<exp>/, logs/<exp>/)')
+    p.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
+    p.add_argument('--max_epoch', type=int, default=500, help='Number of training epochs')
+    p.add_argument('--batch_size', type=int, default=1, help='Batch size (default: 1)')
+    p.add_argument('--cont', action='store_true', help='Resume from results/<exp>/last.pth.tar')
+    p.add_argument('--gpu', type=int, default=0, help='GPU id to use')
 
-    p.add_argument('--train_dir', required=True, help='Path to OASIS training *.pkl (e.g. .../All)')
-    p.add_argument('--val_dir', required=True, help='Path to OASIS validation/test *.pkl (e.g. .../Test)')
-    p.add_argument('--exp', default='CTCF_DCA_SR_Cascade', help='Experiment name for results/ and logs/')
-
-    p.add_argument('--lr', type=float, default=1e-4)
-    p.add_argument('--max_epoch', type=int, default=500)
-    p.add_argument('--batch_size', type=int, default=1)
-    p.add_argument('--cont', action='store_true')
-    p.add_argument('--gpu', type=int, default=0)
-
-    # config key in CONFIGS
-    p.add_argument('--config', type=str, default='CTCF-DCA-SR',
-                   choices=['CTCF-DCA-SR', 'CTCF-DCA-SR-Debug'],
-                   help='Config key in TransMorph.models.CTCF_DCA_SR.configs.CONFIGS')
-
-    # cascade steps in the model
-    p.add_argument('--time_steps', type=int, default=4, help='Cascade time steps')
-
-    # loss weights (UNSUPERVISED objective)
+    # base losses
     p.add_argument('--w_ncc', type=float, default=1.0)
+    p.add_argument('--w_dsc', type=float, default=1.0)
     p.add_argument('--w_reg', type=float, default=1.0)
-    p.add_argument('--w_icon', type=float, default=0.1)
-    p.add_argument('--w_cyc', type=float, default=0.1)
-    p.add_argument('--w_jac', type=float, default=0.02)
 
+    # CTCF regularizers
+    p.add_argument('--w_icon', type=float, default=0.1)
+    p.add_argument('--w_cyc', type=float, default=0.05)
+    p.add_argument('--w_jac', type=float, default=0.01)
+
+    # model
+    p.add_argument('--time_steps', type=int, default=12, help='Cascade steps (keep same as TM-DCA baseline unless testing)')
+    p.add_argument('--unsup', action='store_true', help='Train without DSC loss (pure unsupervised).')
+
+    # perf/memory
+    p.add_argument('--num_workers', type=int, default=4)
+    p.add_argument('--amp', action='store_true', help='Enable AMP (recommended on GPU).')
     return p.parse_args()
 
 
-# ---------------------- main ---------------------- #
+# ---------------------- main ----------------------
 
 def main():
     args = parse_args()
 
-    # ---------- GPU info (same style as your trainers) ----------
-    GPU_iden = args.gpu
-    GPU_num = torch.cuda.device_count()
-    print('Number of GPU: ' + str(GPU_num))
-    for GPU_idx in range(GPU_num):
-        GPU_name = torch.cuda.get_device_name(GPU_idx)
-        print('     GPU #' + str(GPU_idx) + ': ' + GPU_name)
-    torch.cuda.set_device(GPU_iden)
-    GPU_avai = torch.cuda.is_available()
-    print('Currently using: ' + torch.cuda.get_device_name(GPU_iden))
-    print('Is GPU available? ' + str(GPU_avai))
+    # ---------- device ----------
 
-    torch.manual_seed(0)
+    dev = setup_device(args.gpu, seed=0, deterministic=False)
+    device = dev.device
 
-    # ---------- experiment paths ----------
-    exp_root = args.exp.rstrip('/') + '/'
-    exp_dir = os.path.join('results', exp_root)
-    log_dir = os.path.join('logs', exp_root)
-    os.makedirs(exp_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
+    # ---------- experiment dirs + logger ----------
 
-    # ---------- logger + TensorBoard ----------
-    sys.stdout = Logger(log_dir + os.sep if not log_dir.endswith(os.sep) else log_dir)
-    writer = SummaryWriter(log_dir=log_dir)
+    paths = make_exp_dirs(args.exp)
+    attach_stdout_logger(paths.log_dir)
+    writer = SummaryWriter(log_dir=paths.log_dir)
 
     train_dir = args.train_dir if args.train_dir.endswith(os.sep) else args.train_dir + os.sep
     val_dir   = args.val_dir   if args.val_dir.endswith(os.sep)   else args.val_dir   + os.sep
 
-    batch_size = args.batch_size
     lr = args.lr
     max_epoch = args.max_epoch
-    epoch_start = 0
+    batch_size = args.batch_size
 
-    W_ncc  = args.w_ncc
-    W_reg  = args.w_reg
+    W_ncc = args.w_ncc
+    W_dsc = args.w_dsc
+    W_reg = args.w_reg
     W_icon = args.w_icon
-    W_cyc  = args.w_cyc
-    W_jac  = args.w_jac
+    W_cyc = args.w_cyc
+    W_jac = args.w_jac
+
+    time_steps = args.time_steps
+    unsup = args.unsup
 
     print(f'>>> Experiment: {args.exp}')
     print(f'    train_dir = {train_dir}')
     print(f'    val_dir   = {val_dir}')
-    print(f'    cfg       = {args.config}')
-    print(f'    time_steps= {args.time_steps}')
     print(f'    lr={lr}, max_epoch={max_epoch}, batch_size={batch_size}, cont={args.cont}')
-    print(f'    weights: NCC={W_ncc}, REG={W_reg}, ICON={W_icon}, CYC={W_cyc}, JAC={W_jac}')
-    print('    NOTE: Training objective is UNSUPERVISED. Dice is logged as metric only.')
+    print(f'    time_steps={time_steps}')
+    print(f'    loss weights: NCC={W_ncc}, DSC={W_dsc}, REG={W_reg}, ICON={W_icon}, CYC={W_cyc}, JAC={W_jac}')
+    print(f'    UNSUPERVISED={"YES" if unsup else "NO"} (training)')
 
-    # ---------- data ----------
-    train_composed = transforms.Compose([trans.NumpyType((np.float32, np.int16))])
-    val_composed   = transforms.Compose([trans.NumpyType((np.float32, np.int16))])
+    # ---------- model config ----------
 
-    train_set = datasets.OASISBrainDataset(glob.glob(train_dir + '*.pkl'), transforms=train_composed)
-    val_set   = datasets.OASISBrainInferDataset(glob.glob(val_dir + '*.pkl'), transforms=val_composed)
+    config = CONFIGS_CTCF['CTCF-DCA-SR-Debug']
+    full_size = tuple(config.img_size)  # (D,H,W)
+    model = CTCF.CTCF_DCA_SR(config, time_steps).to(device)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=4, pin_memory=True, drop_last=True)
+    # ---------- spatial transformers for visuals/seg warp ----------
+    # For seg warp in training/validation (nearest) and grid (bilinear)
+
+    reg_nearest = register_model(full_size, 'nearest').to(device)
+    reg_bilin   = register_model(full_size, 'bilinear').to(device)
+
+    # ---------- optimizer + losses ----------
+
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0, amsgrad=True)
+
+    criterion_ncc = NCC_vxm()
+    criterion_dsc = DiceLoss()
+    criterion_reg = Grad3d(penalty='l2')
+
+    use_amp = bool(args.amp) and torch.cuda.is_available()
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+
+    # ---------- resume ----------
+
+    epoch_start = 0
+    best_dsc = 0.0
+    if args.cont:
+        ckpt_path = os.path.join(paths.exp_dir, 'last.pth.tar')
+        ckpt = load_checkpoint_if_exists(ckpt_path, model, optimizer, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+        if ckpt:
+            epoch_start = ckpt.get('epoch', 0)
+            best_dsc = ckpt.get('best_dsc', 0.0)
+            print(f"Loaded last checkpoint: epoch_start={epoch_start}, best_dsc={best_dsc:.4f}")
+        else:
+            print('No last.pth.tar found, starting from scratch.')
+
+    # ---------- datasets ----------
+
+    train_tf = transforms.Compose([NumpyType((np.float32, np.int16))])
+    val_tf   = transforms.Compose([NumpyType((np.float32, np.int16))])
+
+    train_set = datasets.OASISBrainDataset(glob.glob(train_dir + '*.pkl'), transforms=train_tf)
+    val_set   = datasets.OASISBrainInferDataset(glob.glob(val_dir + '*.pkl'), transforms=val_tf)
+
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+    val_loader   = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
     print(f'>>> #train={len(train_loader.dataset)}, #val={len(val_loader.dataset)}')
 
-    # ---------- model + config ----------
-    config = CONFIGS_CTCF[args.config]
-    model = CTCF_DCA_SR_Cascade(config, time_steps=args.time_steps).cuda()
+    # -------------------- training loop --------------------
 
-    H, W, D = 160, 192, 224
-
-    reg_model_nearest = utils.register_model((H, W, D), 'nearest').cuda()
-    reg_model_bilin   = utils.register_model((H, W, D), 'bilinear').cuda()
-
-    # ---------- optimizer + losses ----------
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0, amsgrad=True)
-    criterion_ncc = losses.NCC_vxm()
-    criterion_reg = losses.Grad3d(penalty='l2')
-
-    scaler = torch.amp.GradScaler("cuda")
-
-    # ---------- resume ----------
-    best_dsc = 0.0
-    if args.cont:
-        ckpts = natsorted(os.listdir(exp_dir))
-        if len(ckpts) == 0:
-            print('No checkpoints found, starting from scratch.')
-        else:
-            last_ckpt = ckpts[-1]
-            ckpt_path = os.path.join(exp_dir, last_ckpt)
-            ckpt = torch.load(ckpt_path, map_location='cuda')
-            epoch_start = ckpt.get('epoch', 1)
-            best_dsc = ckpt.get('best_dsc', 0.0)
-            model.load_state_dict(ckpt['state_dict'])
-            optimizer.load_state_dict(ckpt['optimizer'])
-            print(f'Model: {last_ckpt} loaded! best_dsc={best_dsc:.4f}, resume_epoch={epoch_start}')
-
-    # -------------------- training loop -------------------- #
     for epoch in range(epoch_start, max_epoch):
-        print('Training Starts (epoch {})'.format(epoch))
+        print(f'Training Starts (epoch {epoch})')
 
-        epoch_start_time = time.perf_counter()
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+        t0 = perf_epoch_start()
+        cur_lr = adjust_learning_rate_poly(optimizer, epoch, max_epoch, lr)
 
-        loss_meter = utils.AverageMeter()
-        ncc_meter  = utils.AverageMeter()
-        reg_meter  = utils.AverageMeter()
-        icon_meter = utils.AverageMeter()
-        cyc_meter  = utils.AverageMeter()
-        jac_meter  = utils.AverageMeter()
-        dice_meter = utils.AverageMeter()
-        fold_meter = utils.AverageMeter()
-
+        loss_all = AverageMeter()
         idx = 0
         iter_time_sum = 0.0
 
-        for data in train_loader:
+        for batch in train_loader:
             idx += 1
             model.train()
+            iter_t0 = time.perf_counter()
 
-            iter_start_time = time.perf_counter()
-            cur_lr = adjust_learning_rate(optimizer, epoch, max_epoch, lr)
+            batch = [t.to(device, non_blocking=True) for t in batch]
+            x, y, x_seg_idx, y_seg_idx = batch  # x: moving, y: fixed ; seg are label indices [B,1,D,H,W]
 
-            data = [t.cuda(non_blocking=True) for t in data]
-            x, y, x_seg, y_seg = data
+            if not unsup:
+                with torch.no_grad():
+                    x_seg_oh = F.one_hot(x_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
+                    y_seg_oh = F.one_hot(y_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
+            else:
+                x_seg_oh, y_seg_oh = None, None
+
+            # ---------------- bidirectional step (x->y and y->x) ----------------
 
             optimizer.zero_grad(set_to_none=True)
+            autocast_ctx = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
 
-            with torch.amp.autocast("cuda"):
-                # ---------- forward: x->y ----------
-                x_in = torch.cat((x, y), dim=1)     # [B,2,D,H,W]
-                out_xy, flow_xy = model(x_in)        # out_xy: warped x->y (full-res), flow_xy: full-res
+            with autocast_ctx:
+                # x -> y
+                inp_xy = torch.cat((x, y), dim=1)
+                out_xy, flow_xy = model(inp_xy)
 
-                # ---------- forward: y->x ----------
-                y_in = torch.cat((y, x), dim=1)
-                out_yx, flow_yx = model(y_in)
+                # y -> x
+                inp_yx = torch.cat((y, x), dim=1)
+                out_yx, flow_yx = model(inp_yx)
 
-                # NCC (float32 for stability)
-                with torch.amp.autocast("cuda", enabled=False):
-                    L_ncc_xy = criterion_ncc(out_xy.float(), y.float())
-                    L_ncc_yx = criterion_ncc(out_yx.float(), x.float())
-                L_ncc = 0.5 * (L_ncc_xy + L_ncc_yx)
+                # NCC in float32 for stability
+                with torch.amp.autocast('cuda', enabled=False):
+                    L_ncc = (criterion_ncc(out_xy.float(), y.float()) + criterion_ncc(out_yx.float(), x.float())) * 0.5
+                    L_ncc = L_ncc * W_ncc
 
-                # Grad regularization
-                L_reg_xy = criterion_reg(flow_xy, y)
-                L_reg_yx = criterion_reg(flow_yx, x)
-                L_reg = 0.5 * (L_reg_xy + L_reg_yx)
+                # DSC (optional)
+                if not unsup:
+                    if hasattr(model, 'spatial_trans_full'):
+                        def_xseg = model.spatial_trans_full(x_seg_oh, flow_xy)
+                        def_yseg = model.spatial_trans_full(y_seg_oh, flow_yx)
+                    else:
+                        def_xseg = reg_bilin([x_seg_oh, flow_xy])
+                        def_yseg = reg_bilin([y_seg_oh, flow_yx])
+                    L_dsc = (criterion_dsc(def_xseg, y_seg_oh) + criterion_dsc(def_yseg, x_seg_oh)) * 0.5
+                    L_dsc = L_dsc * W_dsc
+                else:
+                    L_dsc = torch.tensor(0.0, device=device, dtype=torch.float32)
 
-                # ICON
-                L_icon = ctcf_losses.icon_loss(flow_xy, flow_yx)
-                # Cycle (image space)
-                L_cyc = ctcf_losses.cycle_image_loss(model, x, y, out_xy, out_yx, flow_xy, flow_yx)
-                # Jacobian folding penalty (loss)
-                L_jac = field.neg_jacobian_penalty(flow_xy) + field.neg_jacobian_penalty(flow_yx)
+                L_reg = (criterion_reg(flow_xy) + criterion_reg(flow_yx)) * 0.5
+                L_reg = L_reg * W_reg
+                L_icon = icon_loss(flow_xy, flow_yx) * W_icon
+                L_cyc = cycle_image_loss(model, x, y, out_xy, out_yx, flow_xy, flow_yx) * W_cyc
+                L_jac = (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * 0.5
+                L_jac = L_jac * W_jac
 
-                # Total UNSUP loss
-                loss = (W_ncc * L_ncc +
-                        W_reg * L_reg +
-                        W_icon * L_icon +
-                        W_cyc * L_cyc +
-                        W_jac * L_jac)
+                loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac
 
             if not torch.isfinite(loss):
-                print("===== NON-FINITE LOSS DETECTED (CTCF_DCA_SR_Cascade) =====")
-                print(f"loss={loss.item()} NCC={L_ncc.item()} REG={L_reg.item()} ICON={L_icon.item()} CYC={L_cyc.item()} JAC={L_jac.item()}")
-                raise RuntimeError("Non-finite loss detected.")
-
-            # backward
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-
-            # --- metrics for logging (Dice + fold%) ---
-            # warp segs with nearest sampler using external register_model (as in train_CTCF_v2 validation)
-            with torch.no_grad():
-                def_xy_seg = reg_model_nearest([x_seg.float(), flow_xy.float()])
-                def_yx_seg = reg_model_nearest([y_seg.float(), flow_yx.float()])
-
-                dsc_xy = utils.dice_val_VOI(def_xy_seg.long(), y_seg.long())
-                dsc_yx = utils.dice_val_VOI(def_yx_seg.long(), x_seg.long())
-                dsc = 0.5 * (dsc_xy + dsc_yx)
-
-                fold_xy = ctcf_losses.percent_nonpositive_jacobian(flow_xy.float())
-                fold_yx = ctcf_losses.percent_nonpositive_jacobian(flow_yx.float())
-                fold = 0.5 * (fold_xy + fold_yx)
-
-            # meters
-            loss_meter.update(loss.item(), x.numel())
-            ncc_meter.update(L_ncc.item(), x.numel())
-            reg_meter.update(L_reg.item(), x.numel())
-            icon_meter.update(L_icon.item(), x.numel())
-            cyc_meter.update(L_cyc.item(), x.numel())
-            jac_meter.update(L_jac.item(), x.numel())
-            dice_meter.update(dsc.item(), x.size(0))
-            fold_meter.update(fold.item(), x.size(0))
-
-            iter_time = time.perf_counter() - iter_start_time
-            iter_time_sum += iter_time
-
-            if idx % 1 == 0:
-                print(
-                    f"Epoch {epoch:03d} | Iter {idx:04d} / {len(train_loader):04d} | "
-                    f"loss={loss_meter.avg:.4f} "
-                    f"(NCC={ncc_meter.avg:.4f}, REG={reg_meter.avg:.4f}, "
-                    f"ICON={icon_meter.avg:.4f}, CYC={cyc_meter.avg:.4f}, JAC={jac_meter.avg:.4f}) | "
-                    f"Dice={dice_meter.avg:.4f} | %J<=0={fold_meter.avg:.2f} | lr={cur_lr:.1e}"
+                raise RuntimeError(
+                    f"[NON-FINITE LOSS] loss={loss.item()} "
+                    f"ncc={float(L_ncc):.4f} dsc={float(L_dsc):.4f} reg={float(L_reg):.4f} "
+                    f"icon={float(L_icon):.4f} cyc={float(L_cyc):.4f} jac={float(L_jac):.4f}"
                 )
 
-        # ---------- epoch scalars ----------
-        writer.add_scalar('Loss/train_total', loss_meter.avg, epoch)
-        writer.add_scalar('Loss/train_ncc', ncc_meter.avg, epoch)
-        writer.add_scalar('Loss/train_reg', reg_meter.avg, epoch)
-        writer.add_scalar('Loss/train_icon', icon_meter.avg, epoch)
-        writer.add_scalar('Loss/train_cycle', cyc_meter.avg, epoch)
-        writer.add_scalar('Loss/train_jac', jac_meter.avg, epoch)
-        writer.add_scalar('Metric/train_dice', dice_meter.avg, epoch)
-        writer.add_scalar('Metric/train_fold_percent', fold_meter.avg, epoch)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
-        print('Epoch {} training loss {:.4f}'.format(epoch, loss_meter.avg))
+            loss_all.update(loss.item(), x.numel())
+            iter_time_sum += (time.perf_counter() - iter_t0)
 
-        # ---------- perf ----------
-        epoch_time = time.perf_counter() - epoch_start_time
-        mean_iter_time = iter_time_sum / max(1, idx)
+            if idx % 10 == 0:
+                print(
+                    f"Iter {idx:4d}/{len(train_loader):4d} | "
+                    f"loss(avg)={loss_all.avg:.4f} | "
+                    f"NCC={float(L_ncc):.4f} DSC={float(L_dsc):.4f} REG={float(L_reg):.4f} "
+                    f"ICON={float(L_icon):.4f} CYC={float(L_cyc):.4f} JAC={float(L_jac):.4f} | "
+                    f"lr={cur_lr:.1e}"
+                )
 
-        if torch.cuda.is_available():
-            peak_mem_bytes = torch.cuda.max_memory_allocated()
-            peak_mem_gib = peak_mem_bytes / (1024 ** 3)
-            print(f"[PERF] Epoch {epoch}: time={epoch_time:.1f}s, iter={mean_iter_time*1000:.1f} ms/iter, peak GPU mem={peak_mem_gib:.2f} GiB")
-            writer.add_scalar('perf/epoch_time_sec', epoch_time, epoch)
-            writer.add_scalar('perf/iter_time_ms', mean_iter_time * 1000.0, epoch)
-            writer.add_scalar('perf/peak_gpu_mem_GB', peak_mem_gib, epoch)
+        writer.add_scalar('Loss/train_total', loss_all.avg, epoch)
+        writer.add_scalar('Loss/train_ncc', float(L_ncc), epoch)
+        writer.add_scalar('Loss/train_dsc', float(L_dsc), epoch)
+        writer.add_scalar('Loss/train_reg', float(L_reg), epoch)
+        writer.add_scalar('Loss/train_icon', float(L_icon), epoch)
+        writer.add_scalar('Loss/train_cyc', float(L_cyc), epoch)
+        writer.add_scalar('Loss/train_jac', float(L_jac), epoch)
+
+        print(f'Epoch {epoch} loss {loss_all.avg:.4f}')
+
+        # ---------------- Performance ----------------
+
+        perf = perf_epoch_end(t0, iters=idx, iter_time_sum=iter_time_sum)
+        if perf.peak_gpu_mem_gib is not None:
+            print(f"[PERF] Epoch {epoch}: time={perf.epoch_time_sec:.1f}s, iter={perf.mean_iter_time_ms:.1f} ms/iter, peak={perf.peak_gpu_mem_gib:.2f} GiB")
+            writer.add_scalar('perf/epoch_time_sec', perf.epoch_time_sec, epoch)
+            writer.add_scalar('perf/iter_time_ms', perf.mean_iter_time_ms, epoch)
+            writer.add_scalar('perf/peak_gpu_mem_GB', perf.peak_gpu_mem_gib, epoch)
         else:
-            print(f"[PERF] Epoch {epoch}: time={epoch_time:.1f}s, iter={mean_iter_time*1000:.1f} ms/iter")
+            print(f"[PERF] Epoch {epoch}: time={perf.epoch_time_sec:.1f}s, iter={perf.mean_iter_time_ms:.1f} ms/iter")
 
-        # -------------------- validation -------------------- #
-        eval_dsc = utils.AverageMeter()
-        eval_fold = utils.AverageMeter()
+        # -------------------- Validation --------------------
 
-        # for visualization (keep last batch of validation)
-        def_out = None
-        def_grid = None
-        x_vis = None
-        y_vis = None
+        # OOM on 32 GB config:
+        torch.cuda.empty_cache()
 
-        with torch.no_grad():
-            model.eval()
-            for data in val_loader:
-                data = [t.cuda(non_blocking=True) for t in data]
-                x, y, x_seg, y_seg = data
+        val = validate_oasis(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            forward_flow_fn=lambda a, b: forward_flow_ctcf(model, a, b),
+            dice_fn=dice_val_VOI,
+            register_model_cls=register_model,
+            mk_grid_img_fn=mk_grid_img,
+        )
 
-                x_in = torch.cat((x, y), dim=1)
-                grid_img = mk_grid_img(8, 1, (D, H, W))
+        print(f"val DSC: {val.dsc:.4f} | fold%: {val.fold_percent:.2f}")
+        writer.add_scalar('DSC/validate', val.dsc, epoch)
+        writer.add_scalar('Metric/validate_fold_percent', val.fold_percent, epoch)
 
-                out, flow = model(x_in)
-                def_out = reg_model_nearest([x_seg.float(), flow.float()])
-                def_grid = reg_model_bilin([grid_img.float(), flow.float()])
+        # OOM on 32 GB config:
+        del flow_xy, flow_yx
+        torch.cuda.empty_cache()
 
-                dsc = utils.dice_val_VOI(def_out.long(), y_seg.long())
-                eval_dsc.update(dsc.item(), x.size(0))
+        # -------------------- Checkpoints (BEST + LAST) --------------------
 
-                fold = ctcf_losses.percent_nonpositive_jacobian(flow.float())
-                eval_fold.update(fold.item(), x.size(0))
-
-                x_vis = x_seg
-                y_vis = y_seg
-
-        writer.add_scalar('DSC/validate', eval_dsc.avg, epoch)
-        writer.add_scalar('Metric/validate_fold_percent', eval_fold.avg, epoch)
-        print('Validation DSC avg: {:.4f} | %J<=0 avg: {:.2f}'.format(eval_dsc.avg, eval_fold.avg))
-
-        # ---------- checkpoints ----------
-        if eval_dsc.avg >= best_dsc:
-            best_dsc = eval_dsc.avg
+        if val.dsc >= best_dsc:
+            best_dsc = val.dsc
             save_checkpoint(
                 {
                     'epoch': epoch + 1,
@@ -422,7 +323,7 @@ def main():
                     'best_dsc': best_dsc,
                     'optimizer': optimizer.state_dict(),
                 },
-                save_dir=exp_dir,
+                save_dir=paths.exp_dir,
                 filename='best.pth.tar'
             )
             print(f"Saved new BEST checkpoint (DSC={best_dsc:.4f})")
@@ -434,12 +335,18 @@ def main():
                 'best_dsc': best_dsc,
                 'optimizer': optimizer.state_dict(),
             },
-            save_dir=exp_dir,
+            save_dir=paths.exp_dir,
             filename='last.pth.tar'
         )
 
-        # ---------- TensorBoard figures ----------
+        # -------------------- Visuals --------------------
+        
         plt.switch_backend('agg')
+        def_out  = val.last_vis.get('def_seg', None)
+        def_grid = val.last_vis.get('def_grid', None)
+        x_vis    = val.last_vis.get('x_seg', None)
+        y_vis    = val.last_vis.get('y_seg', None)
+
         if def_out is not None and def_grid is not None and x_vis is not None and y_vis is not None:
             pred_fig = comput_fig(def_out)
             grid_fig = comput_fig(def_grid)
