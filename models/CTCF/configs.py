@@ -35,7 +35,7 @@ def get_CTCF_debug_config():
     config.if_convskip = True
     config.patch_size = 4
     config.in_chans = 1
-    config.embed_dim = 24
+    config.embed_dim = 12
     config.dwin_kernel_size = (7, 5, 3)
     config.depths = (2, 2, 2)
     config.num_heads = (4, 4, 4)
@@ -51,7 +51,7 @@ def get_CTCF_debug_config():
     config.patch_norm = True
     config.use_checkpoint = False
     config.out_indices = (0, 1, 2)
-    config.reg_head_chan = 4
+    config.reg_head_chan = 1
     config.img_size = (160, 192, 224)
-    config.time_steps = 4
+    config.time_steps = 1
     return config

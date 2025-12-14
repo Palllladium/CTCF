@@ -1145,6 +1145,8 @@ class SR(nn.Module):
     def forward(self, x, skip=None):
         x = self.up(x)
         if skip is not None:
+            if skip.shape[2:] != x.shape[2:]:
+                skip = nnf.interpolate(skip, size=x.shape[2:],  mode='trilinear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
         x = self.conv1(x)
         x = self.conv2(x)

@@ -42,12 +42,15 @@ from utils import (
 
 @torch.no_grad()
 def forward_flow_ctcf(model, x, y):
-    inp = torch.cat((x, y), dim=1)
+    """
+    Expected:
+      x,y: [B,1,D,H,W]
+      model((x,y)) -> (out, flow) OR flow
+    """
     use_amp = torch.cuda.is_available()
     with torch.amp.autocast("cuda", enabled=use_amp):
-        _, flow = model(inp)
+        _, flow = model((x, y))
     return flow
-
 
 # ---------------------- CLI ----------------------
 
@@ -125,7 +128,7 @@ def main():
 
     # ---------- model config ----------
 
-    config = CONFIGS_CTCF['CTCF-DCA-SR-Debug']
+    config = CONFIGS_CTCF['CTCF-DCA-SR']
     full_size = tuple(config.img_size)  # (D,H,W)
     model = CTCF.CTCF_DCA_SR(config, time_steps).to(device)
 
@@ -206,13 +209,8 @@ def main():
             autocast_ctx = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
 
             with autocast_ctx:
-                # x -> y
-                inp_xy = torch.cat((x, y), dim=1)
-                out_xy, flow_xy = model(inp_xy)
-
-                # y -> x
-                inp_yx = torch.cat((y, x), dim=1)
-                out_yx, flow_yx = model(inp_yx)
+                out_xy, flow_xy = model((x, y))
+                out_yx, flow_yx = model((y, x))
 
                 # NCC in float32 for stability
                 with torch.amp.autocast('cuda', enabled=False):
