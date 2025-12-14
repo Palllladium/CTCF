@@ -197,11 +197,8 @@ def main():
             x, y, x_seg_idx, y_seg_idx = batch  # x: moving, y: fixed ; seg are label indices [B,1,D,H,W]
 
             with torch.no_grad():
-                x = x.half()
-                y = y.half()
-
-                x_half = F.avg_pool3d(x, 2).half()
-                y_half = F.avg_pool3d(y, 2).half()
+                x_half = F.avg_pool3d(x, 2)
+                y_half = F.avg_pool3d(y, 2)
 
                 if not unsup:
                     x_seg_oh = F.one_hot(x_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
