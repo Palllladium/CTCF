@@ -644,7 +644,7 @@ def build_parser():
     pinf.add_argument("--vol_size", type=int, nargs=3, default=[160, 192, 224], help="Volume size D H W")
     pinf.add_argument("--dwin", type=int, nargs=3, default=[7, 5, 3], help="TM-DCA/CTCF dwin kernel size")
     pinf.add_argument("--utsr_config", type=str, default="UTSRMorph-Large", help="UTSRMorph config key")
-    pinf.add_argument("--ctcf_config", type=str, default="CTCF-3-LVL", help="CTCF config key")
+    pinf.add_argument("--ctcf_config", type=str, default="CTCF-DCA-SR", help="CTCF config key")
 
     # aggregate
     pagg = sub.add_parser("aggregate", help="Aggregate multiple summary.json into comparison tables")
