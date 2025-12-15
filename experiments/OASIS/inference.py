@@ -314,7 +314,7 @@ def build_tm_dca(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3)) -> M
     return ModelBundle("tm-dca", model, forward_flow)
 
 
-def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config_key="CTCF-3-LVL") -> ModelBundle:
+def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config_key="CTCF-DCA-SR") -> ModelBundle:
     from models.CTCF.model import CONFIGS as CONFIGS_CTCF
     import models.CTCF.model as CTCF
 
