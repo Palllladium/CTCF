@@ -3,30 +3,21 @@
 
 """
 Unified inference for OASIS Task-3 for 3 models in this repo:
-  - TM-DCA  (models.TransMorph_DCA.model)
+  - TM-DCA    (models.TransMorph_DCA.model)
   - UTSRMorph (models.UTSRMorph.model)
-  - CTCF    (models.CTCF.model)
+  - CTCF      (models.CTCF.model)
 
 Outputs (per run):
   out_dir/
-    per_case.csv               # per-case metrics (+ per-label dice columns)
-    summary.json               # mean/std/sem/ci95 + metadata
-    summary.csv                # same but CSV
-    png/                       # optional visuals
-    flows/                     # optional displacement fields (.npz)
+    per_case.csv
+    summary.json
+    summary.csv
+    png/   (optional visuals, NOW includes deformed grid)
+    flows/ (optional displacement fields)
 
-Metric set (recommended for paper):
-  - Dice mean over VOI labels 1..35 (and per-label dice columns)
-  - Fold% (detJ <= 0) percent
-  - std(log(detJ)) (smoothness / non-physicality proxy)
-  - optional HD95 mean over labels 1..35 (surface-distance)
-  - time per case (seconds)
-
-IMPORTANT:
-  - Uses the SAME forward adapters as in your training scripts:
-      * TM-DCA: half-res inference, then upsample flow x2 and multiply by 2
-      * CTCF:   same
-      * UTSRMorph: concat(x,y) -> model -> flow
+IMPORTANT FIX:
+  - Previously def_grid was computed but never drawn into the PNG figure.
+    Now it is rendered in an extra row ("Deformed grid").
 """
 
 from __future__ import annotations
@@ -39,7 +30,7 @@ import csv
 import math
 import argparse
 from dataclasses import dataclass
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import torch
@@ -49,15 +40,23 @@ from torchvision import transforms
 
 from experiments.OASIS import datasets
 
-# repo utils (you already use these in training scripts)
 from utils import (
-    pkload,
     NumpyType,
     register_model,
     dice_val_VOI,
     jacobian_det,
     setup_device,
 )
+
+def make_grid_img(vol_shape, step=8, thickness=1, device="cuda"):
+    D, H, W = vol_shape
+    g = torch.zeros((1, 1, D, H, W), device=device, dtype=torch.float32)
+    g[:, :, ::step, :, :] = 1
+    g[:, :, :, ::step, :] = 1
+    g[:, :, :, :, ::step] = 1
+    if thickness > 1:
+        g = F.max_pool3d(g, kernel_size=thickness, stride=1, padding=thickness//2)
+    return g
 
 # ------------------------------ Helpers ------------------------------ #
 
@@ -67,27 +66,13 @@ def ensure_dir(path: str) -> str:
 
 
 def resolve_checkpoint(path_or_dir: str, prefer_best: bool = True) -> str:
-    """
-    Accepts:
-      - path to checkpoint file
-      - OR path to directory containing checkpoints
-
-    Priority:
-      1) "best" in filename (if prefer_best=True)
-      2) otherwise newest by modification time
-    """
     if os.path.isfile(path_or_dir):
         return path_or_dir
-
     if not os.path.isdir(path_or_dir):
         raise FileNotFoundError(f"Checkpoint path not found: {path_or_dir}")
 
     exts = (".pth", ".pt", ".pth.tar")
-    files = [
-        os.path.join(path_or_dir, f)
-        for f in os.listdir(path_or_dir)
-        if f.endswith(exts)
-    ]
+    files = [os.path.join(path_or_dir, f) for f in os.listdir(path_or_dir) if f.endswith(exts)]
     if not files:
         raise RuntimeError(f"No checkpoint files found in directory: {path_or_dir}")
 
@@ -102,12 +87,6 @@ def resolve_checkpoint(path_or_dir: str, prefer_best: bool = True) -> str:
 
 
 def load_state_dict(model: torch.nn.Module, ckpt_path: str) -> Dict:
-    """
-    Loads ckpt in common formats:
-      - {"state_dict": ...}
-      - {"model": ...}
-      - raw state_dict
-    """
     ckpt = torch.load(ckpt_path, map_location="cpu")
     if isinstance(ckpt, dict):
         if "state_dict" in ckpt:
@@ -115,33 +94,25 @@ def load_state_dict(model: torch.nn.Module, ckpt_path: str) -> Dict:
         elif "model" in ckpt:
             sd = ckpt["model"]
         else:
-            # Might already be a state dict-like mapping
             sd = ckpt
     else:
         sd = ckpt
 
     missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing:
-        print(f"[WARN] Missing keys: {len(missing)} (showing up to 10): {missing[:10]}")
+        print(f"[WARN] Missing keys: {len(missing)} (up to 10): {missing[:10]}")
     if unexpected:
-        print(f"[WARN] Unexpected keys: {len(unexpected)} (showing up to 10): {unexpected[:10]}")
+        print(f"[WARN] Unexpected keys: {len(unexpected)} (up to 10): {unexpected[:10]}")
     return ckpt if isinstance(ckpt, dict) else {"state_dict": sd}
 
 
 def case_id_from_path(pkl_path: str) -> str:
     base = os.path.basename(pkl_path)
-    # In original baselines they did [2:] after split('.')[0] (strip "p_")
     stem = os.path.splitext(base)[0]
-    # keep both forms safe
     return stem[2:] if stem.startswith("p_") else stem
 
 
 def dice_per_label_1to35(def_seg: torch.Tensor, y_seg: torch.Tensor) -> np.ndarray:
-    """
-    Compute per-label Dice for labels 1..35 on CPU numpy.
-    Inputs are [B,1,D,H,W] integer tensors.
-    Returns shape (35,) float64.
-    """
     pred = def_seg.detach().cpu().numpy()[0, 0]
     true = y_seg.detach().cpu().numpy()[0, 0]
     out = np.zeros((35,), dtype=np.float64)
@@ -160,8 +131,7 @@ def fold_percent_from_flow(flow: torch.Tensor) -> float:
 
 
 def logdet_std_from_flow(flow: torch.Tensor) -> float:
-    detJ = jacobian_det(flow.float())  # [B,1,D,H,W]
-    # clamp to avoid log(<=0)
+    detJ = jacobian_det(flow.float())
     detJ = torch.clamp(detJ, min=1e-9, max=1e9)
     logdet = torch.log(detJ)
     return float(torch.std(logdet).item())
@@ -180,16 +150,12 @@ def require_surface_distance():
     except Exception as e:
         raise RuntimeError(
             "HD95 requested but 'surface-distance' is not installed.\n"
-            "Install it in your environment:\n"
+            "Install in your env:\n"
             "  pip install surface-distance\n"
         ) from e
 
 
 def hd95_mean_1to35(def_seg: torch.Tensor, y_seg: torch.Tensor, spacing=(1.0, 1.0, 1.0)) -> float:
-    """
-    Mean HD95 over labels 1..35 using surface-distance.
-    If either label absent in pred or gt -> hd for that label = 0 (matches many baseline scripts).
-    """
     require_surface_distance()
     from surface_distance import compute_robust_hausdorff, compute_surface_distances
 
@@ -210,33 +176,42 @@ def hd95_mean_1to35(def_seg: torch.Tensor, y_seg: torch.Tensor, spacing=(1.0, 1.
 
 
 def save_flow_npz(flow: torch.Tensor, path: str):
-    # store float16 to reduce size, same idea as baselines
     arr = flow.detach().cpu().numpy().astype(np.float16)
     np.savez_compressed(path, flow=arr)
 
 
-def save_png_triplet(out_png: str, x: torch.Tensor, y: torch.Tensor, x_seg: torch.Tensor, y_seg: torch.Tensor,
-                     def_seg: torch.Tensor, def_grid: Optional[torch.Tensor] = None):
+def save_png_triplet(
+    out_png: str,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    x_seg: torch.Tensor,
+    y_seg: torch.Tensor,
+    def_seg: torch.Tensor,
+    def_grid: Optional[torch.Tensor] = None,
+):
     """
-    Minimal but paper-useful visualization:
-      3 orthogonal slices for: fixed(y), moving(x), fixed_seg(y_seg), warped_seg(def_seg), optional def_grid
+    Paper-useful visualization:
+      - fixed (3 orthogonal)
+      - moving (3 orthogonal)
+      - fixed seg (3 orthogonal)
+      - warped seg (3 orthogonal)
+      - deformed grid (3 orthogonal)  <-- FIXED: now actually rendered
     """
     import matplotlib.pyplot as plt
 
-    # tensors are [B,1,D,H,W]
     x = x.detach().cpu().numpy()[0, 0]
     y = y.detach().cpu().numpy()[0, 0]
-    xs = x_seg.detach().cpu().numpy()[0, 0]
     ys = y_seg.detach().cpu().numpy()[0, 0]
     ds = def_seg.detach().cpu().numpy()[0, 0]
+
     dg = None
     if def_grid is not None:
+        # usually [B,1,D,H,W]
         dg = def_grid.detach().cpu().numpy()[0, 0]
 
     D, H, W = y.shape
     cz, cy, cx = D // 2, H // 2, W // 2
 
-    # (axial=z fixed), (coronal=y), (sagittal=x)
     def slices(vol):
         return (vol[cz, :, :], vol[:, cy, :], vol[:, :, cx])
 
@@ -244,37 +219,44 @@ def save_png_triplet(out_png: str, x: torch.Tensor, y: torch.Tensor, x_seg: torc
     x_ax, x_cor, x_sag = slices(x)
     ys_ax, ys_cor, ys_sag = slices(ys)
     ds_ax, ds_cor, ds_sag = slices(ds)
+
+    n_rows = 5 if dg is not None else 4
+    fig = plt.figure(figsize=(12, 12 if dg is not None else 10))
+    axs = []
+
+    # Row 1: fixed
+    axs.append(fig.add_subplot(n_rows, 3, 1)); axs[-1].imshow(y_ax, cmap="gray"); axs[-1].set_title("Fixed (ax)")
+    axs.append(fig.add_subplot(n_rows, 3, 2)); axs[-1].imshow(y_cor, cmap="gray"); axs[-1].set_title("Fixed (cor)")
+    axs.append(fig.add_subplot(n_rows, 3, 3)); axs[-1].imshow(y_sag, cmap="gray"); axs[-1].set_title("Fixed (sag)")
+
+    # Row 2: moving
+    axs.append(fig.add_subplot(n_rows, 3, 4)); axs[-1].imshow(x_ax, cmap="gray"); axs[-1].set_title("Moving (ax)")
+    axs.append(fig.add_subplot(n_rows, 3, 5)); axs[-1].imshow(x_cor, cmap="gray"); axs[-1].set_title("Moving (cor)")
+    axs.append(fig.add_subplot(n_rows, 3, 6)); axs[-1].imshow(x_sag, cmap="gray"); axs[-1].set_title("Moving (sag)")
+
+    # Row 3: fixed seg
+    axs.append(fig.add_subplot(n_rows, 3, 7)); axs[-1].imshow(ys_ax); axs[-1].set_title("Fixed seg (ax)")
+    axs.append(fig.add_subplot(n_rows, 3, 8)); axs[-1].imshow(ys_cor); axs[-1].set_title("Fixed seg (cor)")
+    axs.append(fig.add_subplot(n_rows, 3, 9)); axs[-1].imshow(ys_sag); axs[-1].set_title("Fixed seg (sag)")
+
+    # Row 4: warped seg
+    axs.append(fig.add_subplot(n_rows, 3, 10)); axs[-1].imshow(ds_ax); axs[-1].set_title("Warped seg (ax)")
+    axs.append(fig.add_subplot(n_rows, 3, 11)); axs[-1].imshow(ds_cor); axs[-1].set_title("Warped seg (cor)")
+    axs.append(fig.add_subplot(n_rows, 3, 12)); axs[-1].imshow(ds_sag); axs[-1].set_title("Warped seg (sag)")
+
+    # Row 5: deformed grid
     if dg is not None:
         dg_ax, dg_cor, dg_sag = slices(dg)
-
-    fig = plt.figure(figsize=(12, 10))
-
-    # Row 1: fixed/moving
-    axs = []
-    axs.append(fig.add_subplot(4, 3, 1)); axs[-1].imshow(y_ax, cmap="gray"); axs[-1].set_title("Fixed (ax)")
-    axs.append(fig.add_subplot(4, 3, 2)); axs[-1].imshow(y_cor, cmap="gray"); axs[-1].set_title("Fixed (cor)")
-    axs.append(fig.add_subplot(4, 3, 3)); axs[-1].imshow(y_sag, cmap="gray"); axs[-1].set_title("Fixed (sag)")
-
-    axs.append(fig.add_subplot(4, 3, 4)); axs[-1].imshow(x_ax, cmap="gray"); axs[-1].set_title("Moving (ax)")
-    axs.append(fig.add_subplot(4, 3, 5)); axs[-1].imshow(x_cor, cmap="gray"); axs[-1].set_title("Moving (cor)")
-    axs.append(fig.add_subplot(4, 3, 6)); axs[-1].imshow(x_sag, cmap="gray"); axs[-1].set_title("Moving (sag)")
-
-    # Row 3: segs
-    axs.append(fig.add_subplot(4, 3, 7)); axs[-1].imshow(ys_ax); axs[-1].set_title("Fixed seg (ax)")
-    axs.append(fig.add_subplot(4, 3, 8)); axs[-1].imshow(ys_cor); axs[-1].set_title("Fixed seg (cor)")
-    axs.append(fig.add_subplot(4, 3, 9)); axs[-1].imshow(ys_sag); axs[-1].set_title("Fixed seg (sag)")
-
-    # Row 4: warped seg (+ grid if available)
-    axs.append(fig.add_subplot(4, 3, 10)); axs[-1].imshow(ds_ax); axs[-1].set_title("Warped seg (ax)")
-    axs.append(fig.add_subplot(4, 3, 11)); axs[-1].imshow(ds_cor); axs[-1].set_title("Warped seg (cor)")
-    axs.append(fig.add_subplot(4, 3, 12)); axs[-1].imshow(ds_sag); axs[-1].set_title("Warped seg (sag)")
+        axs.append(fig.add_subplot(n_rows, 3, 13)); axs[-1].imshow(dg_ax, cmap="gray"); axs[-1].set_title("Deformed grid (ax)")
+        axs.append(fig.add_subplot(n_rows, 3, 14)); axs[-1].imshow(dg_cor, cmap="gray"); axs[-1].set_title("Deformed grid (cor)")
+        axs.append(fig.add_subplot(n_rows, 3, 15)); axs[-1].imshow(dg_sag, cmap="gray"); axs[-1].set_title("Deformed grid (sag)")
 
     for a in axs:
         a.axis("off")
 
     fig.tight_layout()
     ensure_dir(os.path.dirname(out_png))
-    fig.savefig(out_png, dpi=160)
+    fig.savefig(out_png, dpi=200)
     plt.close(fig)
 
 
@@ -326,13 +308,11 @@ def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config
 
     config = CONFIGS_CTCF[config_key]
     config.img_size = half_size
-    # if your CTCF config also uses dwin/window_size, keep parity with TM-DCA
     if hasattr(config, "dwin_kernel_size"):
         config.dwin_kernel_size = tuple(dwin)
     if hasattr(config, "window_size"):
         config.window_size = (D // 32, H // 32, W // 32)
 
-    # In your code, main class is CTCF_DCA_SR
     if hasattr(CTCF, "CTCF_DCA_SR"):
         model = CTCF.CTCF_DCA_SR(config, time_steps)
     else:
@@ -343,7 +323,7 @@ def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config
         x_half = F.avg_pool3d(x, 2)
         y_half = F.avg_pool3d(y, 2)
         use_amp = torch.cuda.is_available()
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
             out_h, flow_h = model_((x_half, y_half))
         flow = F.interpolate(flow_h.float(), scale_factor=2, mode="trilinear", align_corners=False) * 2.0
         return flow
@@ -364,7 +344,7 @@ def build_utsrmorph(config_key: str = "UTSRMorph-Large") -> ModelBundle:
     def forward_flow(model_, x, y):
         inp = torch.cat((x, y), dim=1)
         use_amp = torch.cuda.is_available()
-        with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
             _, flow = model_(inp)
         return flow
 
@@ -385,7 +365,6 @@ def build_model(model_name: str, args) -> ModelBundle:
 # ------------------------------ Inference ------------------------------ #
 
 def run_inference(args):
-    # device setup (consistent with training scripts)
     dev = setup_device(args.gpu, seed=args.seed, deterministic=args.deterministic)
     device = dev.device
 
@@ -397,7 +376,6 @@ def run_inference(args):
     png_dir = ensure_dir(os.path.join(out_dir, "png")) if args.save_pngs else None
     flow_dir = ensure_dir(os.path.join(out_dir, "flows")) if args.save_flow else None
 
-    # dataset
     test_files = sorted(glob.glob(test_dir + "*.pkl"))
     if not test_files:
         raise RuntimeError(f"No .pkl files found in test_dir: {test_dir}")
@@ -413,7 +391,6 @@ def run_inference(args):
         drop_last=True,
     )
 
-    # model
     bundle = build_model(args.model, args)
     model = bundle.model.to(device)
     forward_flow_fn = bundle.forward_flow_fn
@@ -421,21 +398,12 @@ def run_inference(args):
     ckpt_path = resolve_checkpoint(args.ckpt, prefer_best=not args.prefer_last)
     print(f"[INFO] Model: {bundle.name}")
     print(f"[INFO] Checkpoint: {ckpt_path}")
-    ckpt = load_state_dict(model, ckpt_path)
+    _ = load_state_dict(model, ckpt_path)
     model.eval()
 
-    # warpers (created lazily once we know vol_shape)
     reg_nearest = None
     reg_bilin = None
 
-    # grid for def_grid (optional)
-    mk_grid_img_fn = None
-    if args.save_pngs:
-        # you already have mk_grid_img in utils used in training scripts
-        from utils import mk_grid_img as _mk_grid_img
-        mk_grid_img_fn = _mk_grid_img
-
-    # output CSV
     per_case_path = os.path.join(out_dir, "per_case.csv")
     header = (
         ["case_id", "dice_mean", "fold_percent", "logdet_std", "time_sec"]
@@ -444,12 +412,11 @@ def run_inference(args):
     )
 
     rows = []
-    times = []
 
     with torch.no_grad():
         for idx, batch in enumerate(test_loader):
             x, y, x_seg, y_seg = [t.to(device, non_blocking=True) for t in batch]
-            vol_shape = tuple(x.shape[2:])  # (D,H,W)
+            vol_shape = tuple(x.shape[2:])
 
             if reg_nearest is None:
                 reg_nearest = register_model(vol_shape, mode="nearest").to(device)
@@ -458,11 +425,9 @@ def run_inference(args):
             cid = case_id_from_path(test_files[idx])
 
             t0 = time.perf_counter()
-            flow = forward_flow_fn(model, x, y)  # [1,3,D,H,W]
-            # warp seg (nearest)
+            flow = forward_flow_fn(model, x, y)
             def_seg = reg_nearest([x_seg.float(), flow.float()])
             dt = time.perf_counter() - t0
-            times.append(dt)
 
             dice_mean = float(dice_val_VOI(def_seg.long(), y_seg.long()).item())
             dice_lbl = dice_per_label_1to35(def_seg.long(), y_seg.long())
@@ -478,44 +443,37 @@ def run_inference(args):
             }
 
             if args.hd95:
-                # spacing for OASIS typically treated as (1,1,1) in many baselines unless stated otherwise
                 row["hd95_mean"] = hd95_mean_1to35(def_seg.long(), y_seg.long(), spacing=(1.0, 1.0, 1.0))
 
-            # per-label dice columns
             for i in range(35):
                 row[f"dice_lbl_{i+1}"] = float(dice_lbl[i])
 
             rows.append(row)
 
-            # optional save flow
             if args.save_flow:
                 save_flow_npz(flow, os.path.join(flow_dir, f"flow_{cid}.npz"))
 
-            # optional pngs (save either all or only first N)
             if args.save_pngs and (args.png_limit < 0 or idx < args.png_limit):
-                def_grid = None
-                if mk_grid_img_fn is not None:
-                    grid_img = mk_grid_img_fn(args.grid_step, args.line_thickness, vol_shape, device=device)
-                    def_grid = reg_bilin([grid_img.float(), flow.float()])
+                grid_img = make_grid_img(vol_shape, step=args.grid_step, thickness=args.line_thickness, device=device)
+                def_grid = reg_bilin([grid_img.float(), flow.float()])
+
                 save_png_triplet(
                     out_png=os.path.join(png_dir, f"{cid}.png"),
-                    x=x, y=y, x_seg=x_seg, y_seg=y_seg, def_seg=def_seg, def_grid=def_grid
+                    x=x, y=y, x_seg=x_seg, y_seg=y_seg, def_seg=def_seg, def_grid=def_grid,
                 )
 
             if (idx + 1) % max(1, args.print_every) == 0:
-                msg = f"[{idx+1:03d}/{len(test_loader):03d}] {cid} dice={dice_mean:.4f} fold%={foldp:.2f} time={dt:.3f}s"
+                msg = f"[{idx+1:03d}/{len(test_loader):03d}] {cid} dice={dice_mean:.4f} fold%={foldp:.4f} time={dt:.3f}s"
                 if args.hd95:
-                    msg += f" hd95={row['hd95_mean']:.3f}"
+                    msg += f" hd95={row['hd95_mean']:.4f}"
                 print(msg)
 
-    # write per_case.csv
     with open(per_case_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=header)
         w.writeheader()
         for r in rows:
             w.writerow(r)
 
-    # summary
     def agg(key: str) -> Tuple[float, float]:
         arr = np.array([r[key] for r in rows], dtype=np.float64)
         return float(arr.mean()), float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
@@ -529,7 +487,8 @@ def run_inference(args):
         "metrics": {},
     }
 
-    for key in ["dice_mean", "fold_percent", "logdet_std", "time_sec"] + (["hd95_mean"] if args.hd95 else []):
+    keys = ["dice_mean", "fold_percent", "logdet_std", "time_sec"] + (["hd95_mean"] if args.hd95 else [])
+    for key in keys:
         m, s = agg(key)
         sem = s / math.sqrt(n) if n > 1 else 0.0
         ci95 = compute_ci95(m, s, n)
@@ -555,72 +514,12 @@ def run_inference(args):
         print(f"[SAVED] flow dir:  {flow_dir}")
 
 
-# ------------------------------ Aggregation (optional, for paper table) ------------------------------ #
-
-def run_aggregate(args):
-    """
-    Aggregate multiple model summaries into a single comparison CSV + LaTeX.
-    Usage:
-      python -m experiments.OASIS.infer_oasis aggregate \
-        --runs TM-DCA=.../summary.json UTSRMorph=.../summary.json CTCF=.../summary.json
-    """
-    runs = []
-    for item in args.runs:
-        name, path = item.split("=", 1)
-        with open(path, "r", encoding="utf-8") as f:
-            s = json.load(f)
-        runs.append((name, s))
-
-    metrics_order = ["dice_mean", "hd95_mean", "fold_percent", "logdet_std", "time_sec"]
-
-    out_csv = args.out_csv
-    out_tex = args.out_tex
-    ensure_dir(os.path.dirname(out_csv) if os.path.dirname(out_csv) else ".")
-
-    # CSV
-    with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        header = ["metric"] + [name for name, _ in runs]
-        w.writerow(header)
-        for m in metrics_order:
-            row = [m]
-            for name, s in runs:
-                if m not in s["metrics"]:
-                    row.append("")
-                else:
-                    v = s["metrics"][m]
-                    row.append(f"{v['mean']:.4f} ± {v['std']:.4f} (CI95 ± {v['ci95']:.4f})")
-            w.writerow(row)
-
-    # LaTeX (mean ± std)
-    with open(out_tex, "w", encoding="utf-8") as f:
-        f.write("\\begin{tabular}{l" + "c" * len(runs) + "}\n")
-        f.write("\\hline\n")
-        f.write("Metric & " + " & ".join([name for name, _ in runs]) + " \\\\\n")
-        f.write("\\hline\n")
-        for m in metrics_order:
-            line = [m]
-            for name, s in runs:
-                if m not in s["metrics"]:
-                    line.append("--")
-                else:
-                    v = s["metrics"][m]
-                    line.append(f"{v['mean']:.4f} $\\pm$ {v['std']:.4f}")
-            f.write(" & ".join(line) + " \\\\\n")
-        f.write("\\hline\n")
-        f.write("\\end{tabular}\n")
-
-    print(f"[SAVED] comparison csv:   {out_csv}")
-    print(f"[SAVED] comparison latex: {out_tex}")
-
-
 # ------------------------------ CLI ------------------------------ #
 
 def build_parser():
     p = argparse.ArgumentParser(description="Unified OASIS inference for TM-DCA / UTSRMorph / CTCF")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # infer
     pinf = sub.add_parser("infer", help="Run inference for one model and export metrics/visuals")
     pinf.add_argument("--model", required=True, choices=["tm-dca", "utsrmorph", "ctcf"])
     pinf.add_argument("--ckpt", required=True, help="Checkpoint FILE or directory containing checkpoints")
@@ -639,18 +538,11 @@ def build_parser():
     pinf.add_argument("--line_thickness", type=int, default=1)
     pinf.add_argument("--hd95", action="store_true", help="Compute HD95 mean over labels 1..35 (requires surface-distance)")
 
-    # model-specific knobs (kept consistent with training scripts defaults)
     pinf.add_argument("--time_steps", type=int, default=12, help="TM-DCA/CTCF cascade steps")
     pinf.add_argument("--vol_size", type=int, nargs=3, default=[160, 192, 224], help="Volume size D H W")
     pinf.add_argument("--dwin", type=int, nargs=3, default=[7, 5, 3], help="TM-DCA/CTCF dwin kernel size")
     pinf.add_argument("--utsr_config", type=str, default="UTSRMorph-Large", help="UTSRMorph config key")
     pinf.add_argument("--ctcf_config", type=str, default="CTCF-DCA-SR", help="CTCF config key")
-
-    # aggregate
-    pagg = sub.add_parser("aggregate", help="Aggregate multiple summary.json into comparison tables")
-    pagg.add_argument("--runs", nargs="+", required=True, help="List like NAME=path/to/summary.json")
-    pagg.add_argument("--out_csv", type=str, default="comparison_table.csv")
-    pagg.add_argument("--out_tex", type=str, default="comparison_table_latex.txt")
 
     return p
 
@@ -660,8 +552,6 @@ def main():
     args = parser.parse_args()
     if args.cmd == "infer":
         run_inference(args)
-    elif args.cmd == "aggregate":
-        run_aggregate(args)
     else:
         raise RuntimeError("Unknown command")
 
