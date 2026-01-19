@@ -411,6 +411,22 @@ class WindowAttention(nn.Module):
         fix = self.proj_drop(fix)
 
         return mov, fix
+    
+#========================ADDED TO CTCF========================
+class SEToken(nn.Module):
+    def __init__(self, dim, reduction=8):
+        super().__init__()
+        hidden = max(dim // reduction, 4)
+        self.fc1 = nn.Linear(dim, hidden)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden, dim)
+        self.gate = nn.Sigmoid()
+
+    def forward(self, x):  # x: (B,L,C)
+        s = x.mean(dim=1)  # (B,C)
+        a = self.gate(self.fc2(self.act(self.fc1(s))))  # (B,C)
+        return x * a.unsqueeze(1)
+#=============================================================
 
 
 class SwinTransformerBlock(nn.Module):
@@ -430,9 +446,25 @@ class SwinTransformerBlock(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, dim, num_heads, window_size=(7, 7, 7), shift_size=(0, 0, 0),
-                 mlp_ratio=4., qkv_bias=True, qk_scale=None, rpe=True, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, img_size=(160, 160, 160), dwin_size=3):
+    def __init__(self, dim, 
+                 num_heads, 
+                 window_size=(7, 7, 7), 
+                 shift_size=(0, 0, 0),
+                 mlp_ratio=4.,
+                 # ADDED (CTCF)
+                 use_se=False,
+                 se_reduction=8,
+                 # ===========
+                 qkv_bias=True, 
+                 qk_scale=None, 
+                 rpe=True, 
+                 drop=0., 
+                 attn_drop=0., 
+                 drop_path=0.,
+                 act_layer=nn.GELU, 
+                 norm_layer=nn.LayerNorm, 
+                 img_size=(160, 160, 160), 
+                 dwin_size=3):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -480,6 +512,13 @@ class SwinTransformerBlock(nn.Module):
         self.H = None
         self.W = None
         self.T = None
+
+        # ADDED (CTCF)
+        self.use_se = use_se
+        if self.use_se:
+            self.se_m = SEToken(dim, se_reduction)
+            self.se_f = SEToken(dim, se_reduction)
+        # ============
 
     def forward(self, mov, fix, mask_matrix):
         H, W, T = self.H, self.W, self.T
@@ -601,6 +640,11 @@ class SwinTransformerBlock(nn.Module):
         fix_norm = self.f_norm2(fix)
         mov = mov + self.drop_path(self.m_mlp(mov_norm))#, fix_norm))
         fix = fix + self.drop_path(self.f_mlp(fix_norm))#, mov_norm))
+
+        # SE block
+        if self.use_se:
+            mov = self.se_m(mov)
+            fix = self.se_f(fix)
         return mov, fix
 
 
@@ -674,6 +718,10 @@ class BasicLayer(nn.Module):
                  num_heads,
                  window_size=(7, 7, 7),
                  mlp_ratio=4.,
+                 # ADDED (CTCF)
+                 use_se=False,
+                 se_reduction=8,
+                 # ===========
                  qkv_bias=True,
                  qk_scale=None,
                  rpe=True,
@@ -700,6 +748,10 @@ class BasicLayer(nn.Module):
                 window_size=window_size,
                 shift_size=(0, 0, 0) if (i % 2 == 0) else (window_size[0] // 2, window_size[1] // 2, window_size[2] // 2),
                 mlp_ratio=mlp_ratio,
+                # ADDED (CTCF)
+                use_se=use_se,
+                se_reduction=se_reduction,
+                # ===========
                 qkv_bias=qkv_bias,
                 qk_scale=qk_scale,
                 rpe=rpe,
@@ -901,6 +953,10 @@ class SwinTransformer(nn.Module):
                  num_heads=[3, 6, 12, 24],
                  window_size=(7, 7, 7),
                  mlp_ratio=4.,
+                 # ADDED (CTCF)
+                 use_se=False,
+                 se_reduction=8,
+                 # ===========
                  qkv_bias=True,
                  qk_scale=None,
                  drop_rate=0.,
@@ -959,6 +1015,10 @@ class SwinTransformer(nn.Module):
                                 num_heads=num_heads[i_layer],
                                 window_size=window_size,
                                 mlp_ratio=mlp_ratio,
+                                # ADDED (CTCF)
+                                use_se=use_se,
+                                se_reduction=se_reduction,
+                                # ===========
                                 qkv_bias=qkv_bias,
                                 rpe=rpe,
                                 qk_scale=qk_scale,
@@ -1248,6 +1308,8 @@ class TransMorphCascadeAd1(nn.Module):
                                            num_heads=config.num_heads,
                                            window_size=config.window_size,
                                            mlp_ratio=config.mlp_ratio,
+                                           use_se=config.use_se,
+                                           se_reduction=config.se_reduction,
                                            qkv_bias=config.qkv_bias,
                                            drop_rate=config.drop_rate,
                                            drop_path_rate=config.drop_path_rate,
@@ -1335,6 +1397,8 @@ class TransMorphCascadeAd(nn.Module):
                                            num_heads=config.num_heads,
                                            window_size=config.window_size,
                                            mlp_ratio=config.mlp_ratio,
+                                           use_se=config.use_se,
+                                           se_reduction=config.se_reduction,
                                            qkv_bias=config.qkv_bias,
                                            drop_rate=config.drop_rate,
                                            drop_path_rate=config.drop_path_rate,
@@ -1420,6 +1484,8 @@ class TransMorphCascadeAdFullRes(nn.Module):
                                            num_heads=config.num_heads,
                                            window_size=config.window_size,
                                            mlp_ratio=config.mlp_ratio,
+                                           use_se=config.use_se,
+                                           se_reduction=config.se_reduction,
                                            qkv_bias=config.qkv_bias,
                                            drop_rate=config.drop_rate,
                                            drop_path_rate=config.drop_path_rate,

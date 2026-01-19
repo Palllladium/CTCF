@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from experiments.OASIS import datasets
 from models.CTCF.model import CONFIGS as CONFIGS_CTCF
 import models.CTCF.model as CTCF
+from models.CTCF.lambda_net import LambdaNet3D
 
 from utils import (
     AverageMeter,
@@ -26,6 +27,8 @@ from utils import (
     NCC_vxm,
     DiceLoss,
     Grad3d,
+    WeightedGrad3d,
+    Grad1ch3d,
     NumpyType,
     dice_val_VOI,
     register_model,
@@ -80,6 +83,12 @@ def parse_args():
     p.add_argument('--w_cyc', type=float, default=0.05)
     p.add_argument('--w_jac', type=float, default=0.01)
 
+    # LambdaNet settings
+    p.add_argument('--lambda_epochs', type=float, default=30)
+    p.add_argument('--lambda_prior', type=float, default=0.01)
+    p.add_argument('--lambda_smooth', type=float, default=0.001)
+    p.add_argument('--lambda_target', type=float, default=0.7)
+
     # model
     p.add_argument('--time_steps', type=int, default=12, help='Cascade steps (keep same as TM-DCA baseline unless testing)')
     p.add_argument('--unsup', action='store_true', help='Train without DSC loss (pure unsupervised).')
@@ -120,6 +129,11 @@ def main():
     W_cyc = args.w_cyc
     W_jac = args.w_jac
 
+    LAMBDA_WARMUP_EPOCHS = args.lambda_epochs
+    W_LAM_PRIOR = args.lambda_prior
+    W_LAM_SMOOTH = args.lambda_smooth
+    LAM_TARGET = args.lambda_target
+
     time_steps = args.time_steps
     unsup = args.unsup
 
@@ -145,7 +159,16 @@ def main():
 
     # ---------- optimizer + losses ----------
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0, amsgrad=True)
+    # ---- lambda-net for spatially-varying regularization ----
+    lambda_net = LambdaNet3D(base_ch=16, lambda_min=0.3, lambda_max=1.0).to(device)
+
+    optimizer = optim.AdamW(
+        list(model.parameters()) + list(lambda_net.parameters()),
+        lr=lr, weight_decay=0.0, amsgrad=True
+    )
+
+    criterion_reg_w = WeightedGrad3d(penalty='l2')   # weighted smoothness for flow
+    criterion_lam_s = Grad1ch3d(penalty='l2')        # smoothness for lambda map
 
     criterion_ncc = NCC_vxm()
     criterion_dsc = DiceLoss()
@@ -217,6 +240,21 @@ def main():
             autocast_ctx = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
 
             with autocast_ctx:
+                # -------- spatially-varying regularization (lambda(x)) --------
+
+                # lambda on half-res (same grid as x_half/y_half)
+                lambda_xy_h = lambda_net(x_half, y_half)   # (B,1,80,96,112)
+                lambda_yx_h = lambda_net(y_half, x_half)
+
+                # upsample lambda to FULL-res to match flow_xy/flow_yx
+                lambda_xy = F.interpolate(lambda_xy_h, scale_factor=2, mode='trilinear', align_corners=False)
+                lambda_yx = F.interpolate(lambda_yx_h, scale_factor=2, mode='trilinear', align_corners=False)
+
+                # warmup: don't let lambda influence too early (stability)
+                if epoch < LAMBDA_WARMUP_EPOCHS:
+                    lambda_xy = lambda_xy.detach()
+                    lambda_yx = lambda_yx.detach()
+
                 out_xy_h, flow_xy_h = model((x_half, y_half))
                 out_yx_h, flow_yx_h = model((y_half, x_half))
 
@@ -243,14 +281,35 @@ def main():
                 else:
                     L_dsc = torch.tensor(0.0, device=device, dtype=torch.float32)
 
-                L_reg = (criterion_reg(flow_xy) + criterion_reg(flow_yx)) * 0.5
+                # weighted smoothness on FULL-res flow (as baseline, but spatially weighted)
+                L_reg = 0.5 * (criterion_reg_w(flow_xy, lambda_xy) + criterion_reg_w(flow_yx, lambda_yx))
                 L_reg = L_reg * W_reg
+
+                # keep lambda from collapsing to lambda_min everywhere (mean prior, MSE)
+                lambda_prior = W_LAM_PRIOR * (
+                    (lambda_xy.mean() - LAM_TARGET) ** 2 +
+                    (lambda_yx.mean() - LAM_TARGET) ** 2
+                )
+
+                # avoid "noisy lambda mask" (smoothness on lambda itself)
+                lambda_smooth = W_LAM_SMOOTH * 0.5 * (
+                    criterion_lam_s(lambda_xy) + criterion_lam_s(lambda_yx)
+                )
+
                 L_icon = icon_loss(flow_xy, flow_yx) * W_icon
                 L_cyc = cycle_image_loss(model, x_half, y_half, out_xy_h, out_yx_h, flow_xy_h, flow_yx_h) * W_cyc
                 L_jac = (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * 0.5
                 L_jac = L_jac * W_jac
 
-                loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac
+                loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac + lambda_prior + lambda_smooth
+
+                if idx % 50 == 0:
+                    with torch.no_grad():
+                        lm = lambda_xy.mean().item()
+                        ls = lambda_xy.std().item()
+                        lmin = lambda_xy.min().item()
+                        lmax = lambda_xy.max().item()
+                    print(f"[lambda] mean={lm:.3f} std={ls:.3f} min={lmin:.3f} max={lmax:.3f}")
 
             if not torch.isfinite(loss):
                 raise RuntimeError(

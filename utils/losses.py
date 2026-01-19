@@ -265,6 +265,71 @@ class Grad3DiTV(torch.nn.Module):
         d = torch.mean(torch.sqrt(dx+dy+dz+1e-6))
         grad = d / 3.0
         return grad
+    
+
+class WeightedGrad3d(nn.Module):
+    """
+    Weighted smoothness: mean( w(x) * ||∇flow||^2 )
+    flow:   (B,3,D,H,W)
+    weight: (B,1,D,H,W) or (B,D,H,W)
+    """
+    def __init__(self, penalty='l2'):
+        super().__init__()
+        assert penalty in ['l1', 'l2']
+        self.penalty = penalty
+
+    def forward(self, flow, weight):
+        if weight.dim() == 4:
+            weight = weight.unsqueeze(1)  # (B,1,D,H,W)
+
+        dy = flow[:, :, 1:, :, :] - flow[:, :, :-1, :, :]
+        dx = flow[:, :, :, 1:, :] - flow[:, :, :, :-1, :]
+        dz = flow[:, :, :, :, 1:] - flow[:, :, :, :, :-1]
+
+        if self.penalty == 'l2':
+            dy = dy * dy
+            dx = dx * dx
+            dz = dz * dz
+        else:
+            dy = torch.abs(dy)
+            dx = torch.abs(dx)
+            dz = torch.abs(dz)
+
+        wy = weight[:, :, 1:, :, :]
+        wx = weight[:, :, :, 1:, :]
+        wz = weight[:, :, :, :, 1:]
+
+        return ((wy * dy).mean() + (wx * dx).mean() + (wz * dz).mean()) / 3.0    
+
+
+class Grad1ch3d(nn.Module):
+    """
+    Smoothness for 1-channel map (for lambda map).
+    x: (B,1,D,H,W) or (B,D,H,W)
+    """
+    def __init__(self, penalty='l2'):
+        super().__init__()
+        assert penalty in ['l1', 'l2']
+        self.penalty = penalty
+
+    def forward(self, x):
+        if x.dim() == 4:
+            x = x.unsqueeze(1)
+
+        dy = x[:, :, 1:, :, :] - x[:, :, :-1, :, :]
+        dx = x[:, :, :, 1:, :] - x[:, :, :, :-1, :]
+        dz = x[:, :, :, :, 1:] - x[:, :, :, :, :-1]
+
+        if self.penalty == 'l2':
+            dy = dy * dy
+            dx = dx * dx
+            dz = dz * dz
+        else:
+            dy = torch.abs(dy)
+            dx = torch.abs(dx)
+            dz = torch.abs(dz)
+
+        return (dy.mean() + dx.mean() + dz.mean()) / 3.0
 
 
 class DisplacementRegularizer(torch.nn.Module):

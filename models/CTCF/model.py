@@ -39,6 +39,8 @@ class CTCF_DCA_SR(nn.Module):
             num_heads=config.num_heads,
             window_size=config.window_size,
             mlp_ratio=config.mlp_ratio,
+            use_se=config.use_se,
+            se_reduction=config.se_reduction,
             qkv_bias=config.qkv_bias,
             drop_rate=config.drop_rate,
             drop_path_rate=config.drop_path_rate,

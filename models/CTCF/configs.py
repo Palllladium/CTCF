@@ -13,6 +13,10 @@ def get_CTCF_config():
     config.num_heads = (8, 8, 8)
     config.window_size = (5, 6, 7)
     config.mlp_ratio = 4
+    # SE block
+    config.use_se = True
+    config.se_reduction = 8
+    # =======
     config.pat_merg_rf = 4
     config.qkv_bias = False
     config.drop_rate = 0.0
