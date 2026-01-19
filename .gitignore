@@ -11,3 +11,7 @@ results/
 
 # OS / IDE junk
 .vscode/
+
+# misc
+docs/
+.\parse.py
