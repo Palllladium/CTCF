@@ -70,7 +70,7 @@ def validate_oasis(
         def_grid = None
         if mk_grid_img_fn is not None:
             grid_img = mk_grid_img_fn(flow, grid_step=grid_step, line_thickness=line_thickness)
-            def_grid = reg_bilin([grid_img.float(), flow.float()])
+            def_grid = reg_bilin((grid_img.float(), flow.float()))
 
         last_vis = {
             "x_seg": x_seg,
