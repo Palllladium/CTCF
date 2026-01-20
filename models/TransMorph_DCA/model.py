@@ -19,10 +19,8 @@ from timm.layers import DropPath, trunc_normal_, to_3tuple
 from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
 import numpy as np
-import einops
-
 import models.TransMorph_DCA.configs as configs
-
+import einops
 
 class LayerNormProxy(nn.Module):
 
@@ -34,7 +32,6 @@ class LayerNormProxy(nn.Module):
         x = einops.rearrange(x, 'b c h w d -> b h w d c')
         x = self.norm(x)
         return einops.rearrange(x, 'b h w d c -> b c h w d')
-
 
 class Offset_block0(nn.Module):
     def __init__(self, in_channels, num_heads, kernel_size=3):
@@ -54,7 +51,6 @@ class Offset_block0(nn.Module):
         dz = self.offsetz(x).unsqueeze(2)
         x = torch.cat((dx, dy, dz), dim=2)
         return x
-
 
 class Offset_block(nn.Module):
     def __init__(self, in_channels, num_heads, kernel_size=3):
@@ -83,7 +79,6 @@ class Offset_block(nn.Module):
         x = self.conv3d_3(x)
         return x
 
-
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -101,7 +96,6 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
-
 
 class XMlp(nn.Module):
     def __init__(self, in_size, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, reduction=4, drop=0.):
@@ -163,7 +157,6 @@ def window_partition(x, window_size):
     windows = x.permute(0, 1, 3, 5, 2, 4, 6, 7).contiguous().view(-1, window_size[0], window_size[1], window_size[2], C)
     return windows
 
-
 def deform_window_partition(x, window_size):
     """
     Args:
@@ -177,7 +170,6 @@ def deform_window_partition(x, window_size):
 
     windows = x.permute(0, 1, 2, 4, 6, 3, 5, 7, 8).contiguous().view(B, Head, -1, window_size[0], window_size[1], window_size[2], C)
     return windows
-
 
 def window_reverse(windows, window_size, H, W, L):
     """
@@ -194,7 +186,6 @@ def window_reverse(windows, window_size, H, W, L):
     x = windows.view(B, H // window_size[0], W // window_size[1], L // window_size[2], window_size[0], window_size[1], window_size[2], -1)
     x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous().view(B, H, W, L, -1)#
     return x
-
 
 class WindowAttentionReverse(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
@@ -226,7 +217,7 @@ class WindowAttentionReverse(nn.Module):
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
         coords_t = torch.arange(self.window_size[2])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w, coords_t], indexing='ij'))  # 3, Wh, Ww, Wt
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w, coords_t], indexing="ij"))  # 3, Wh, Ww, Wt
         coords_flatten = torch.flatten(coords, 1)  # 3, Wh*Ww*Wt
         self.rpe = rpe
         if self.rpe:
@@ -304,7 +295,6 @@ class WindowAttentionReverse(nn.Module):
 
         return mov, fix
 
-
 class WindowAttention(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
@@ -335,7 +325,7 @@ class WindowAttention(nn.Module):
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
         coords_t = torch.arange(self.window_size[2])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w, coords_t], indexing='ij'))  # 3, Wh, Ww, Wt
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w, coords_t], indexing="ij"))  # 3, Wh, Ww, Wt
         coords_flatten = torch.flatten(coords, 1)  # 3, Wh*Ww*Wt
         self.rpe = rpe
         if self.rpe:
@@ -411,23 +401,6 @@ class WindowAttention(nn.Module):
         fix = self.proj_drop(fix)
 
         return mov, fix
-    
-#========================ADDED TO CTCF========================
-class SEToken(nn.Module):
-    def __init__(self, dim, reduction=8):
-        super().__init__()
-        hidden = max(dim // reduction, 4)
-        self.fc1 = nn.Linear(dim, hidden)
-        self.act = nn.GELU()
-        self.fc2 = nn.Linear(hidden, dim)
-        self.gate = nn.Sigmoid()
-
-    def forward(self, x):  # x: (B,L,C)
-        s = x.mean(dim=1)  # (B,C)
-        a = self.gate(self.fc2(self.act(self.fc1(s))))  # (B,C)
-        return x * a.unsqueeze(1)
-#=============================================================
-
 
 class SwinTransformerBlock(nn.Module):
     r""" Swin Transformer Block.
@@ -446,25 +419,9 @@ class SwinTransformerBlock(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, dim, 
-                 num_heads, 
-                 window_size=(7, 7, 7), 
-                 shift_size=(0, 0, 0),
-                 mlp_ratio=4.,
-                 # ADDED (CTCF)
-                 use_se=False,
-                 se_reduction=8,
-                 # ===========
-                 qkv_bias=True, 
-                 qk_scale=None, 
-                 rpe=True, 
-                 drop=0., 
-                 attn_drop=0., 
-                 drop_path=0.,
-                 act_layer=nn.GELU, 
-                 norm_layer=nn.LayerNorm, 
-                 img_size=(160, 160, 160), 
-                 dwin_size=3):
+    def __init__(self, dim, num_heads, window_size=(7, 7, 7), shift_size=(0, 0, 0),
+                 mlp_ratio=4., qkv_bias=True, qk_scale=None, rpe=True, drop=0., attn_drop=0., drop_path=0.,
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, img_size=(160, 160, 160), dwin_size=3):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -488,10 +445,12 @@ class SwinTransformerBlock(nn.Module):
 
         vectors = [torch.arange(0, s) for s in img_size]
 
-        grids = torch.meshgrid(vectors, indexing='ij')
+        grids = torch.meshgrid(vectors, indexing="ij")
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
+        #for i in range(len(img_size)):
+        #    grid[:, i, ...] = 2 * (grid[:, i, ...] / (img_size[i] - 1) - 0.5)
         sample_grid1 = grid.cuda()
         sample_grid1.requires_grad = False
         sample_grid1 = sample_grid1.permute(0, 2, 3, 4, 1)
@@ -513,12 +472,6 @@ class SwinTransformerBlock(nn.Module):
         self.W = None
         self.T = None
 
-        # ADDED (CTCF)
-        self.use_se = use_se
-        if self.use_se:
-            self.se_m = SEToken(dim, se_reduction)
-            self.se_f = SEToken(dim, se_reduction)
-        # ============
 
     def forward(self, mov, fix, mask_matrix):
         H, W, T = self.H, self.W, self.T
@@ -640,13 +593,7 @@ class SwinTransformerBlock(nn.Module):
         fix_norm = self.f_norm2(fix)
         mov = mov + self.drop_path(self.m_mlp(mov_norm))#, fix_norm))
         fix = fix + self.drop_path(self.f_mlp(fix_norm))#, mov_norm))
-
-        # SE block
-        if self.use_se:
-            mov = self.se_m(mov)
-            fix = self.se_f(fix)
         return mov, fix
-
 
 class PatchMerging(nn.Module):
     r""" Patch Merging Layer.
@@ -693,7 +640,6 @@ class PatchMerging(nn.Module):
 
         return x
 
-
 class BasicLayer(nn.Module):
     """ A basic Swin Transformer layer for one stage.
     Args:
@@ -718,10 +664,6 @@ class BasicLayer(nn.Module):
                  num_heads,
                  window_size=(7, 7, 7),
                  mlp_ratio=4.,
-                 # ADDED (CTCF)
-                 use_se=False,
-                 se_reduction=8,
-                 # ===========
                  qkv_bias=True,
                  qk_scale=None,
                  rpe=True,
@@ -748,10 +690,6 @@ class BasicLayer(nn.Module):
                 window_size=window_size,
                 shift_size=(0, 0, 0) if (i % 2 == 0) else (window_size[0] // 2, window_size[1] // 2, window_size[2] // 2),
                 mlp_ratio=mlp_ratio,
-                # ADDED (CTCF)
-                use_se=use_se,
-                se_reduction=se_reduction,
-                # ===========
                 qkv_bias=qkv_bias,
                 qk_scale=qk_scale,
                 rpe=rpe,
@@ -818,7 +756,6 @@ class BasicLayer(nn.Module):
         else:
             return (mov, fix), H, W, T, (mov, fix), H, W, T
 
-
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     Args:
@@ -862,7 +799,6 @@ class PatchEmbed(nn.Module):
 
         return x
 
-
 class SinusoidalPositionEmbedding(nn.Module):
     '''
     Rotary Position Embedding
@@ -879,7 +815,6 @@ class SinusoidalPositionEmbedding(nn.Module):
         embeddings = torch.stack([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
         embeddings = torch.reshape(embeddings, (1, n_patches, hidden))
         return embeddings
-
 
 class SinPositionalEncoding3D(nn.Module):
     def __init__(self, channels):
@@ -919,7 +854,6 @@ class SinPositionalEncoding3D(nn.Module):
         emb = emb[None,:,:,:,:orig_ch].repeat(batch_size, 1, 1, 1, 1)
         return emb.permute(0, 4, 1, 2, 3)
 
-
 class SwinTransformer(nn.Module):
     r""" Swin Transformer
         A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
@@ -953,10 +887,6 @@ class SwinTransformer(nn.Module):
                  num_heads=[3, 6, 12, 24],
                  window_size=(7, 7, 7),
                  mlp_ratio=4.,
-                 # ADDED (CTCF)
-                 use_se=False,
-                 se_reduction=8,
-                 # ===========
                  qkv_bias=True,
                  qk_scale=None,
                  drop_rate=0.,
@@ -1015,10 +945,6 @@ class SwinTransformer(nn.Module):
                                 num_heads=num_heads[i_layer],
                                 window_size=window_size,
                                 mlp_ratio=mlp_ratio,
-                                # ADDED (CTCF)
-                                use_se=use_se,
-                                se_reduction=se_reduction,
-                                # ===========
                                 qkv_bias=qkv_bias,
                                 rpe=rpe,
                                 qk_scale=qk_scale,
@@ -1130,7 +1056,6 @@ class SwinTransformer(nn.Module):
         super(SwinTransformer, self).train(mode)
         self._freeze_stages()
 
-
 class Conv3dReLU(nn.Sequential):
     def __init__(
             self,
@@ -1191,7 +1116,6 @@ class DecoderBlock(nn.Module):
         x = self.conv2(x)
         return x
 
-
 class RegistrationHead(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3, upsampling=1):
         conv3d = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)
@@ -1213,7 +1137,7 @@ class SpatialTransformer(nn.Module):
 
         # create sampling grid
         vectors = [torch.arange(0, s) for s in size]
-        grids = torch.meshgrid(vectors, indexing='ij')
+        grids = torch.meshgrid(vectors, indexing="ij")
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
@@ -1245,12 +1169,10 @@ class SpatialTransformer(nn.Module):
 
         return nnf.grid_sample(src, new_locs, align_corners=False, mode=self.mode)
 
-
 class ConstrainedConv3d(nn.Conv3d):
     def forward(self, input):
         weight = self.weight/torch.sum(self.weight, dim=(2, 3, 4), keepdim=True)
         return nnf.conv3d(input, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-
 
 class NCC_volume(torch.nn.Module):
     """
@@ -1288,7 +1210,6 @@ class NCC_volume(torch.nn.Module):
         cc = 1-torch.sigmoid(cc)
         return cc
         
-
 class TransMorphCascadeAd1(nn.Module):
     def __init__(self, config, time_steps=4):
         '''
@@ -1308,8 +1229,6 @@ class TransMorphCascadeAd1(nn.Module):
                                            num_heads=config.num_heads,
                                            window_size=config.window_size,
                                            mlp_ratio=config.mlp_ratio,
-                                           use_se=config.use_se,
-                                           se_reduction=config.se_reduction,
                                            qkv_bias=config.qkv_bias,
                                            drop_rate=config.drop_rate,
                                            drop_path_rate=config.drop_path_rate,
@@ -1322,9 +1241,12 @@ class TransMorphCascadeAd1(nn.Module):
                                            pat_merg_rf=config.pat_merg_rf,
                                            img_size=config.img_size,
                                            dwin_size=config.dwin_kernel_size)
-        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0, use_batchnorm=False)
-        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
-        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
+        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0,
+                                use_batchnorm=False)
+        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0,
+                                use_batchnorm=False)  # 384, 20, 20, 64
+        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0,
+                                use_batchnorm=False)  # 384, 20, 20, 64
         self.c1 = Conv3dReLU(2, embed_dim//2, 3, 1, use_batchnorm=False)
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
@@ -1376,7 +1298,6 @@ class TransMorphCascadeAd1(nn.Module):
         flow = flow_new
         return flow
 
-
 class TransMorphCascadeAd(nn.Module):
     def __init__(self, config, time_steps=7):
         '''
@@ -1397,8 +1318,6 @@ class TransMorphCascadeAd(nn.Module):
                                            num_heads=config.num_heads,
                                            window_size=config.window_size,
                                            mlp_ratio=config.mlp_ratio,
-                                           use_se=config.use_se,
-                                           se_reduction=config.se_reduction,
                                            qkv_bias=config.qkv_bias,
                                            drop_rate=config.drop_rate,
                                            drop_path_rate=config.drop_path_rate,
@@ -1411,9 +1330,12 @@ class TransMorphCascadeAd(nn.Module):
                                            pat_merg_rf=config.pat_merg_rf,
                                            img_size=config.img_size,
                                            dwin_size=config.dwin_kernel_size)
-        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0, use_batchnorm=False)
-        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
-        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
+        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0,
+                                use_batchnorm=False)
+        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0,
+                                use_batchnorm=False)  # 384, 20, 20, 64
+        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0,
+                                use_batchnorm=False)  # 384, 20, 20, 64
         self.c1 = Conv3dReLU(2, embed_dim//2, 3, 1, use_batchnorm=False)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
         self.reg_heads = nn.ModuleList()
@@ -1464,7 +1386,6 @@ class TransMorphCascadeAd(nn.Module):
 
         return flow
 
-
 class TransMorphCascadeAdFullRes(nn.Module):
     def __init__(self, config, time_steps=4):
         '''
@@ -1484,8 +1405,6 @@ class TransMorphCascadeAdFullRes(nn.Module):
                                            num_heads=config.num_heads,
                                            window_size=config.window_size,
                                            mlp_ratio=config.mlp_ratio,
-                                           use_se=config.use_se,
-                                           se_reduction=config.se_reduction,
                                            qkv_bias=config.qkv_bias,
                                            drop_rate=config.drop_rate,
                                            drop_path_rate=config.drop_path_rate,
@@ -1497,8 +1416,10 @@ class TransMorphCascadeAdFullRes(nn.Module):
                                            out_indices=config.out_indices,
                                            pat_merg_rf=config.pat_merg_rf,
                                            img_size=config.img_size, )
-        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0, use_batchnorm=False)
-        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
+        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0,
+                                use_batchnorm=False)
+        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0,
+                                use_batchnorm=False)  # 384, 20, 20, 64
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.spatial_trans_down = SpatialTransformer((config.img_size[0]//2, config.img_size[1]//2, config.img_size[2]//2))
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
@@ -1544,8 +1465,6 @@ class TransMorphCascadeAdFullRes(nn.Module):
         flow = flow_new
         return  flow
 
-
 CONFIGS = {
     'TransMorph-3-LVL': configs.get_3DTransMorphDWin3Lvl_config(),
-    'TransMorph-3-LVL-Debug': configs.get_3DTransMorphDWin3Lvl_debug_config()
 }

@@ -57,7 +57,7 @@ def validate_oasis(
         flow = forward_flow_fn(x, y)  # [B,3,D,H,W]
 
         # warp seg (nearest)
-        def_seg = reg_nearest([x_seg.float(), flow.float()])
+        def_seg = reg_nearest((x_seg.float(), flow.float()))
         dsc = dice_fn(def_seg.long(), y_seg.long())
         dsc_meter.update(float(dsc), x.size(0))
 
@@ -69,7 +69,7 @@ def validate_oasis(
         # optional grid for visuals (only keep last batch)
         def_grid = None
         if mk_grid_img_fn is not None:
-            grid_img = mk_grid_img_fn(grid_step, line_thickness, vol_shape, device=device)
+            grid_img = mk_grid_img_fn(flow, grid_step=grid_step, line_thickness=line_thickness)
             def_grid = reg_bilin([grid_img.float(), flow.float()])
 
         last_vis = {

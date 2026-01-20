@@ -169,22 +169,30 @@ def comput_fig(img: torch.Tensor) -> plt.Figure:
     return fig
 
 
-def mk_grid_img(grid_step: int, line_thickness: int = 1, grid_sz=(160, 192, 224), device: Optional[torch.device] = None) -> torch.Tensor:
+def mk_grid_img(flow: torch.Tensor, grid_step: int = 8, line_thickness: int = 1) -> torch.Tensor:
     """
-    Binary 3D grid [1, 1, D, H, W] for deformation visualization.
-    grid_sz must match the image spatial shape.
+    Create binary 3D grid [B,1,D,H,W] that matches flow spatial shape.
+    flow: [B,3,D,H,W] or [B,D,H,W,3]
     """
-    d, h, w = grid_sz
-    grid_img = np.zeros((d, h, w), dtype=np.float32)
+    if flow.dim() == 5 and flow.shape[1] in (2, 3):
+        d, h, w = map(int, flow.shape[-3:])
+        device = flow.device
+    elif flow.dim() == 5 and flow.shape[-1] in (2, 3):
+        d, h, w = map(int, flow.shape[1:4])
+        device = flow.device
+    else:
+        raise ValueError(f"Unsupported flow shape: {tuple(flow.shape)}")
 
-    for j in range(0, h, grid_step):
-        jj = min(h - 1, j + line_thickness - 1)
-        grid_img[:, jj, :] = 1.0
-    for i in range(0, w, grid_step):
-        ii = min(w - 1, i + line_thickness - 1)
-        grid_img[:, :, ii] = 1.0
+    grid_img = torch.zeros((1, 1, d, h, w), dtype=torch.float32, device=device)
 
-    out = torch.from_numpy(grid_img[None, None, ...])
-    if device is not None:
-        out = out.to(device, non_blocking=True)
-    return out
+    # линии по H
+    for j in range(0, h, int(grid_step)):
+        jj = min(h - 1, j + int(line_thickness) - 1)
+        grid_img[:, :, :, jj, :] = 1.0
+
+    # линии по W
+    for i in range(0, w, int(grid_step)):
+        ii = min(w - 1, i + int(line_thickness) - 1)
+        grid_img[:, :, :, :, ii] = 1.0
+
+    return grid_img

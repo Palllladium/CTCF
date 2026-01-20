@@ -2,17 +2,12 @@ from torch.utils.tensorboard import SummaryWriter
 import os, glob, argparse, time
 import numpy as np
 import torch
-import contextlib
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torch import optim
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
 from experiments.OASIS import datasets
-from models.CTCF.model import CONFIGS as CONFIGS_CTCF
-import models.CTCF.model as CTCF
-from models.CTCF.lambda_net import LambdaNet3D
+from models.CTCF.model import CTCF_CascadeA, CONFIGS as CONFIGS_CTCF
 
 from utils import (
     AverageMeter,
@@ -23,50 +18,43 @@ from utils import (
     load_checkpoint_if_exists,
     perf_epoch_start,
     perf_epoch_end,
+    dice_val_VOI,
     adjust_learning_rate_poly,
     NCC_vxm,
     DiceLoss,
     Grad3d,
-    WeightedGrad3d,
-    Grad1ch3d,
     NumpyType,
-    dice_val_VOI,
     register_model,
     mk_grid_img,
     comput_fig,
     validate_oasis,
     icon_loss,
-    cycle_image_loss,
     neg_jacobian_penalty,
 )
 
 
-# -------------------- Validation adapter --------------------
+# -------------------- Validation adapter -------------------- #
 
 @torch.no_grad()
-def forward_flow_ctcf(model, x, y):
-    x_half = F.avg_pool3d(x, 2)
-    y_half = F.avg_pool3d(y, 2)
+def forward_flow_ctcf(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    model: torch.nn.Module
+) -> torch.Tensor:
     use_amp = torch.cuda.is_available()
     with torch.amp.autocast("cuda", enabled=use_amp):
-        out_h, flow_h = model((x_half, y_half))
+        _, flow_full = model(x, y)
+    return flow_full
 
-    flow = F.interpolate(
-        flow_h.float(),
-        scale_factor=2,
-        mode='trilinear',
-        align_corners=False
-    ) * 2.0
-    
-    return flow
 
-# ---------------------- CLI ----------------------
+# ---------------------- CLI ---------------------- #
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--train_dir', required=True, help='Path to OASIS training .pkl files (e.g. .../All)')
-    p.add_argument('--val_dir', required=True, help='Path to OASIS validation/test .pkl files (e.g. .../Test)')
-    p.add_argument('--exp', default='CTCF_v1', help='Experiment name (results/<exp>/, logs/<exp>/)')
+    p.add_argument('--val_dir', required=True, help='Path to OASIS validation/test .pkl files (e.g. /Test)')
+    p.add_argument('--exp', default='CTCF_v2_CascadeA', help='Experiment name (results/<exp>/, logs/<exp>/)')
     p.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
     p.add_argument('--max_epoch', type=int, default=500, help='Number of training epochs')
     p.add_argument('--batch_size', type=int, default=1, help='Batch size (default: 1)')
@@ -83,14 +71,8 @@ def parse_args():
     p.add_argument('--w_cyc', type=float, default=0.05)
     p.add_argument('--w_jac', type=float, default=0.01)
 
-    # LambdaNet settings
-    p.add_argument('--lambda_epochs', type=float, default=30)
-    p.add_argument('--lambda_prior', type=float, default=0.01)
-    p.add_argument('--lambda_smooth', type=float, default=0.001)
-    p.add_argument('--lambda_target', type=float, default=0.7)
-
     # model
-    p.add_argument('--time_steps', type=int, default=12, help='Cascade steps (keep same as TM-DCA baseline unless testing)')
+    p.add_argument('--time_steps', type=int, default=2, help='Level-2 integration steps (CTCF core on half-res).')
     p.add_argument('--unsup', action='store_true', help='Train without DSC loss (pure unsupervised).')
 
     # perf/memory
@@ -99,12 +81,10 @@ def parse_args():
     return p.parse_args()
 
 
-# ---------------------- main ----------------------
+# ---------------------- main ---------------------- #
 
 def main():
     args = parse_args()
-
-    # ---------- device ----------
 
     dev = setup_device(args.gpu, seed=0, deterministic=False)
     device = dev.device
@@ -122,17 +102,12 @@ def main():
     max_epoch = args.max_epoch
     batch_size = args.batch_size
 
-    W_ncc = args.w_ncc
-    W_dsc = args.w_dsc
-    W_reg = args.w_reg
+    W_ncc  = args.w_ncc
+    W_dsc  = args.w_dsc
+    W_reg  = args.w_reg
     W_icon = args.w_icon
-    W_cyc = args.w_cyc
-    W_jac = args.w_jac
-
-    LAMBDA_WARMUP_EPOCHS = args.lambda_epochs
-    W_LAM_PRIOR = args.lambda_prior
-    W_LAM_SMOOTH = args.lambda_smooth
-    LAM_TARGET = args.lambda_target
+    W_cyc  = args.w_cyc
+    W_jac  = args.w_jac
 
     time_steps = args.time_steps
     unsup = args.unsup
@@ -147,28 +122,27 @@ def main():
 
     # ---------- model config ----------
 
-    config = CONFIGS_CTCF['CTCF-DCA-SR']
-    full_size = (160, 192, 224)  # (D,H,W)
-    model = CTCF.CTCF_DCA_SR(config, time_steps).to(device)
+    config = CONFIGS_CTCF['CTCF-CascadeA']
+    # config = CONFIGS_CTCF['CTCF-CascadeA-Debug']
+    config.time_steps = int(time_steps)
+
+    full_size = (160, 192, 224)
+    half_size = (80, 96, 112)
+
+    model = CTCF_CascadeA(config).to(device)
 
     # ---------- spatial transformers for visuals/seg warp ----------
-    # For seg warp in training/validation (nearest) and grid (bilinear)
 
-    reg_nearest = register_model(full_size, 'nearest').to(device)
-    reg_bilin   = register_model(full_size, 'bilinear').to(device)
+    reg_nearest_full = register_model(full_size, 'nearest').to(device)
+    reg_bilin_full   = register_model(full_size, 'bilinear').to(device)
+    reg_bilin_half   = register_model(half_size, 'bilinear').to(device)
 
     # ---------- optimizer + losses ----------
 
-    # ---- lambda-net for spatially-varying regularization ----
-    lambda_net = LambdaNet3D(base_ch=16, lambda_min=0.3, lambda_max=1.0).to(device)
-
     optimizer = optim.AdamW(
-        list(model.parameters()) + list(lambda_net.parameters()),
+        model.parameters(),
         lr=lr, weight_decay=0.0, amsgrad=True
     )
-
-    criterion_reg_w = WeightedGrad3d(penalty='l2')   # weighted smoothness for flow
-    criterion_lam_s = Grad1ch3d(penalty='l2')        # smoothness for lambda map
 
     criterion_ncc = NCC_vxm()
     criterion_dsc = DiceLoss()
@@ -183,7 +157,10 @@ def main():
     best_dsc = 0.0
     if args.cont:
         ckpt_path = os.path.join(paths.exp_dir, 'last.pth.tar')
-        ckpt = load_checkpoint_if_exists(ckpt_path, model, optimizer, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+        ckpt = load_checkpoint_if_exists(
+            ckpt_path, model, optimizer,
+            map_location='cuda' if torch.cuda.is_available() else 'cpu'
+        )
         if ckpt:
             epoch_start = ckpt.get('epoch', 0)
             best_dsc = ckpt.get('best_dsc', 0.0)
@@ -191,7 +168,7 @@ def main():
         else:
             print('No last.pth.tar found, starting from scratch.')
 
-    # ---------- datasets ----------
+    # ---------- dataset ----------
 
     train_tf = transforms.Compose([NumpyType((np.float32, np.int16))])
     val_tf   = transforms.Compose([NumpyType((np.float32, np.int16))])
@@ -199,12 +176,20 @@ def main():
     train_set = datasets.OASISBrainDataset(glob.glob(train_dir + '*.pkl'), transforms=train_tf)
     val_set   = datasets.OASISBrainInferDataset(glob.glob(val_dir + '*.pkl'), transforms=val_tf)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    val_loader   = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    train_loader = DataLoader(
+        train_set, batch_size=batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=1, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True, drop_last=True
+    )
 
     print(f'>>> #train={len(train_loader.dataset)}, #val={len(val_loader.dataset)}')
 
-    # -------------------- training loop --------------------
+    # -------------------- training loop -------------------- #
+
+    last_vis = {}
 
     for epoch in range(epoch_start, max_epoch):
         print(f'Training Starts (epoch {epoch})')
@@ -213,6 +198,13 @@ def main():
         cur_lr = adjust_learning_rate_poly(optimizer, epoch, max_epoch, lr)
 
         loss_all = AverageMeter()
+        loss_ncc_m = AverageMeter()
+        loss_dsc_m = AverageMeter()
+        loss_reg_m = AverageMeter()
+        loss_icon_m = AverageMeter()
+        loss_cyc_m = AverageMeter()
+        loss_jac_m = AverageMeter()
+
         idx = 0
         iter_time_sum = 0.0
 
@@ -222,101 +214,46 @@ def main():
             iter_t0 = time.perf_counter()
 
             batch = [t.to(device, non_blocking=True) for t in batch]
-            x, y, x_seg_idx, y_seg_idx = batch  # x: moving, y: fixed ; seg are label indices [B,1,D,H,W]
-
-            with torch.no_grad():
-                x_half = F.avg_pool3d(x, 2)
-                y_half = F.avg_pool3d(y, 2)
-
-                if not unsup:
-                    x_seg_oh = F.one_hot(x_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
-                    y_seg_oh = F.one_hot(y_seg_idx.long(), 36).float().squeeze(1).permute(0, 4, 1, 2, 3)
-                else:
-                    x_seg_oh, y_seg_oh = None, None
-
-            # ---------------- bidirectional step (x->y and y->x) ----------------
+            x, y, x_seg_idx, y_seg_idx = batch  # x: moving, y: fixed ; seg idx: [B,1,D,H,W]
 
             optimizer.zero_grad(set_to_none=True)
-            autocast_ctx = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
 
-            with autocast_ctx:
-                # -------- spatially-varying regularization (lambda(x)) --------
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                def_xy, flow_xy, aux_xy = model(x, y, return_all=True)
+                def_yx, flow_yx, aux_yx = model(y, x, return_all=True)
 
-                # lambda on half-res (same grid as x_half/y_half)
-                lambda_xy_h = lambda_net(x_half, y_half)   # (B,1,80,96,112)
-                lambda_yx_h = lambda_net(y_half, x_half)
+                x_half = aux_xy["mov_half"]
+                y_half = aux_xy["fix_half"]
 
-                # upsample lambda to FULL-res to match flow_xy/flow_yx
-                lambda_xy = F.interpolate(lambda_xy_h, scale_factor=2, mode='trilinear', align_corners=False)
-                lambda_yx = F.interpolate(lambda_yx_h, scale_factor=2, mode='trilinear', align_corners=False)
+                out_xy_h = aux_xy["mov_w_half_final"]
+                out_yx_h = aux_yx["mov_w_half_final"]
+                flow_xy_h = aux_xy["flow_half_final"]
+                flow_yx_h = aux_yx["flow_half_final"]
 
-                # warmup: don't let lambda influence too early (stability)
-                if epoch < LAMBDA_WARMUP_EPOCHS:
-                    lambda_xy = lambda_xy.detach()
-                    lambda_yx = lambda_yx.detach()
+                L_ncc = 0.5 * (criterion_ncc(out_xy_h, y_half) + criterion_ncc(out_yx_h, x_half))
+                L_ncc = L_ncc * W_ncc
 
-                out_xy_h, flow_xy_h = model((x_half, y_half))
-                out_yx_h, flow_yx_h = model((y_half, x_half))
-
-                out_xy = F.interpolate(out_xy_h, scale_factor=2, mode='trilinear', align_corners=False)
-                out_yx = F.interpolate(out_yx_h, scale_factor=2, mode='trilinear', align_corners=False)
-                flow_xy = F.interpolate(flow_xy_h, scale_factor=2, mode='trilinear', align_corners=False) * 2.0
-                flow_yx = F.interpolate(flow_yx_h, scale_factor=2, mode='trilinear', align_corners=False) * 2.0
-
-                # NCC in float32 for stability
-                with torch.amp.autocast('cuda', enabled=False):
-                    L_ncc = (criterion_ncc(out_xy.float(), y.float()) + criterion_ncc(out_yx.float(), x.float())) * 0.5
-                    L_ncc = L_ncc * W_ncc
-
-                # DSC (optional)
-                if not unsup:
-                    if hasattr(model, 'spatial_trans_full'):
-                        def_xseg = model.spatial_trans_full(x_seg_oh, flow_xy)
-                        def_yseg = model.spatial_trans_full(y_seg_oh, flow_yx)
-                    else:
-                        def_xseg = reg_bilin([x_seg_oh, flow_xy])
-                        def_yseg = reg_bilin([y_seg_oh, flow_yx])
-                    L_dsc = (criterion_dsc(def_xseg, y_seg_oh) + criterion_dsc(def_yseg, x_seg_oh)) * 0.5
-                    L_dsc = L_dsc * W_dsc
-                else:
+                if unsup:
                     L_dsc = torch.tensor(0.0, device=device, dtype=torch.float32)
+                else:
+                    x_seg_w = reg_nearest_full((x_seg_idx.float(), flow_xy))
+                    y_seg_w = reg_nearest_full((y_seg_idx.float(), flow_yx))
+                    L_dsc = 0.5 * (criterion_dsc(x_seg_w, y_seg_idx) + criterion_dsc(y_seg_w, x_seg_idx))
+                    L_dsc = L_dsc * W_dsc
 
-                # weighted smoothness on FULL-res flow (as baseline, but spatially weighted)
-                L_reg = 0.5 * (criterion_reg_w(flow_xy, lambda_xy) + criterion_reg_w(flow_yx, lambda_yx))
+                L_reg = 0.5 * (criterion_reg(flow_xy) + criterion_reg(flow_yx))
                 L_reg = L_reg * W_reg
 
-                # keep lambda from collapsing to lambda_min everywhere (mean prior, MSE)
-                lambda_prior = W_LAM_PRIOR * (
-                    (lambda_xy.mean() - LAM_TARGET) ** 2 +
-                    (lambda_yx.mean() - LAM_TARGET) ** 2
-                )
-
-                # avoid "noisy lambda mask" (smoothness on lambda itself)
-                lambda_smooth = W_LAM_SMOOTH * 0.5 * (
-                    criterion_lam_s(lambda_xy) + criterion_lam_s(lambda_yx)
-                )
-
                 L_icon = icon_loss(flow_xy, flow_yx) * W_icon
-                L_cyc = cycle_image_loss(model, x_half, y_half, out_xy_h, out_yx_h, flow_xy_h, flow_yx_h) * W_cyc
-                L_jac = (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * 0.5
+
+                x_cycle = reg_bilin_half((out_xy_h, flow_yx_h))
+                y_cycle = reg_bilin_half((out_yx_h, flow_xy_h))
+                L_cyc = ((x_cycle - x_half).abs().mean() + (y_cycle - y_half).abs().mean()) * W_cyc
+
+                L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx))
                 L_jac = L_jac * W_jac
 
-                loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac + lambda_prior + lambda_smooth
-
-                if idx % 50 == 0:
-                    with torch.no_grad():
-                        lm = lambda_xy.mean().item()
-                        ls = lambda_xy.std().item()
-                        lmin = lambda_xy.min().item()
-                        lmax = lambda_xy.max().item()
-                    print(f"[lambda] mean={lm:.3f} std={ls:.3f} min={lmin:.3f} max={lmax:.3f}")
-
-            if not torch.isfinite(loss):
-                raise RuntimeError(
-                    f"[NON-FINITE LOSS] loss={loss.item()} "
-                    f"ncc={float(L_ncc):.4f} dsc={float(L_dsc):.4f} reg={float(L_reg):.4f} "
-                    f"icon={float(L_icon):.4f} cyc={float(L_cyc):.4f} jac={float(L_jac):.4f}"
-                )
+                loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac
 
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -326,96 +263,118 @@ def main():
                 loss.backward()
                 optimizer.step()
 
-            loss_all.update(loss.item(), x.numel())
+            loss_all.update(loss.item(), 1)
+            loss_ncc_m.update(float(L_ncc.detach().item()), 1)
+            loss_dsc_m.update(float(L_dsc.detach().item()), 1)
+            loss_reg_m.update(float(L_reg.detach().item()), 1)
+            loss_icon_m.update(float(L_icon.detach().item()), 1)
+            loss_cyc_m.update(float(L_cyc.detach().item()), 1)
+            loss_jac_m.update(float(L_jac.detach().item()), 1)
+
             iter_time_sum += (time.perf_counter() - iter_t0)
 
-            if idx % 10 == 0:
-                print(
-                    f"Iter {idx:4d}/{len(train_loader):4d} | "
-                    f"loss(avg)={loss_all.avg:.4f} | "
-                    f"NCC={L_ncc.detach().item():.4f} DSC={L_dsc.detach().item():.4f} REG={L_reg.detach().item():.4f} "
-                    f"ICON={L_icon.detach().item():.4f} CYC={L_cyc.detach().item():.4f} JAC={L_jac.detach().item():.4f} | "
-                    f"lr={cur_lr:.1e}"
-                )
+            if idx % 50 == 0:
+                with torch.no_grad():
+                    grid = mk_grid_img(flow_xy, grid_step=8, line_thickness=1)
 
-        writer.add_scalar('Loss/train_total', loss_all.avg, epoch)
-        writer.add_scalar('Loss/train_ncc', L_ncc.detach().item(), epoch)
-        writer.add_scalar('Loss/train_dsc', L_dsc.detach().item(), epoch)
-        writer.add_scalar('Loss/train_reg', L_reg.detach().item(), epoch)
-        writer.add_scalar('Loss/train_icon', L_icon.detach().item(), epoch)
-        writer.add_scalar('Loss/train_cyc', L_cyc.detach().item(), epoch)
-        writer.add_scalar('Loss/train_jac', L_jac.detach().item(), epoch)
+                    last_vis = {
+                        "def_out": def_xy.detach().float().cpu(),
+                        "def_grid": grid.detach().float().cpu(),
+                        "x": x.detach().float().cpu(),
+                        "y": y.detach().float().cpu(),
+                    }
 
-        print(f'Epoch {epoch} loss {loss_all.avg:.4f}')
-
-        # ---------------- Performance ----------------
+        # ---------- epoch end logs ----------
 
         perf = perf_epoch_end(t0, iters=idx, iter_time_sum=iter_time_sum)
+
+        writer.add_scalar("train/loss", loss_all.avg, epoch)
+        writer.add_scalar("train/loss_ncc", loss_ncc_m.avg, epoch)
+        writer.add_scalar("train/loss_dsc", loss_dsc_m.avg, epoch)
+        writer.add_scalar("train/loss_reg", loss_reg_m.avg, epoch)
+        writer.add_scalar("train/loss_icon", loss_icon_m.avg, epoch)
+        writer.add_scalar("train/loss_cyc", loss_cyc_m.avg, epoch)
+        writer.add_scalar("train/loss_jac", loss_jac_m.avg, epoch)
+        writer.add_scalar("train/lr", cur_lr, epoch)
+        
+        writer.add_scalar("train/iter_time_ms", perf.mean_iter_time_ms, epoch)
+        writer.add_scalar("train/epoch_time_sec", perf.epoch_time_sec, epoch)
         if perf.peak_gpu_mem_gib is not None:
-            print(f"[PERF] Epoch {epoch}: time={perf.epoch_time_sec:.1f}s, iter={perf.mean_iter_time_ms:.1f} ms/iter, peak={perf.peak_gpu_mem_gib:.2f} GiB")
-            writer.add_scalar('perf/epoch_time_sec', perf.epoch_time_sec, epoch)
-            writer.add_scalar('perf/iter_time_ms', perf.mean_iter_time_ms, epoch)
-            writer.add_scalar('perf/peak_gpu_mem_GB', perf.peak_gpu_mem_gib, epoch)
-        else:
-            print(f"[PERF] Epoch {epoch}: time={perf.epoch_time_sec:.1f}s, iter={perf.mean_iter_time_ms:.1f} ms/iter")
+            writer.add_scalar("train/peak_gpu_mem_gib", perf.peak_gpu_mem_gib, epoch)
 
-        # -------------------- Validation --------------------
+        peak_str = (
+            f"{perf.peak_gpu_mem_gib:.2f}GiB"
+            if perf.peak_gpu_mem_gib is not None else "NA"
+        )
 
-        # OOM on 32 GB config:
-        torch.cuda.empty_cache()
+        print(
+            f"[epoch {epoch}] "
+            f"loss={loss_all.avg:.4f} "
+            f"(ncc={loss_ncc_m.avg:.4f}, dsc={loss_dsc_m.avg:.4f}, "
+            f"reg={loss_reg_m.avg:.4f}, icon={loss_icon_m.avg:.4f}, "
+            f"cyc={loss_cyc_m.avg:.4f}, jac={loss_jac_m.avg:.4f}) "
+            f"lr={cur_lr:.2e} "
+            f"time={perf.epoch_time_sec:.1f}s "
+            f"iter={perf.mean_iter_time_ms:.1f}ms "
+            f"peak_mem={peak_str}"
+        )
+
+        # ---------- validation (OASIS Dice/VOI metrics) ----------
+
+        def forward_flow(x, y):
+            return forward_flow_ctcf(x, y, model=model)
+
+        model.eval()
 
         val = validate_oasis(
             model=model,
             val_loader=val_loader,
             device=device,
-            forward_flow_fn=lambda a, b: forward_flow_ctcf(model, a, b),
+            forward_flow_fn=forward_flow,
             dice_fn=dice_val_VOI,
             register_model_cls=register_model,
             mk_grid_img_fn=mk_grid_img,
+            grid_step=8,
+            line_thickness=1,
         )
 
-        print(f"val DSC: {val.dsc:.4f} | fold%: {val.fold_percent:.2f}")
-        writer.add_scalar('DSC/validate', val.dsc, epoch)
-        writer.add_scalar('Metric/validate_fold_percent', val.fold_percent, epoch)
+        print(f"[epoch {epoch}] val_dsc={val.dsc:.4f} fold%={val.fold_percent:.2f}")
 
-        # OOM on 32 GB config:
-        del flow_xy, flow_yx
-        torch.cuda.empty_cache()
-
-        # -------------------- Checkpoints (BEST + LAST) --------------------
+        # -------------------- Checkpoints (BEST + LAST) -------------------- #
 
         if val.dsc >= best_dsc:
             best_dsc = val.dsc
             save_checkpoint(
                 {
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'best_dsc': best_dsc,
-                    'optimizer': optimizer.state_dict(),
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "best_dsc": best_dsc,
+                    "optimizer": optimizer.state_dict(),
                 },
                 save_dir=paths.exp_dir,
-                filename='best.pth.tar'
+                filename="best.pth.tar",
             )
             print(f"Saved new BEST checkpoint (DSC={best_dsc:.4f})")
 
         save_checkpoint(
             {
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'best_dsc': best_dsc,
-                'optimizer': optimizer.state_dict(),
+                "epoch": epoch + 1,
+                "state_dict": model.state_dict(),
+                "best_dsc": best_dsc,
+                "optimizer": optimizer.state_dict(),
             },
             save_dir=paths.exp_dir,
-            filename='last.pth.tar'
+            filename="last.pth.tar",
         )
 
-        # -------------------- Visuals --------------------
-        
-        plt.switch_backend('agg')
-        def_out  = val.last_vis.get('def_seg', None)
-        def_grid = val.last_vis.get('def_grid', None)
-        x_vis    = val.last_vis.get('x_seg', None)
-        y_vis    = val.last_vis.get('y_seg', None)
+        # -------------------- Visuals -------------------- #
+
+        import matplotlib.pyplot as plt
+        plt.switch_backend("agg")
+        def_out = last_vis.get("def_out", None)
+        def_grid = last_vis.get("def_grid", None)
+        x_vis = last_vis.get("x", None)
+        y_vis = last_vis.get("y", None)
 
         if def_out is not None and def_grid is not None and x_vis is not None and y_vis is not None:
             pred_fig = comput_fig(def_out)
@@ -423,10 +382,10 @@ def main():
             x_fig = comput_fig(x_vis)
             tar_fig = comput_fig(y_vis)
 
-            writer.add_figure('Grid', grid_fig, epoch); plt.close(grid_fig)
-            writer.add_figure('input', x_fig, epoch); plt.close(x_fig)
-            writer.add_figure('ground truth', tar_fig, epoch); plt.close(tar_fig)
-            writer.add_figure('prediction', pred_fig, epoch); plt.close(pred_fig)
+            writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
+            writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
+            writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
+            writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
 
     writer.close()
 
