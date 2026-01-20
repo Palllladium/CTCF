@@ -109,7 +109,7 @@ def main():
     W_cyc  = args.w_cyc
     W_jac  = args.w_jac
 
-    time_steps = args.time_steps
+    time_steps = args.time_stepsgit
     unsup = args.unsup
 
     print(f'>>> Experiment: {args.exp}')
@@ -122,8 +122,8 @@ def main():
 
     # ---------- model config ----------
 
-    # config = CONFIGS_CTCF['CTCF-CascadeA']
-    config = CONFIGS_CTCF['CTCF-CascadeA-Debug']
+    config = CONFIGS_CTCF['CTCF-CascadeA']
+    # config = CONFIGS_CTCF['CTCF-CascadeA-Debug']
     config.time_steps = int(time_steps)
 
     full_size = (160, 192, 224)
