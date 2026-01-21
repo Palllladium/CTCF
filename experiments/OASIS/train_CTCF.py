@@ -109,7 +109,7 @@ def main():
     W_cyc  = args.w_cyc
     W_jac  = args.w_jac
 
-    time_steps = args.time_stepsgit
+    time_steps = args.time_steps
     unsup = args.unsup
 
     print(f'>>> Experiment: {args.exp}')
