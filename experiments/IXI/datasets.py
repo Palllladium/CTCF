@@ -1,7 +1,7 @@
 import os, glob
 import torch, sys
 from torch.utils.data import Dataset
-from .data_utils import pkload
+from utils import pkload
 import matplotlib.pyplot as plt
 
 import numpy as np
