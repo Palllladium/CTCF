@@ -29,7 +29,7 @@ def get_CTCF_config():
     c.use_checkpoint = False
     c.out_indices = (0, 1, 2)
     c.reg_head_chan = 16
-    c.time_steps = 4
+    c.time_steps = 2
     c.use_level1 = True
     c.level1_base_ch = 16
     c.use_level2 = True

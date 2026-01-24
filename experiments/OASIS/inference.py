@@ -296,7 +296,7 @@ def build_tm_dca(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3)) -> M
     return ModelBundle("tm-dca", model, forward_flow)
 
 
-def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config_key="CTCF-DCA-SR") -> ModelBundle:
+def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config_key="CTCF-CascadeA") -> ModelBundle:
     from models.CTCF.model import CONFIGS as CONFIGS_CTCF
     import models.CTCF.model as CTCF
 
@@ -313,20 +313,17 @@ def build_ctcf(time_steps: int, vol_size=(160, 192, 224), dwin=(7, 5, 3), config
     if hasattr(config, "window_size"):
         config.window_size = (D // 32, H // 32, W // 32)
 
-    if hasattr(CTCF, "CTCF_DCA_SR"):
-        model = CTCF.CTCF_DCA_SR(config, time_steps)
+    if hasattr(CTCF, "CTCF_CascadeA"):
+        model = CTCF.CTCF_CascadeA(config)
     else:
         raise AttributeError("models.CTCF.model does not expose CTCF_DCA_SR; check your model module.")
 
     @torch.no_grad()
     def forward_flow(model_, x, y):
-        x_half = F.avg_pool3d(x, 2)
-        y_half = F.avg_pool3d(y, 2)
         use_amp = torch.cuda.is_available()
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            out_h, flow_h = model_((x_half, y_half))
-        flow = F.interpolate(flow_h.float(), scale_factor=2, mode="trilinear", align_corners=False) * 2.0
-        return flow
+            _, flow_full = model_(x, y)
+        return flow_full
 
     return ModelBundle("ctcf", model, forward_flow)
 
@@ -542,7 +539,7 @@ def build_parser():
     pinf.add_argument("--vol_size", type=int, nargs=3, default=[160, 192, 224], help="Volume size D H W")
     pinf.add_argument("--dwin", type=int, nargs=3, default=[7, 5, 3], help="TM-DCA/CTCF dwin kernel size")
     pinf.add_argument("--utsr_config", type=str, default="UTSRMorph-Large", help="UTSRMorph config key")
-    pinf.add_argument("--ctcf_config", type=str, default="CTCF-DCA-SR", help="CTCF config key")
+    pinf.add_argument("--ctcf_config", type=str, default="CTCF-CascadeA", help="CTCF config key")
 
     return p
 
