@@ -172,13 +172,14 @@ def main():
         t0 = perf_epoch_start()
         cur_lr = adjust_learning_rate_poly(optimizer, epoch, max_epoch, lr)
 
+        model.train()
         loss_all = AverageMeter()
+
         idx = 0
         iter_time_sum = 0.0
 
         for batch in train_loader:
             idx += 1
-            model.train()
             iter_t0 = time.perf_counter()
             
             batch = [t.to(device, non_blocking=True) for t in batch]
@@ -357,6 +358,14 @@ def main():
             writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
             writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
             writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
+        else:
+            missing = []
+            if def_out is None:  missing.append("def_seg")
+            if def_grid is None: missing.append("def_grid")
+            if x_vis is None:    missing.append("x_seg")
+            if y_vis is None:    missing.append("y_seg")
+            if missing:
+                print(f"[vis] skip (missing: {', '.join(missing)})")
 
     writer.close()
 

@@ -34,7 +34,7 @@ from utils import (
     validate_oasis,
 )
 
-# ---------- Adapter for validate_oasis() ---------- #
+
 def forward_flow_tm_dca(model, x, y):
     """
     Exactly as in your OASIS TM-DCA trainer:
@@ -81,12 +81,12 @@ def parse_args():
     p.add_argument("--w_ncc", type=float, default=1.0)
     p.add_argument("--w_reg", type=float, default=1.0)
 
-    # image size (IXI default in original repo)
+    # image size 
     p.add_argument("--full_D", type=int, default=160)
     p.add_argument("--full_H", type=int, default=192)
     p.add_argument("--full_W", type=int, default=224)
 
-    # Dwin kernel params for config (как в оригинальном IXI тренере)
+    # Dwin kernel params for config
     p.add_argument("--dwin_z", type=int, default=7)
     p.add_argument("--dwin_y", type=int, default=5)
     p.add_argument("--dwin_x", type=int, default=3)
@@ -110,16 +110,14 @@ def main():
     full_size = (args.full_D, args.full_H, args.full_W)
     half_size = (args.full_D // 2, args.full_H // 2, args.full_W // 2)
 
-    # ---------- model ----------
     config = CONFIGS_TM["TransMorph-3-LVL"]
     config.img_size = half_size
     config.dwin_kernel_size = (args.dwin_z, args.dwin_y, args.dwin_x)
     config.window_size = (args.full_D // 32, args.full_H // 32, args.full_W // 32)
-
+   
     model = TransMorph.TransMorphCascadeAd(config, time_steps=12).to(device)
-
-    # ---------- optimizer + losses ----------
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0, amsgrad=True)
+    
     criterion_ncc = NCC_vxm()
     criterion_reg = Grad3d(penalty="l2")
 
@@ -136,7 +134,6 @@ def main():
             best_dsc = float(ckpt.get("best_dsc", 0.0))
             print(f"[resume] epoch_start={epoch_start} best_dsc={best_dsc:.4f}")
 
-    # ---------- datasets (exactly as original IXI trainer) ----------
     train_composed = transforms.Compose([
         trans_utils.RandomFlip(0),
         trans_utils.NumpyType((np.float32, np.float32)),
@@ -180,13 +177,12 @@ def main():
     print(f"    full_size={full_size} half_size={half_size}")
     print(f"    weights: NCC={args.w_ncc}, REG={args.w_reg}")
 
-    # ---------- training loop ----------
+    reg_bilin = register_model(full_size, mode="bilinear").to(device)
+
     for epoch in range(epoch_start, args.max_epoch):
         print(f"Training Starts (epoch {epoch})")
 
-        perf_epoch_start()
-
-        # lr schedule (poly)
+        t0 = perf_epoch_start()
         cur_lr = adjust_learning_rate_poly(optimizer, epoch, args.max_epoch, args.lr)
         writer.add_scalar("LR", cur_lr, epoch)
 
@@ -195,20 +191,20 @@ def main():
         loss_ncc_meter = AverageMeter()
         loss_reg_meter = AverageMeter()
 
+        idx = 0
+        iter_time_sum = 0.0
+
         for (x, y) in train_loader:
+            idx += 1
+            iter_t0 = time.perf_counter()
+
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-
-            # forward flow (half-res net, full-res flow)
             flow_full = forward_flow_tm_dca(model, x, y)
-
-            # warp moving (atlas) to fixed (subject) using existing register_model()
-            reg_bilin = register_model(full_size, mode="bilinear").to(device)
             x_warp = reg_bilin((x.float(), flow_full.float()))
 
-            # losses (float32 for stability)
             loss_ncc = criterion_ncc(y.float(), x_warp.float()) * args.w_ncc
             loss_reg = criterion_reg(flow_full.float()) * args.w_reg
             loss = loss_ncc + loss_reg
@@ -230,11 +226,31 @@ def main():
             loss_ncc_meter.update(loss_ncc.item(), y.numel())
             loss_reg_meter.update(loss_reg.item(), y.numel())
 
+            iter_time_sum += (time.perf_counter() - iter_t0)
+
+            if idx % 10 == 0:
+                print(
+                    f"Iter {idx:4d} / {len(train_loader):4d} | "
+                    f"loss(avg)={loss_all.avg:.4f} | "
+                    f"last NCC={loss_ncc.item():.4f} REG={loss_reg.item():.4f} | "
+                    f"lr={cur_lr:.1e}"
+                )
+
         writer.add_scalar("Loss/train", loss_all.avg, epoch)
         writer.add_scalar("Loss/train_ncc", loss_ncc_meter.avg, epoch)
         writer.add_scalar("Loss/train_reg", loss_reg_meter.avg, epoch)
 
-        # ---------- validate ----------
+        perf = perf_epoch_end(t0, iters=idx, iter_time_sum=iter_time_sum)
+        writer.add_scalar("perf/epoch_time_sec", perf.epoch_time_sec, epoch)
+        writer.add_scalar("perf/iter_time_ms", perf.mean_iter_time_ms, epoch)
+        if perf.peak_gpu_mem_gib is not None:
+            writer.add_scalar("perf/peak_gpu_mem_GB", perf.peak_gpu_mem_gib, epoch)
+
+        if perf.peak_gpu_mem_gib is not None:
+            print(f"[PERF] Epoch {epoch}: time={perf.epoch_time_sec:.1f}s, iter={perf.mean_iter_time_ms:.1f} ms/iter, peak={perf.peak_gpu_mem_gib:.2f} GiB")
+        else:
+            print(f"[PERF] Epoch {epoch}: time={perf.epoch_time_sec:.1f}s, iter={perf.mean_iter_time_ms:.1f} ms/iter")
+
         val_res = validate_oasis(
             model=model,
             val_loader=val_loader,
@@ -253,38 +269,25 @@ def main():
         writer.add_scalar("DSC/validate", dsc, epoch)
         writer.add_scalar("Metric/validate_fold_percent", fold_percent, epoch)
 
-        # visuals (reuse your comput_fig exactly)
-        if val_res.last_vis:
-            plt.switch_backend("agg")
-            def_grid = val_res.last_vis.get("def_grid", None)
-            x_seg = val_res.last_vis.get("x_seg", None)
-            y_seg = val_res.last_vis.get("y_seg", None)
-            def_seg = val_res.last_vis.get("def_seg", None)
+        last_vis = val_res.last_vis or {}
+        def_out  = last_vis.get("def_seg",  None)
+        def_grid = last_vis.get("def_grid", None)
+        x_vis    = last_vis.get("x_seg",    None)
+        y_vis    = last_vis.get("y_seg",    None)
 
-            if def_grid is not None:
-                fig = comput_fig(def_grid)
-                writer.add_figure("Grid", fig, epoch)
-                plt.close(fig)
-
-            if x_seg is not None:
-                fig = comput_fig(x_seg)
-                writer.add_figure("input", fig, epoch)
-                plt.close(fig)
-
-            if y_seg is not None:
-                fig = comput_fig(y_seg)
-                writer.add_figure("ground truth", fig, epoch)
-                plt.close(fig)
-
-            if def_seg is not None:
-                fig = comput_fig(def_seg)
-                writer.add_figure("prediction", fig, epoch)
-                plt.close(fig)
-
-        # checkpoints
-        is_best = dsc >= best_dsc
-        if is_best:
+        if dsc >= best_dsc:
             best_dsc = dsc
+            save_checkpoint(
+                {
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "best_dsc": best_dsc,
+                    "optimizer": optimizer.state_dict(),
+                },
+                save_dir=paths.exp_dir,
+                filename="best.pth.tar",
+            )
+            print(f"Saved new BEST checkpoint (DSC={best_dsc:.4f})")
 
         save_checkpoint(
             {
@@ -297,21 +300,30 @@ def main():
             filename="last.pth.tar",
         )
 
-        if is_best:
-            save_checkpoint(
-                {
-                    "epoch": epoch + 1,
-                    "state_dict": model.state_dict(),
-                    "best_dsc": best_dsc,
-                    "optimizer": optimizer.state_dict(),
-                },
-                save_dir=paths.exp_dir,
-                filename="best.pth.tar",
-            )
+        plt.switch_backend("agg")
+        if def_out is not None and def_grid is not None and x_vis is not None and y_vis is not None:
+            pred_fig = comput_fig(def_out)
+            grid_fig = comput_fig(def_grid)
+            x_fig    = comput_fig(x_vis)
+            tar_fig  = comput_fig(y_vis)
 
-        perf_epoch_end(writer=writer, epoch=epoch)
+            writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
+            writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
+            writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
+            writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
+        else:
+            missing = []
+            if def_out is None:  missing.append("def_seg")
+            if def_grid is None: missing.append("def_grid")
+            if x_vis is None:    missing.append("x_seg")
+            if y_vis is None:    missing.append("y_seg")
+            if missing:
+                print(f"[vis] skip (missing: {', '.join(missing)})")
 
-        print(f"[epoch {epoch}] train_loss={loss_all.avg:.4f} val_dsc={dsc:.4f} fold%={fold_percent:.2f} best={best_dsc:.4f}")
+        print(
+            f"[epoch {epoch}] train_loss={loss_all.avg:.4f} "
+            f"val_dsc={dsc:.4f} fold%={fold_percent:.2f} best={best_dsc:.4f}"
+        )
 
     writer.close()
 
