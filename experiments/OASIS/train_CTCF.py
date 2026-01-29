@@ -219,7 +219,11 @@ def main():
                 flow_xy_h = aux_xy["flow_half_final"]
                 flow_yx_h = aux_yx["flow_half_final"]
 
-                L_ncc = 0.5 * (criterion_ncc(out_xy_h, y_half) + criterion_ncc(out_yx_h, x_half))
+                with torch.autocast(device_type="cuda", enabled=False): 
+                    L_ncc = 0.5 * (
+                        criterion_ncc(out_xy_h.float(), y_half.float()) +
+                        criterion_ncc(out_yx_h.float(), x_half.float())
+                    )
                 L_ncc = L_ncc * args.w_ncc
 
                 # DSC supervised branch only if unsup=False
