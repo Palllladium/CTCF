@@ -261,27 +261,22 @@ def mk_grid_img(flow: torch.Tensor, grid_step: int = 8, line_thickness: int = 1)
 
 
 def ctcf_schedule(epoch: int, max_epoch: int):
-    """
-    Curriculum for cascade & extra losses.
-    Returns: alpha_l1, alpha_l3, warm_mult (0..1)
-    """
     max_epoch = max(1, int(max_epoch))
     e = int(epoch)
 
-    def _clamp01(x: float) -> float:
-        return 0.0 if x <= 0.0 else 1.0 if x >= 1.0 else float(x)
+    def clamp01(x): return 0.0 if x <= 0.0 else 1.0 if x >= 1.0 else float(x)
+    def ramp(p):
+        p = clamp01(p)
+        return p*p*(3.0 - 2.0*p)
 
-    def _ramp(p: float) -> float:
-        p = _clamp01(p)
-        return p * p * (3.0 - 2.0 * p)
+    # L1/L3: 5%..15%
+    e0 = max(1, int(0.05 * max_epoch))
+    e1 = max(e0 + 1, int(0.15 * max_epoch))
+    alpha = 0.0 if e < e0 else 1.0 if e >= e1 else ramp((e - e0) / float(e1 - e0))
 
-    # enable L1/L3 after 10%..20% epochs
-    e0 = max(1, int(0.10 * max_epoch))
-    e1 = max(e0 + 1, int(0.20 * max_epoch))
-    alpha = 0.0 if e < e0 else 1.0 if e >= e1 else _ramp((e - e0) / float(e1 - e0))
-
-    # warm-up for icon/cycle/jac until 20%
-    ew = max(1, int(0.20 * max_epoch))
-    warm = 1.0 if e >= ew else _ramp(e / float(ew))
+    # warm: 0 до 5%, рост 5%..20%
+    w0 = max(1, int(0.05 * max_epoch))
+    w1 = max(w0 + 1, int(0.20 * max_epoch))
+    warm = 0.0 if e < w0 else 1.0 if e >= w1 else ramp((e - w0) / float(w1 - w0))
 
     return float(alpha), float(alpha), float(warm)

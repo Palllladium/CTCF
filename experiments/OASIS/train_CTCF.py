@@ -233,7 +233,7 @@ def main():
                     L_dsc = 0.5 * (dice_val_VOI(x_seg_w, y_seg_idx) + dice_val_VOI(y_seg_w, x_seg_idx))
                     L_dsc = L_dsc * args.w_dsc
 
-                L_reg = 0.5 * (criterion_reg(flow_xy) + criterion_reg(flow_yx))
+                L_reg = 0.5 * (criterion_reg(flow_xy_h) + criterion_reg(flow_yx_h))
                 L_reg = L_reg * args.w_reg
 
                 L_icon = icon_loss(flow_xy, flow_yx) * W_icon
@@ -242,7 +242,7 @@ def main():
                 y_cycle = reg_bilin_half((out_yx_h, flow_xy_h))
                 L_cyc = ((x_cycle - x_half).abs().mean() + (y_cycle - y_half).abs().mean()) * W_cyc
 
-                L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx))
+                L_jac = 0.5 * (neg_jacobian_penalty(flow_xy_h) + neg_jacobian_penalty(flow_yx_h))
                 L_jac = L_jac * W_jac
 
                 loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac
