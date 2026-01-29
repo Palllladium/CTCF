@@ -155,6 +155,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
             f_out = self.cs[t](torch.cat((def_x, fix_half), dim=1))
             x_t = self.up3s[t](xx, f_out if self.if_convskip else None)
             flow_step = self.reg_heads[t](x_t)
+            flow_step = torch.tanh(flow_step) * 1.0     # stable
             flows.append(flow_step)
 
             flow_new = flow_prev + self.spatial_trans(flow_step, flow_prev)
@@ -215,7 +216,7 @@ class CTCF_CascadeA(nn.Module):
             fix_quarter = nn.functional.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=True)
             flow_quarter = self.level1(mov_quarter, fix_quarter)
             aux["flow_quarter"] = flow_quarter
-            flow_half_init = upsample_flow(flow_quarter, scale_factor=2.0) * float(alpha_l1)
+            flow_half_init = upsample_flow(flow_quarter, scale_factor=2) * float(alpha_l1)
 
         if self.level2 is None:
             raise RuntimeError("CTCF_CascadeA requires level2 enabled (use_level2=True).")
@@ -240,7 +241,7 @@ class CTCF_CascadeA(nn.Module):
         else:
             flow_half = flow_half_l2
 
-        flow_full = upsample_flow(flow_half, scale_factor=2.0) * 2.0
+        flow_full = upsample_flow(flow_half, scale_factor=2)
         def_full = self.st_full(mov_full, flow_full)
 
         aux["mov_half"] = mov_half
