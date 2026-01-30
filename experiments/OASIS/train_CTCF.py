@@ -19,7 +19,6 @@ from utils import (
     setup_device,
     make_exp_dirs,
     attach_stdout_logger,
-    save_checkpoint,
     load_checkpoint_if_exists,
     perf_epoch_start,
     perf_epoch_end,
@@ -136,12 +135,7 @@ def main():
     criterion_ncc = NCC_vxm(win=(9, 9, 9))
     criterion_reg = Grad3d(penalty="l2")
 
-    # warp helpers
     reg_bilin_half = register_model(config.img_size, mode="bilinear").to(device)
-    reg_nearest_full = register_model(
-        (config.img_size[0] * 2, config.img_size[1] * 2, config.img_size[2] * 2),
-        mode="nearest",
-    ).to(device)
 
     # resume
     epoch_start = 0
@@ -213,18 +207,7 @@ def main():
                     )
                 L_ncc = L_ncc * args.w_ncc
 
-                # DSC supervised branch only if unsup=False
-                if args.unsup:
-                    L_dsc = torch.tensor(0.0, device=device, dtype=torch.float32)
-                else:
-                    x_seg_idx = x_seg.to(device).long()
-                    y_seg_idx = y_seg.to(device).long()
-                    x_seg_w = reg_nearest_full((x_seg_idx.float(), flow_xy))
-                    y_seg_w = reg_nearest_full((y_seg_idx.float(), flow_yx))
-                    L_dsc = 0.5 * (dice_val_VOI(x_seg_w, y_seg_idx) + dice_val_VOI(y_seg_w, x_seg_idx))
-                    L_dsc = L_dsc * args.w_dsc
-
-                L_reg = 0.5 * (criterion_reg(flow_xy_h) + criterion_reg(flow_yx_h))
+                L_reg = 0.5 * (criterion_reg(flow_xy) + criterion_reg(flow_yx))
                 L_reg = L_reg * args.w_reg
 
                 L_icon = icon_loss(flow_xy, flow_yx) * W_icon
@@ -233,10 +216,10 @@ def main():
                 y_cycle = reg_bilin_half((out_yx_h, flow_xy_h))
                 L_cyc = ((x_cycle - x_half).abs().mean() + (y_cycle - y_half).abs().mean()) * W_cyc
 
-                L_jac = 0.5 * (neg_jacobian_penalty(flow_xy_h) + neg_jacobian_penalty(flow_yx_h))
-                L_jac = L_jac * W_jac
+                L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx))
+                L_jac = L_jac * args.w_jac
 
-                loss = L_ncc + L_dsc + L_reg + L_icon + L_cyc + L_jac
+                loss = L_ncc + L_reg + L_icon + L_cyc + L_jac
 
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -248,7 +231,6 @@ def main():
 
             loss_all.update(float(loss.detach().item()), 1)
             loss_ncc_m.update(float(L_ncc.detach().item()), 1)
-            loss_dsc_m.update(float(L_dsc.detach().item()), 1)
             loss_reg_m.update(float(L_reg.detach().item()), 1)
             loss_icon_m.update(float(L_icon.detach().item()), 1)
             loss_cyc_m.update(float(L_cyc.detach().item()), 1)
@@ -260,7 +242,7 @@ def main():
                 print(
                     f"Iter {idx:4d} / {len(train_loader):4d} | "
                     f"loss(avg)={loss_all.avg:.4f} | "
-                    f"last NCC={L_ncc.item():.4f} DSC={L_dsc.item():.4f} REG={L_reg.item():.4f} | "
+                    f"last NCC={L_ncc.item():.4f} REG={L_reg.item():.4f} | "
                     f"ICON={L_icon.item():.4f} CYC={L_cyc.item():.4f} JAC={L_jac.item():.4f} | "
                     f"lr={cur_lr:.1e}"
                 )
