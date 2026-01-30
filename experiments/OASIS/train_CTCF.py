@@ -290,7 +290,7 @@ def main():
         print(
             f"[epoch {epoch:03d}] "
             f"alpha_l1={alpha_l1:.3f} alpha_l3={alpha_l3:.3f} warm={warm:.3f} | "
-            f"loss={loss_all.avg:.4f} ncc={loss_ncc_m.avg:.4f} dsc={loss_dsc_m.avg:.4f} reg={loss_reg_m.avg:.4f} "
+            f"loss={loss_all.avg:.4f} ncc={loss_ncc_m.avg:.4f} reg={loss_reg_m.avg:.4f} "
             f"icon={loss_icon_m.avg:.4f} cyc={loss_cyc_m.avg:.4f} jac={loss_jac_m.avg:.4f} | "
             f"val_dice={val_dsc:.4f} best={best_dsc:.4f} | "
             f"lr={cur_lr:.6g} it_ms={perf.mean_iter_time_ms:.2f} peakGiB={(perf.peak_gpu_mem_gib or 0.0):.2f}"
@@ -299,7 +299,6 @@ def main():
         # TensorBoard scalars
         writer.add_scalar("train/loss", loss_all.avg, epoch)
         writer.add_scalar("train/ncc", loss_ncc_m.avg, epoch)
-        writer.add_scalar("train/dsc", loss_dsc_m.avg, epoch)
         writer.add_scalar("train/reg", loss_reg_m.avg, epoch)
         writer.add_scalar("train/icon", loss_icon_m.avg, epoch)
         writer.add_scalar("train/cyc", loss_cyc_m.avg, epoch)

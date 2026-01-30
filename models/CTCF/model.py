@@ -11,8 +11,7 @@ from models.TransMorph_DCA.model import (
 )
 
 from models.CTCF.ut_blocks import SRUpBlock3D, CAB, upsample_flow
-from models.CTCF.cascade_nets import CoarseFlowNetQuarter
-from models.CTCF.refiner import FlowRefiner3D
+from models.CTCF.cascade_nets import CoarseFlowNetQuarter, FlowRefiner3D
 from models.CTCF.configs import CONFIGS
 
 
@@ -205,15 +204,15 @@ class CTCF_CascadeA(nn.Module):
         alpha_l1: float = 1.0,
         alpha_l3: float = 1.0,
     ):
-        mov_half = nn.functional.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=True)
-        fix_half = nn.functional.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=True)
+        mov_half = nn.functional.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
+        fix_half = nn.functional.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
 
         flow_half_init = None
         aux: dict = {}
 
         if self.level1 is not None and alpha_l1 > 0.0:
-            mov_quarter = nn.functional.interpolate(mov_full, scale_factor=0.25, mode="trilinear", align_corners=True)
-            fix_quarter = nn.functional.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=True)
+            mov_quarter = nn.functional.interpolate(mov_full, scale_factor=0.25, mode="trilinear", align_corners=False)
+            fix_quarter = nn.functional.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=False)
             flow_quarter = self.level1(mov_quarter, fix_quarter)
             aux["flow_quarter"] = flow_quarter
             flow_half_init = upsample_flow(flow_quarter, scale_factor=2) * float(alpha_l1)
