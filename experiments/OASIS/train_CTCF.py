@@ -168,7 +168,6 @@ def main():
 
         loss_all = AverageMeter()
         loss_ncc_m = AverageMeter()
-        loss_dsc_m = AverageMeter()
         loss_reg_m = AverageMeter()
         loss_icon_m = AverageMeter()
         loss_cyc_m = AverageMeter()

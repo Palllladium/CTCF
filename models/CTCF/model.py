@@ -29,6 +29,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
         self.if_transskip = bool(config.if_transskip)
         self.time_steps = int(time_steps)
         self.img_size = tuple(config.img_size)  # (D,H,W)
+        self.step_cap: float = 1.0 # added for flow_step
 
         self.transformer = SwinTransformer(
             patch_size=config.patch_size,
@@ -154,7 +155,10 @@ class CTCF_DCA_CoreHalf(nn.Module):
             f_out = self.cs[t](torch.cat((def_x, fix_half), dim=1))
             x_t = self.up3s[t](xx, f_out if self.if_convskip else None)
             flow_step = self.reg_heads[t](x_t)
-            flow_step = torch.tanh(flow_step) * 1.0     # stable
+            
+            mag = torch.linalg.vector_norm(flow_step, dim=1, keepdim=True).clamp_min(1e-6)
+            flow_step = flow_step * (self.step_cap / mag).clamp(max=1.0)
+            
             flows.append(flow_step)
 
             flow_new = flow_prev + self.spatial_trans(flow_step, flow_prev)
