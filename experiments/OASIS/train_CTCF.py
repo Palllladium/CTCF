@@ -217,7 +217,7 @@ def main():
                 L_cyc = ((x_cycle - x_half).abs().mean() + (y_cycle - y_half).abs().mean()) * W_cyc
 
                 L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx))
-                L_jac = L_jac * args.w_jac
+                L_jac = L_jac * W_jac
 
                 loss = L_ncc + L_reg + L_icon + L_cyc + L_jac
 
