@@ -3,6 +3,7 @@ import glob
 import argparse
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -69,12 +70,6 @@ def parse_args():
     p.add_argument("--unsup", action="store_true")
     p.add_argument("--resume", default="")
 
-    p.add_argument("--no_level1", action="store_true")
-    p.add_argument("--no_level3", action="store_true")
-
-    p.add_argument("--recursive", action="store_true")
-    p.add_argument("--fast_dev", action="store_true")
-
     p.add_argument("--tb_images_every", type=int, default=5)
 
     return p.parse_args()
@@ -82,10 +77,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.fast_dev:
-        args.num_workers = 0
-        args.max_epoch = min(args.max_epoch, 30)
-
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
 
     train_dir = args.train_dir.rstrip("/\\")
@@ -109,10 +100,6 @@ def main():
 
     config = CONFIGS_CTCF["CTCF-CascadeA"]
     config.time_steps = int(args.time_steps)
-    if args.no_level1:
-        config.use_level1 = False
-    if args.no_level3:
-        config.use_level3 = False
 
     model = CTCF_CascadeA(config).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, amsgrad=True)
@@ -281,7 +268,18 @@ def main():
         # validation
         model.eval()
         with torch.no_grad():
-            val_dsc = validate_oasis(val_loader, model, forward_flow_fn=forward_flow_ctcf, device=device)
+            val_res = validate_oasis(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+                forward_flow_fn=lambda x, y: forward_flow_ctcf(x, y, model=model),
+                dice_fn=dice_val_VOI,
+                register_model_cls=register_model,
+                mk_grid_img_fn=mk_grid_img,
+                grid_step=8,
+                line_thickness=1,
+            )
+        val_dsc = float(val_res.dsc)
 
         is_best = val_dsc > best_dsc
         if is_best:
@@ -334,34 +332,28 @@ def main():
             writer.add_scalar("perf/peak_mem_gib", float(perf.peak_gpu_mem_gib), epoch)
 
         # TensorBoard images (optional)
+        plt.switch_backend("agg")
+
         if int(args.tb_images_every) > 0 and (epoch % int(args.tb_images_every) == 0):
-            try:
-                xb, yb, _, _ = val_set[0]
-                xb = xb.unsqueeze(0).to(device).float()
-                yb = yb.unsqueeze(0).to(device).float()
-                with torch.no_grad():
-                    def_full, flow_full, _ = model(xb, yb, return_all=True, alpha_l1=1.0, alpha_l3=1.0)
+            last = val_res.last_vis if hasattr(val_res, "last_vis") else {}
 
-                fig_mov = comput_fig(xb)
-                fig_fix = comput_fig(yb)
-                fig_def = comput_fig(def_full)
+            def_out = last.get("def_seg", None)   # warped x_seg
+            def_grid = last.get("def_grid", None) # warped grid (optional)
+            x_vis = last.get("x_seg", None)
+            y_vis = last.get("y_seg", None)
 
-                writer.add_figure("vis/mov", fig_mov, epoch)
-                writer.add_figure("vis/fix", fig_fix, epoch)
-                writer.add_figure("vis/def", fig_def, epoch)
+            if def_out is not None and x_vis is not None and y_vis is not None:
+                pred_fig = comput_fig(def_out.float())
+                x_fig = comput_fig(x_vis.float())
+                tar_fig = comput_fig(y_vis.float())
 
-                grid = mk_grid_img(flow_full)
-                reg_full = register_model(tuple(xb.shape[-3:]), mode="bilinear").to(device)
-                def_grid = reg_full((grid, flow_full))
-                fig_grid = comput_fig(def_grid)
-                writer.add_figure("vis/grid_def", fig_grid, epoch)
+                writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
+                writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
+                writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
 
-                fig_mov.savefig(os.path.join(vis_dir, f"e{epoch:03d}_mov.png"), bbox_inches="tight")
-                fig_fix.savefig(os.path.join(vis_dir, f"e{epoch:03d}_fix.png"), bbox_inches="tight")
-                fig_def.savefig(os.path.join(vis_dir, f"e{epoch:03d}_def.png"), bbox_inches="tight")
-                fig_grid.savefig(os.path.join(vis_dir, f"e{epoch:03d}_grid.png"), bbox_inches="tight")
-            except Exception as e:
-                print(f"[warn] TB images failed @ epoch {epoch}: {e}")
+                if def_grid is not None:
+                    grid_fig = comput_fig(def_grid.float())
+                    writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
 
     writer.close()
 
