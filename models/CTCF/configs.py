@@ -6,7 +6,7 @@ def get_CTCF_config():
     c.if_transskip = True
     c.if_convskip = True
     c.in_chans = 1
-    c.img_size = (80, 96, 112)  # HALF-res
+    c.img_size = (160, 192, 224)
     c.patch_size = 4
 
     c.embed_dim = 96
