@@ -202,7 +202,6 @@ def main():
                     f"loss(avg)={meters['all'].avg:.4f} | "
                     f"last NCC={L_ncc.item():.4f} REG={L_reg.item():.4f} | "
                     f"ICON={L_icon.item():.4f} CYC={L_cyc.item():.4f} JAC={L_jac.item():.4f} | "
-                    f" | flow_mean={flow_mag_mean.item():.3f} p95={flow_mag_p95.item():.3f} max={flow_max_abs.item():.3f}"
                     f"lr={cur_lr:.1e}"
                 )
 
