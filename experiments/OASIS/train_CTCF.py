@@ -161,14 +161,15 @@ def main():
                 # DIAGNOSTIC
                 ############
 
-                with torch.no_grad():
-                    # magnitude per-voxel: sqrt(dx^2+dy^2+dz^2)
-                    mag_xy = torch.linalg.vector_norm(flow_xy.float(), dim=1)
-                    mag_yx = torch.linalg.vector_norm(flow_yx.float(), dim=1)
+                if idx % 30 == 0:
+                    with torch.no_grad():
+                        # magnitude per-voxel: sqrt(dx^2+dy^2+dz^2)
+                        mag_xy = torch.linalg.vector_norm(flow_xy.float(), dim=1)
+                        mag_yx = torch.linalg.vector_norm(flow_yx.float(), dim=1)
 
-                    flow_mag_mean = 0.5 * (mag_xy.mean() + mag_yx.mean())
-                    flow_mag_p95 = 0.5 * (torch.quantile(mag_xy.reshape(-1), 0.95) + torch.quantile(mag_yx.reshape(-1), 0.95))
-                    flow_max_abs = torch.max(torch.stack([flow_xy.abs().max(), flow_yx.abs().max()]))
+                        flow_mag_mean = 0.5 * (mag_xy.mean() + mag_yx.mean())
+                        flow_mag_p95 = 0.5 * (torch.quantile(mag_xy.reshape(-1), 0.95) + torch.quantile(mag_yx.reshape(-1), 0.95))
+                        flow_max_abs = torch.max(torch.stack([flow_xy.abs().max(), flow_yx.abs().max()]))
 
                 ############
 
@@ -201,9 +202,12 @@ def main():
                     f"loss(avg)={meters['all'].avg:.4f} | "
                     f"last NCC={L_ncc.item():.4f} REG={L_reg.item():.4f} | "
                     f"ICON={L_icon.item():.4f} CYC={L_cyc.item():.4f} JAC={L_jac.item():.4f} | "
-                    f" | flow_mean={flow_mag_mean.item():.3f} p95={flow_mag_p95.item():.3f} max={flow_max_abs.item():.3f}" ### DIAGNOSTIC
+                    f" | flow_mean={flow_mag_mean.item():.3f} p95={flow_mag_p95.item():.3f} max={flow_max_abs.item():.3f}"
                     f"lr={cur_lr:.1e}"
                 )
+
+            if idx % 30 == 0:
+                print(f" | flow_mean={flow_mag_mean.item():.3f} p95={flow_mag_p95.item():.3f} max={flow_max_abs.item():.3f}") ### DIAGNOSTIC
 
         # validation
         model.eval()
