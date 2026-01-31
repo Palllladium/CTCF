@@ -12,6 +12,7 @@ from models.TransMorph_DCA.model import (
 
 from models.CTCF.ut_blocks import SRUpBlock3D, CAB, upsample_flow
 from models.CTCF.cascade_nets import CoarseFlowNetQuarter, FlowRefiner3D
+from models.CTCF.configs import CONFIGS
 
 
 class CTCF_DCA_CoreHalf(nn.Module):
