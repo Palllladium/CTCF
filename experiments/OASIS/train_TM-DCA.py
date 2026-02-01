@@ -80,11 +80,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    # ---------- device ----------
-
-    dev = setup_device(args.gpu, seed=0, deterministic=False)
-    device = dev.device
+    device = setup_device(args.gpu, seed=0, deterministic=False)
 
     # ---------- experiment dirs + logger ----------
 
