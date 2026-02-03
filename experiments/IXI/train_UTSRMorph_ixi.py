@@ -1,221 +1,243 @@
-import datetime
+import os
+import glob
+import argparse
 import time
 
-from torch.utils.tensorboard import SummaryWriter
-import os, utils_ixi, glob, losses
-import sys
-from torch.utils.data import DataLoader
-from data import datasets, trans
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from torch import optim
-import torch.nn as nn
-import matplotlib.pyplot as plt
-from natsort import natsorted
-from models_ixi.UTSRMorph import CONFIGS as CONFIGS_UM
-import models_ixi.UTSRMorph as UTSRMorph
 
-class Logger(object):
-    def __init__(self, save_dir):
-        self.terminal = sys.stdout
-        self.log = open(save_dir+"logfile.log", "a")
+from experiments.IXI import datasets
+from models.UTSRMorph.model import CONFIGS as CONFIGS_UM, UTSRMorph
 
-    def write(self, message):
-        self.terminal.write(message)
-        self.log.write(message)
+from utils import (
+    trans,
+    AverageMeter,
+    setup_device,
+    make_exp_dirs,
+    attach_stdout_logger,
+    load_checkpoint_if_exists,
+    perf_epoch_start,
+    perf_epoch_end,
+    dice_val_VOI,
+    adjust_learning_rate_poly,
+    NCC_vxm,
+    Grad3d,
+    NumpyType,
+    register_model,
+    mk_grid_img,
+    comput_fig,
+    validate_oasis,
+)
 
-    def flush(self):
-        pass
+
+@torch.no_grad()
+def forward_flow_utsrmorph(x: torch.Tensor, y: torch.Tensor, *, model: torch.nn.Module) -> torch.Tensor:
+    inp = torch.cat((x, y), dim=1)
+    use_amp = torch.cuda.is_available()
+    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+        _, flow = model(inp)
+    return flow
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--train_dir", required=True, help=".../IXI_data/Train (folder with *.pkl)")
+    p.add_argument("--val_dir", required=True, help=".../IXI_data/Val (folder with *.pkl)")
+    p.add_argument("--atlas_path", required=True, help=".../IXI_data/atlas.pkl")
+    p.add_argument("--exp", type=str, default="UTSRMorph_IXI")
+    p.add_argument("--gpu", type=int, default=0)
+    p.add_argument("--cont", action="store_true")
+    p.add_argument("--config", type=str, default="UTSRMorph-Large")
+    p.add_argument("--max_epoch", type=int, default=500)
+    p.add_argument("--batch_size", type=int, default=1)
+    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--w_ncc", type=float, default=1.0)
+    p.add_argument("--w_reg", type=float, default=4.0)
+    p.add_argument("--resume", default="")
+    p.add_argument("--tb_images_every", type=int, default=5)
+
+    return p.parse_args()
+
 
 def main():
-    batch_size = 1
-    atlas_dir = '/home/buaaa302/pythoncodes/TransFrame/IXI_data/atlas.pkl'
-    train_dir = '/home/buaaa302/pythoncodes/TransFrame/IXI_data/Train/'
-    val_dir = '/home/buaaa302/pythoncodes/TransFrame/IXI_data/Val/'
-    weights = [1, 4] # loss weights
-    save_dir = 'UTSRMorph_ncc_{}_diffusion_{}/'.format(weights[0], weights[1])
-    if not os.path.exists('experiments/'+save_dir):
-        os.makedirs('experiments/'+save_dir)
-    if not os.path.exists('logs/'+save_dir):
-        os.makedirs('logs/'+save_dir)
-    sys.stdout = Logger('logs/'+save_dir)
-    lr = 0.0004 # learning rate
+    args = parse_args()
+    device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
+
+    train_dir = args.train_dir.rstrip("/\\") + os.sep
+    val_dir = args.val_dir.rstrip("/\\") + os.sep
+    print(f">>> Experiment: {args.exp}")
+    print(f"    train_dir = {train_dir}{os.sep}")
+    print(f"    val_dir   = {val_dir}{os.sep}")
+    print(f"    max_epoch = {args.max_epoch}")
+    print(f"    lr        = {args.lr}")
+    print(f"    atlas     ={args.atlas_path}")
+    
+    paths = make_exp_dirs(args.exp)
+    attach_stdout_logger(paths.log_dir)
+
+    ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
+    vis_dir = os.path.join(paths.exp_dir, "vis")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(vis_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=paths.log_dir)
+
+    config = CONFIGS_UM[args.config]
+    use_amp = torch.cuda.is_available()
+    model = UTSRMorph(config).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5, amsgrad=True)
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
+    train_tf = transforms.Compose([trans.RandomFlip(0),NumpyType((np.float32, np.float32))])
+    val_tf = transforms.Compose([trans.Seg_norm(),NumpyType((np.float32, np.int16))])
+    train_set = datasets.IXIBrainDataset(glob.glob(train_dir + "*.pkl"),args.atlas_path,transforms=train_tf)
+    val_set = datasets.IXIBrainInferDataset(glob.glob(val_dir + "*.pkl"),args.atlas_path,transforms=val_tf)
+    train_loader = DataLoader(train_set,batch_size=args.batch_size,shuffle=True,num_workers=args.num_workers,pin_memory=True)
+    val_loader = DataLoader(val_set,batch_size=1,shuffle=False,num_workers=args.num_workers,pin_memory=True,drop_last=True)
+
+    criterion_ncc = NCC_vxm()
+    criterion_reg = Grad3d(penalty="l2")
+
+    # resume
     epoch_start = 0
-    max_epoch = 500 #max traning epoch
-    cont_training = False #if continue training
+    best_dsc = -1.0
+    if args.resume:
+        ckpt = load_checkpoint_if_exists(args.resume,model=model,optimizer=optimizer,map_location=device)
+        if ckpt is not None:
+            epoch_start = int(ckpt.get("epoch", -1)) + 1
+            best_dsc = float(ckpt.get("best_dsc", best_dsc))
+            if scaler is not None and isinstance(ckpt, dict) and ckpt.get("scaler"):
+                scaler.load_state_dict(ckpt["scaler"])
+            print(f">>> Resumed from {args.resume} @ epoch {epoch_start}, best={best_dsc:.4f}")
 
-    '''
-    Initialize model
-    '''
-    config = CONFIGS_UM['UTSRMorph-Large']
-    model = UTSRMorph.UTSRMorph(config)
-    model.cuda()
+    for epoch in range(epoch_start, args.max_epoch):
+        model.train()
+        t0_epoch = perf_epoch_start()
+        cur_lr = adjust_learning_rate_poly(optimizer, epoch, args.max_epoch, args.lr)
+        writer.add_scalar("LR", cur_lr, epoch)
 
-    '''
-    Initialize spatial transformation function
-    '''
-    reg_model = utils_ixi.register_model(config.img_size, 'nearest')
-    reg_model.cuda()
-    reg_model_bilin = utils_ixi.register_model(config.img_size, 'bilinear')
-    reg_model_bilin.cuda()
+        meters = {
+            "all": AverageMeter(),
+            "ncc": AverageMeter(),
+            "reg": AverageMeter(),
+        }
 
-    '''
-    If continue from previous training
-    '''
-    if cont_training:
-        epoch_start = 201
-        model_dir = 'experiments/'+save_dir
-        updated_lr = round(lr * np.power(1 - (epoch_start) / max_epoch,0.9),8)
-        best_model = torch.load(model_dir + natsorted(os.listdir(model_dir))[-1])['state_dict']
-        print('Model: {} loaded!'.format(natsorted(os.listdir(model_dir))[-1]))
-        model.load_state_dict(best_model)
-    else:
-        updated_lr = lr
+        iter_time_sum = 0.0
 
-    '''
-    Initialize training
-    '''
-    train_composed = transforms.Compose([trans.RandomFlip(0),
-                                         trans.NumpyType((np.float32, np.float32)),
-                                         ])
+        print(f"Training Starts (epoch {epoch:03d})")
+        for it, (x, y) in enumerate(train_loader, start=1):
+            t_iter0 = time.perf_counter()
 
-    val_composed = transforms.Compose([trans.Seg_norm(), #rearrange segmentation label to 1 to 46
-                                       trans.NumpyType((np.float32, np.int16))])
-    train_set = datasets.IXIBrainDataset(glob.glob(train_dir + '*.pkl'), atlas_dir, transforms=train_composed)
-    val_set = datasets.IXIBrainInferDataset(glob.glob(val_dir + '*.pkl'), atlas_dir, transforms=val_composed)
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=4, pin_memory=True, drop_last=True)
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
 
-    optimizer = optim.Adam(model.parameters(), lr=updated_lr, weight_decay=0, amsgrad=True)
-    criterion = losses.NCC_vxm()
-    criterions = [criterion]
-    criterions += [losses.Grad3d(penalty='l2')]
-    best_dsc = 0
-    writer = SummaryWriter(log_dir='logs/'+save_dir)
-    for epoch in range(epoch_start, max_epoch):
-        print('Training Starts')
-        '''
-        Training
-        '''
-        loss_all = utils_ixi.AverageMeter()
-        idx = 0
-        time_start = time.time()
-        for data in train_loader:
-            idx += 1
-            model.train()
-            adjust_learning_rate(optimizer, epoch, max_epoch, lr)
-            data = [t.cuda() for t in data]
-            x = data[0]
-            y = data[1]
-            x_in = torch.cat((x,y), dim=1)
-            output = model(x_in)
-            loss = 0
-            loss_vals = []
-            for n, loss_function in enumerate(criterions):
-                curr_loss = loss_function(output[n], y) * weights[n]
-                loss_vals.append(curr_loss)
-                loss += curr_loss
-            loss_all.update(loss.item(), y.numel())
-            # compute gradient and do SGD step
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            
+            inp = torch.cat((x, y), dim=1)  # [B,2,D,H,W]
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                out, flow = model(inp)
 
-            print('Iter {} of {} loss {:.4f}, Img Sim: {:.6f}, Reg: {:.6f}'.format(idx, len(train_loader), loss.item(), loss_vals[0].item(), loss_vals[1].item()))
-        writer.add_scalar('Loss/train', loss_all.avg, epoch)
-        print('Epoch {} loss {:.4f}'.format(epoch, loss_all.avg))
-        '''
-        Validation
-        '''
-        eval_dsc = utils_ixi.AverageMeter()
+                with torch.autocast(device_type="cuda", enabled=False):
+                    L_ncc = criterion_ncc(out.float(), y.float()) * args.w_ncc
+
+                L_reg = criterion_reg(flow.float()) * args.w_reg
+                loss = L_ncc + L_reg
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            meters["all"].update(loss.item(), y.numel())
+            meters["ncc"].update(L_ncc.item(), y.numel())
+            meters["reg"].update(L_reg.item(), y.numel())
+            iter_time_sum += (time.perf_counter() - t_iter0)
+
+            if it % 10 == 0:
+                print(
+                    f"Iter {it:4d} / {len(train_loader):4d} | "
+                    f"loss(avg)={meters['all'].avg:.4f} | "
+                    f"last NCC={L_ncc.item():.4f} REG={L_reg.item():.4f} | "
+                    f"lr={cur_lr:.2e}"
+                )
+
+        model.eval()
         with torch.no_grad():
-            for data in val_loader:
-                model.eval()
-                data = [t.cuda() for t in data]
-                x = data[0]
-                y = data[1]
-                x_seg = data[2]
-                y_seg = data[3]
-                x_in = torch.cat((x, y), dim=1)
-                grid_img = mk_grid_img(8, 1, config.img_size)
-                output = model(x_in)
-                def_out = reg_model([x_seg.cuda().float(), output[1].cuda()])
-                def_grid = reg_model_bilin([grid_img.float(), output[1].cuda()])
-                dsc = utils_ixi.dice_val_VOI(def_out.long(), y_seg.long())
-                eval_dsc.update(dsc.item(), x.size(0))
-                print(eval_dsc.avg)
-        time_end = time.time()
-        alltime = (time_end-time_start)*(499-epoch)
-        timeresult=str(datetime.timedelta(seconds=alltime))
-        print("time:"+timeresult)
-        best_dsc = max(eval_dsc.avg, best_dsc)
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'best_dsc': best_dsc,
-            'optimizer': optimizer.state_dict(),
-        }, save_dir='experiments/'+save_dir, filename='dsc{:.3f}.pth.tar'.format(eval_dsc.avg))
-        writer.add_scalar('DSC/validate', eval_dsc.avg, epoch)
-        plt.switch_backend('agg')
-        pred_fig = comput_fig(def_out)
-        grid_fig = comput_fig(def_grid)
-        x_fig = comput_fig(x_seg)
-        tar_fig = comput_fig(y_seg)
-        writer.add_figure('Grid', grid_fig, epoch)
-        plt.close(grid_fig)
-        writer.add_figure('input', x_fig, epoch)
-        plt.close(x_fig)
-        writer.add_figure('ground truth', tar_fig, epoch)
-        plt.close(tar_fig)
-        writer.add_figure('prediction', pred_fig, epoch)
-        plt.close(pred_fig)
-        loss_all.reset()
+            val = validate_oasis(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+                forward_flow_fn=lambda x_, y_: forward_flow_utsrmorph(x_, y_, model=model),
+                dice_fn=dice_val_VOI,
+                register_model_cls=register_model,
+                mk_grid_img_fn=mk_grid_img,
+                grid_step=8,
+                line_thickness=1,
+            )
+        val_dsc = float(val.dsc)
+        fold_percent = float(val.fold_percent)
+
+        is_best = val_dsc >= best_dsc
+        if is_best:
+            best_dsc = val_dsc
+
+        state = {
+            "epoch": epoch + 1,
+            "state_dict": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "best_dsc": best_dsc,
+            "scaler": scaler.state_dict() if use_amp else None,
+            "config": dict(config),
+            "args": vars(args),
+        }
+
+        torch.save(state, os.path.join(ckpt_dir, "last.pth"))
+        if is_best:
+            torch.save(state, os.path.join(ckpt_dir, "best.pth"))
+
+        perf = perf_epoch_end(t0_epoch, iters=len(train_loader), iter_time_sum=iter_time_sum)
+
+        print(
+            f"[epoch {epoch:03d}] "
+            f"loss={meters['all'].avg:.4f} ncc={meters['ncc'].avg:.4f} reg={meters['reg'].avg:.4f} | "
+            f"val_dice={val_dsc:.4f} best={best_dsc:.4f} | "
+            f"fold%={fold_percent:.2f} | "
+            f"lr={cur_lr:.6g} it_ms={perf.mean_iter_time_ms:.2f} peakGiB={(perf.peak_gpu_mem_gib or 0.0):.2f}"
+        )
+
+        writer.add_scalar("Loss/train_all", meters["all"].avg, epoch)
+        writer.add_scalar("Loss/train_ncc", meters["ncc"].avg, epoch)
+        writer.add_scalar("Loss/train_reg", meters["reg"].avg, epoch)
+        writer.add_scalar("DSC/val", val_dsc, epoch)
+        writer.add_scalar("Metric/fold_percent", fold_percent, epoch)
+
+        plt.switch_backend("agg")
+        if (epoch % max(1, int(args.tb_images_every))) == 0:
+            last_vis = val.last_vis or {}
+            def_out = last_vis.get("def_seg", None)
+            def_grid = last_vis.get("def_grid", None)
+            x_vis = last_vis.get("x_seg", None)
+            y_vis = last_vis.get("y_seg", None)
+
+            if def_out is not None and x_vis is not None and y_vis is not None:
+                pred_fig = comput_fig(def_out.float())
+                x_fig = comput_fig(x_vis.float())
+                tar_fig = comput_fig(y_vis.float())
+
+                writer.add_figure("prediction", pred_fig, epoch); plt.close(pred_fig)
+                writer.add_figure("input", x_fig, epoch); plt.close(x_fig)
+                writer.add_figure("ground truth", tar_fig, epoch); plt.close(tar_fig)
+
+                if def_grid is not None:
+                    grid_fig = comput_fig(def_grid.float())
+                    writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
+
     writer.close()
 
-def comput_fig(img):
-    img = img.detach().cpu().numpy()[0, 0, 48:64, :, :]
-    fig = plt.figure(figsize=(12,12), dpi=180)
-    for i in range(img.shape[0]):
-        plt.subplot(4, 4, i + 1)
-        plt.axis('off')
-        plt.imshow(img[i, :, :], cmap='gray')
-    fig.subplots_adjust(wspace=0, hspace=0)
-    return fig
 
-def adjust_learning_rate(optimizer, epoch, MAX_EPOCHES, INIT_LR, power=0.9):
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = round(INIT_LR * np.power( 1 - (epoch) / MAX_EPOCHES ,power),8)
-
-def mk_grid_img(grid_step, line_thickness=1, grid_sz=(160, 192, 224)):
-    grid_img = np.zeros(grid_sz)
-    for j in range(0, grid_img.shape[1], grid_step):
-        grid_img[:, j+line_thickness-1, :] = 1
-    for i in range(0, grid_img.shape[2], grid_step):
-        grid_img[:, :, i+line_thickness-1] = 1
-    grid_img = grid_img[None, None, ...]
-    grid_img = torch.from_numpy(grid_img).cuda()
-    return grid_img
-
-def save_checkpoint(state, save_dir='models_1', filename='checkpoint.pth.tar', max_model_num=8):
-    torch.save(state, save_dir+filename)
-    model_lists = natsorted(glob.glob(save_dir + '*'))
-    while len(model_lists) > max_model_num:
-        os.remove(model_lists[0])
-        model_lists = natsorted(glob.glob(save_dir + '*'))
-
-if __name__ == '__main__':
-    '''
-    GPU configuration
-    '''
-    GPU_iden = 0
-    GPU_num = torch.cuda.device_count()
-    print('Number of GPU: ' + str(GPU_num))
-    for GPU_idx in range(GPU_num):
-        GPU_name = torch.cuda.get_device_name(GPU_idx)
-        print('     GPU #' + str(GPU_idx) + ': ' + GPU_name)
-    torch.cuda.set_device(GPU_iden)
-    GPU_avai = torch.cuda.is_available()
-    print('Currently using: ' + torch.cuda.get_device_name(GPU_iden))
-    print('If the GPU is available? ' + str(GPU_avai))
+if __name__ == "__main__":
     main()
