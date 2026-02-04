@@ -40,13 +40,11 @@ class CoarseFlowNetQuarter(nn.Module):
         self.pool2 = nn.AvgPool3d(2)
 
         self.bot = ConvBlock(c * 2, c * 4)
-
         self.up2 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec2 = ConvBlock(c * 4 + c * 2, c * 2)
 
         self.up1 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec1 = ConvBlock(c * 2 + c, c)
-
         self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
 
         nn.init.zeros_(self.out.weight)
@@ -78,7 +76,7 @@ class FlowRefiner3D(nn.Module):
     Output:
       - delta_flow_half: (B,3,D,H,W)
     """
-    def __init__(self, base_ch: int = 16, error_mode: str = "absdiff"):
+    def __init__(self, base_ch: int = 16, error_mode: str = "gradmag"):
         super().__init__()
         self.error_mode = str(error_mode)
         c = int(base_ch)
@@ -97,20 +95,36 @@ class FlowRefiner3D(nn.Module):
 
         self.up1 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec1 = ConvBlock(c * 2 + c, c)
-
         self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
 
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
+    @staticmethod
+    def _grad_mag(x: torch.Tensor) -> torch.Tensor:
+        # x: (B,1,D,H,W)
+        dz = x[:, :, 1:, :, :] - x[:, :, :-1, :, :]
+        dy = x[:, :, :, 1:, :] - x[:, :, :, :-1, :]
+        dx = x[:, :, :, :, 1:] - x[:, :, :, :, :-1]
+
+        dz = torch.nn.functional.pad(dz, (0, 0, 0, 0, 0, 1))
+        dy = torch.nn.functional.pad(dy, (0, 0, 0, 1, 0, 0))
+        dx = torch.nn.functional.pad(dx, (0, 1, 0, 0, 0, 0))
+
+        return torch.sqrt(dx * dx + dy * dy + dz * dz + 1e-6)
+
     def _error_map(self, mov_w: torch.Tensor, fix: torch.Tensor) -> torch.Tensor:
         if self.error_mode == "absdiff":
             return (mov_w - fix).abs()
+        if self.error_mode == "gradmag":
+            gm_m = self._grad_mag(mov_w)
+            gm_f = self._grad_mag(fix)
+            return (gm_m - gm_f).abs()
         raise ValueError(f"Unsupported error_mode: {self.error_mode}")
 
     def forward(self, mov_warp: torch.Tensor, fix: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
         err = self._error_map(mov_warp, fix)
-        x = torch.cat([mov_warp, fix, err, flow], dim=1)  # (B,6,...)
+        x = torch.cat([mov_warp, fix, err, flow], dim=1)  # (B,6,D,H,W)
 
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))

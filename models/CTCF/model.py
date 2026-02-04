@@ -57,26 +57,28 @@ class CTCF_DCA_CoreHalf(nn.Module):
         feats = list(self.transformer.num_features)
         c0, c1, c2 = int(feats[0]), int(feats[1]), int(feats[2])
 
+        self.c_mid = max(1, c0 // 2)
+
         self.cab0 = CAB(c2, compress_ratio=3, squeeze_factor=30)
         self.cab1 = CAB(c1, compress_ratio=3, squeeze_factor=30)
         self.cab2 = CAB(c0, compress_ratio=3, squeeze_factor=30)
 
         self.up0 = SRUpBlock3D(in_channels=c2, out_channels=c1, skip_channels=(c1 if self.if_transskip else 0))
         self.up1 = SRUpBlock3D(in_channels=c1, out_channels=c0, skip_channels=(c0 if self.if_transskip else 0))
+        
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-        self.c1 = Conv3dReLU(2, max(1, c0 // 2), kernel_size=3, stride=1, use_batchnorm=False)
-        self.up2 = SRUpBlock3D(in_channels=c0,out_channels=max(1, c0 // 2),skip_channels=(max(1, c0 // 2) if self.if_convskip else 0),)
+        self.c1 = Conv3dReLU(2, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False)
+        self.up2 = SRUpBlock3D(in_channels=c0,out_channels=self.c_mid,skip_channels=(self.c_mid if self.if_convskip else 0))
 
         reg_ch = int(config.reg_head_chan)
-        self.bridge = nn.Conv3d(max(1, c0 // 2), reg_ch, kernel_size=1, bias=True)
 
         self.cs = nn.ModuleList()
         self.up3s = nn.ModuleList()
         self.reg_heads = nn.ModuleList()
 
         for _ in range(self.time_steps):
-            self.cs.append(Conv3dReLU(2, reg_ch, kernel_size=3, stride=1, use_batchnorm=False))
-            self.up3s.append(SRUpBlock3D(in_channels=reg_ch,out_channels=reg_ch,skip_channels=(reg_ch if self.if_convskip else 0)))
+            self.cs.append(Conv3dReLU(2, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False))
+            self.up3s.append(SRUpBlock3D(in_channels=self.c_mid,out_channels=reg_ch,skip_channels=(self.c_mid if self.if_convskip else 0)))
             self.reg_heads.append(RegistrationHead(in_channels=reg_ch, out_channels=3, kernel_size=3))
 
         self.spatial_trans = SpatialTransformer(self.img_size)  # HALF grid
@@ -99,8 +101,9 @@ class CTCF_DCA_CoreHalf(nn.Module):
             flow_prev = init_flow_half
             def_x = self.spatial_trans(mov_half, flow_prev)
 
-        f3 = self.c1(torch.cat((mov_half, fix_half), dim=1))
-        f3 = self.avg_pool(f3).to(mov_half.dtype) if self.if_convskip else None
+        x_cat = torch.cat((mov_half, fix_half), dim=1)
+        x_s1 = self.avg_pool(x_cat)
+        f3 = self.c1(x_s1).to(mov_half.dtype) if self.if_convskip else None
 
         out_feats = self.transformer((mov_half, fix_half))
 
@@ -119,7 +122,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
 
         x = self.up0(f0, f1)
         x = self.up1(x, f2)
-        xx = self.bridge(self.up2(x, f3))
+        xx = self.up2(x, f3)
 
         flows = [] if return_all_flows else None
 
