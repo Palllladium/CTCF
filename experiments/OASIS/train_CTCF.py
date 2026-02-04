@@ -60,7 +60,7 @@ def parse_args():
     p.add_argument("--w_icon", type=float, default=0.05)
     p.add_argument("--w_cyc", type=float, default=0.02)
     p.add_argument("--w_jac", type=float, default=0.005)
-    p.add_argument("--time_steps", type=int, default=8)
+    p.add_argument("--time_steps", type=int, default=12)
     p.add_argument("--resume", default="")
     p.add_argument("--tb_images_every", type=int, default=5)
 
