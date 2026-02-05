@@ -57,34 +57,3 @@ def get_3DTransMorphDWin3Lvl_config():
     config.reg_head_chan = 16
     config.img_size = (160, 192, 224)
     return config
-
-def get_3DTransMorphDWin3Lvl_debug_config():
-    '''
-    Embed-dim: 96 -> 24.
-    Depths: 8,8,8 -> 4,4,4
-    Reg_head_chan: 16 -> 4
-    '''
-    config = ml_collections.ConfigDict()
-    config.if_transskip = True
-    config.if_convskip = True
-    config.patch_size = 4
-    config.in_chans = 2
-    config.embed_dim = 24
-    config.dwin_kernel_size = (7, 5, 3)
-    config.depths = (4, 4, 5)
-    config.num_heads = (4, 4, 4)
-    config.window_size = (5, 6, 7)
-    config.mlp_ratio = 4
-    config.pat_merg_rf = 4
-    config.qkv_bias = False
-    config.drop_rate = 0
-    config.drop_path_rate = 0.3
-    config.ape = False
-    config.spe = False
-    config.rpe = True
-    config.patch_norm = True
-    config.use_checkpoint = False
-    config.out_indices = (0, 1, 2)
-    config.reg_head_chan = 4
-    config.img_size = (160, 192, 224)
-    return config
