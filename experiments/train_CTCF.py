@@ -1,12 +1,9 @@
 import argparse, torch
 from torch import optim
 
-from experiments.engine import add_engine_args, apply_paths, run_train, make_ctx, oasis_loaders, ixi_loaders
-from experiments.OASIS import datasets as oasis_ds
-from experiments.IXI import datasets as ixi_ds
-
 from models.CTCF.model import CTCF_CascadeA, CONFIGS as CONFIGS_CTCF
 from utils import icon_loss, neg_jacobian_penalty, ctcf_schedule, adjust_lr_ctcf_schedule
+from experiments.engine import add_engine_args, apply_paths, run_train, make_ctx, loaders_baseline
 
 
 @torch.no_grad()
@@ -49,12 +46,6 @@ def build_model(device, args):
     return model, opt, ctx
 
 
-def build_loaders(args):
-    if args.ds == "OASIS":
-        return oasis_loaders(args, train_cls=oasis_ds.OASISBrainDataset, val_cls=oasis_ds.OASISBrainDataset, val_bs=1, drop_last_train=False, drop_last_val=True)
-    return ixi_loaders(args, train_cls=ixi_ds.IXIBrainDataset, val_cls=ixi_ds.IXIBrainInferDataset, val_bs=1, drop_last_train=True, drop_last_val=True)
-
-
 def lr_step(optimizer, epoch, args):
     return adjust_lr_ctcf_schedule(optimizer, epoch, args.max_epoch, args.lr)
 
@@ -79,7 +70,7 @@ def main():
     args = parse_args()
     apply_paths(args, dataset=args.ds)
     if not args.exp: args.exp = "CTCF" if args.ds == "OASIS" else "CTCF_IXI"
-    run_train(dataset=args.ds, args=args, build_model=build_model, build_loaders=build_loaders, train_step=train_step, forward_flow_fn=forward_flow_fn, lr_step=lr_step)
+    run_train(dataset=args.ds, args=args, build_model=build_model, build_loaders=loaders_baseline, train_step=train_step, forward_flow_fn=forward_flow_fn, lr_step=lr_step)
 
 
 if __name__ == "__main__":

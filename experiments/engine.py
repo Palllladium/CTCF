@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from dataclasses import dataclass
 
-
+from datasets import OASIS, IXI
 from utils import (
     AverageMeter, 
     setup_device, 
@@ -63,7 +63,7 @@ def oasis_loaders(args, *, train_cls, val_cls, train_bs=None, val_bs=1, drop_las
     va_files = glob.glob(os.path.join(args.val_dir, "*.pkl"))
     tr = train_cls(tr_files, transforms=tfm)
     va = val_cls(va_files, transforms=tfm)
-    train_loader = DataLoader(tr, batch_size=train_bs or args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_train)
+    train_loader = DataLoader(tr, batch_size=train_bs or args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
     val_loader = DataLoader(va, batch_size=val_bs, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_val)
     return train_loader, val_loader
 
@@ -75,9 +75,15 @@ def ixi_loaders(args, *, train_cls, val_cls, train_bs=None, val_bs=1, drop_last_
     va_files = glob.glob(os.path.join(args.val_dir, "*.pkl"))
     tr = train_cls(tr_files, args.atlas_path, transforms=train_tfm)
     va = val_cls(va_files, args.atlas_path, transforms=val_tfm)
-    train_loader = DataLoader(tr, batch_size=train_bs or args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_train)
+    train_loader = DataLoader(tr, batch_size=train_bs or args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
     val_loader = DataLoader(va, batch_size=val_bs, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_val)
     return train_loader, val_loader
+
+
+def loaders_baseline(args):
+    if args.ds == "OASIS":
+        return oasis_loaders(args, train_cls=OASIS.OASISBrainDataset, val_cls=OASIS.OASISBrainInferDataset,val_bs=1, drop_last_val=True)
+    return ixi_loaders(args, train_cls=IXI.IXIBrainDataset, val_cls=IXI.IXIBrainInferDataset, val_bs=1, drop_last_val=True)
 
 
 def forward_flow_halfres(model, x, y, *, pool=2, amp=True):

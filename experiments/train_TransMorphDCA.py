@@ -2,12 +2,8 @@ import argparse, torch
 from torch import optim
 import torch.nn.functional as F
 
-from experiments.engine import add_engine_args, apply_paths, run_train, make_ctx, oasis_loaders, ixi_loaders, forward_flow_halfres
-from experiments.OASIS import datasets as oasis_ds
-from experiments.IXI import datasets as ixi_ds
-
-from models.TransMorph_DCA.model import CONFIGS as CONFIGS_TM
-import models.TransMorph_DCA.model as TransMorph
+from experiments.engine import add_engine_args, apply_paths, run_train, make_ctx, loaders_baseline, forward_flow_halfres
+from models.TransMorph_DCA.model import TransMorphCascadeAd, CONFIGS as CONFIGS_TM
 
 
 @torch.no_grad()
@@ -38,16 +34,10 @@ def build_model(device, args):
     cfg.dwin_kernel_size = tuple(args.dwin)
     cfg.window_size = (D // 32, H // 32, W // 32)
 
-    model = TransMorph.TransMorphCascadeAd(cfg, int(args.time_steps)).to(device)
+    model = TransMorphCascadeAd(cfg, int(args.time_steps)).to(device)
     opt = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0, amsgrad=True)
     ctx = make_ctx(device, vol_size=args.vol_size, ncc_win=(9, 9, 9))
     return model, opt, ctx
-
-
-def build_loaders(args):
-    if args.ds == "OASIS":
-        return oasis_loaders(args, train_cls=oasis_ds.OASISBrainDataset, val_cls=oasis_ds.OASISBrainInferDataset, val_bs=1, drop_last_train=False, drop_last_val=True)
-    return ixi_loaders(args, train_cls=ixi_ds.IXIBrainDataset, val_cls=ixi_ds.IXIBrainInferDataset, val_bs=1, drop_last_train=True, drop_last_val=True)
 
 
 def parse_args():
@@ -55,7 +45,8 @@ def parse_args():
     p.add_argument("--ds", choices=["OASIS", "IXI"], default="OASIS")
     add_engine_args(p, dataset="IXI")
     p.set_defaults(exp="TM_DCA")
-    p.add_argument("--w_ncc", type=float, default=1.0); p.add_argument("--w_reg", type=float, default=1.0)
+    p.add_argument("--w_ncc", type=float, default=1.0)
+    p.add_argument("--w_reg", type=float, default=1.0)
     p.add_argument("--time_steps", type=int, default=12)
     p.add_argument("--vol_size", type=int, nargs=3, default=[160, 192, 224])
     p.add_argument("--dwin", type=int, nargs=3, default=[7, 5, 3])
@@ -66,7 +57,7 @@ def main():
     args = parse_args()
     apply_paths(args, dataset=args.ds)
     if not args.exp: args.exp = "TM_DCA_OASIS" if args.ds == "OASIS" else "TM_DCA_IXI"
-    run_train(dataset=args.ds, args=args, build_model=build_model, build_loaders=build_loaders, train_step=train_step, forward_flow_fn=forward_flow_fn)
+    run_train(dataset=args.ds, args=args, build_model=build_model, build_loaders=loaders_baseline, train_step=train_step, forward_flow_fn=forward_flow_fn)
 
 
 if __name__ == "__main__":

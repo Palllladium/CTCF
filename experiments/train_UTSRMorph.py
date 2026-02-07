@@ -2,8 +2,8 @@ import argparse, torch
 from torch import optim
 
 from experiments.engine import add_engine_args, apply_paths, run_train, make_ctx, oasis_loaders, ixi_loaders
-from experiments.OASIS import datasets as oasis_ds
-from experiments.IXI import datasets as ixi_ds
+from datasets import OASIS as oasis_ds
+from datasets import IXI as ixi_ds
 
 from models.UTSRMorph.model import CONFIGS as CONFIGS_UM, UTSRMorph
 
@@ -36,7 +36,7 @@ def train_step(model, batch, device, args, epoch, ctx):
 
 
 def build_model(device, args):
-    cfg = CONFIGS_UM[args.utsr_config]
+    cfg = CONFIGS_UM["UTSRMorph-Large"]
     model = UTSRMorph(cfg).to(device)
     opt = optim.Adam(model.parameters(), lr=args.lr, amsgrad=True)
     ctx = make_ctx(device, vol_size=args.vol_size, ncc_win=(9, 9, 9))
@@ -54,8 +54,8 @@ def parse_args():
     p.add_argument("--ds", choices=["OASIS", "IXI"], default="OASIS")
     add_engine_args(p, dataset="IXI")
     p.set_defaults(exp="UTSRMorph")
-    p.add_argument("--utsr_config", type=str, default="UTSRMorph-Large")
-    p.add_argument("--w_ncc", type=float, default=1.0); p.add_argument("--w_reg", type=float, default=1.0)
+    p.add_argument("--w_ncc", type=float, default=1.0)
+    p.add_argument("--w_reg", type=float, default=1.0)
     p.add_argument("--vol_size", type=int, nargs=3, default=[160, 192, 224])
     return p.parse_args()
 
