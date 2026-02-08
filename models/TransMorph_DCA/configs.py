@@ -55,5 +55,5 @@ def get_3DTransMorphDWin3Lvl_config():
     config.use_checkpoint = False
     config.out_indices = (0, 1, 2)
     config.reg_head_chan = 16
-    config.img_size = (160, 192, 224)
-    return config
+    config.img_size = (80, 96, 112) # half-res
+    return config 
