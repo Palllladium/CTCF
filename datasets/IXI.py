@@ -1,8 +1,6 @@
-import os, glob
-import torch, sys
+import torch
 from torch.utils.data import Dataset
 from utils import pkload
-import matplotlib.pyplot as plt
 
 import numpy as np
 
@@ -23,27 +21,10 @@ class IXIBrainDataset(Dataset):
         path = self.paths[index]
         x, x_seg = pkload(self.atlas_path)
         y, y_seg = pkload(path)
-        #print(x.shape)
-        #print(x.shape)
-        #print(np.unique(y))
-        # print(x.shape, y.shape)#(240, 240, 155) (240, 240, 155)
-        # transforms work with nhwtc
         x, y = x[None, ...], y[None, ...]
-        # print(x.shape, y.shape)#(1, 240, 240, 155) (1, 240, 240, 155)
         x,y = self.transforms([x, y])
-        #y = self.one_hot(y, 2)
-        #print(y.shape)
-        #sys.exit(0)
-        x = np.ascontiguousarray(x)# [Bsize,channelsHeight,,Width,Depth]
+        x = np.ascontiguousarray(x)
         y = np.ascontiguousarray(y)
-        #plt.figure()
-        #plt.subplot(1, 2, 1)
-        #plt.imshow(x[0, :, :, 8], cmap='gray')
-        #plt.subplot(1, 2, 2)
-        #plt.imshow(y[0, :, :, 8], cmap='gray')
-        #plt.show()
-        #sys.exit(0)
-        #y = np.squeeze(y, axis=0)
         x, y = torch.from_numpy(x), torch.from_numpy(y)
         return x, y
 
@@ -71,9 +52,9 @@ class IXIBrainInferDataset(Dataset):
         x_seg, y_seg= x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])
         y, y_seg = self.transforms([y, y_seg])
-        x = np.ascontiguousarray(x)# [Bsize,channelsHeight,,Width,Depth]
+        x = np.ascontiguousarray(x)
         y = np.ascontiguousarray(y)
-        x_seg = np.ascontiguousarray(x_seg)  # [Bsize,channelsHeight,,Width,Depth]
+        x_seg = np.ascontiguousarray(x_seg)
         y_seg = np.ascontiguousarray(y_seg)
         x, y, x_seg, y_seg = torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(x_seg), torch.from_numpy(y_seg)
         return x, y, x_seg, y_seg

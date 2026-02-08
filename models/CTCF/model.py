@@ -1,12 +1,7 @@
-# models/CTCF/model.py
-
-from __future__ import annotations
-
 from typing import Optional, Tuple, List
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from models.TransMorph_DCA.model import (
     SwinTransformer,
@@ -15,28 +10,27 @@ from models.TransMorph_DCA.model import (
     SpatialTransformer,
 )
 
-import models.CTCF.configs as configs
 from models.CTCF.ut_blocks import SRUpBlock3D, CAB, upsample_flow
 from models.CTCF.cascade_nets import CoarseFlowNetQuarter, FlowRefiner3D
+from models.CTCF.configs import CONFIGS
 
 
 class CTCF_DCA_CoreHalf(nn.Module):
     """
     Level-2: TM-DCA Swin encoder + SR-style decoder blocks + time integration.
-    Operates on HALF-res grid (config.img_size).
-    Expected tensors: [B, 1, D, H, W]
+    Operates on HALF-res grid derived from config.img_size.
+    Inputs: [B, 1, D, H, W] on HALF grid
+    Outputs: def_x_half [B,1,D,H,W], flow_half [B,3,D,H,W]
     """
     def __init__(self, config, time_steps: int):
         super().__init__()
 
-        # ---- contract fields (NO getattr) ----
         self.if_convskip = bool(config.if_convskip)
         self.if_transskip = bool(config.if_transskip)
-
         self.time_steps = int(time_steps)
-        self.img_size = tuple(config.img_size)  # (D,H,W)
 
-        embed_dim = int(config.embed_dim)
+        self.img_size_full = tuple(config.img_size)                  # FULL
+        self.img_size = tuple(s // 2 for s in self.img_size_full)    # HALF
 
         self.transformer = SwinTransformer(
             patch_size=config.patch_size,
@@ -56,70 +50,46 @@ class CTCF_DCA_CoreHalf(nn.Module):
             use_checkpoint=config.use_checkpoint,
             out_indices=config.out_indices,
             pat_merg_rf=config.pat_merg_rf,
-            img_size=config.img_size,
-            dwin_size=config.dwin_kernel_size,
+            img_size=self.img_size,
+            dwin_size=config.dwin_size,
         )
 
-        self.use_cab = True
-        self.cab0 = CAB(embed_dim * 4, compress_ratio=3, squeeze_factor=30)
-        self.cab1 = CAB(embed_dim * 2, compress_ratio=3, squeeze_factor=30)
-        self.cab2 = CAB(embed_dim, compress_ratio=3, squeeze_factor=30)
+        feats = list(self.transformer.num_features)
+        c0, c1, c2 = int(feats[0]), int(feats[1]), int(feats[2])
 
-        self.up0 = SRUpBlock3D(
-            in_channels=embed_dim * 4,
-            out_channels=embed_dim * 2,
-            skip_channels=(embed_dim * 2 if self.if_transskip else 0),
-        )
-        self.up1 = SRUpBlock3D(
-            in_channels=embed_dim * 2,
-            out_channels=embed_dim,
-            skip_channels=(embed_dim if self.if_transskip else 0),
-        )
-        self.up2 = SRUpBlock3D(
-            in_channels=embed_dim,
-            out_channels=embed_dim // 2,
-            skip_channels=(embed_dim // 2 if self.if_transskip else 0),
-        )
+        self.c_mid = max(1, c0 // 2)
 
+        self.cab0 = CAB(c2, compress_ratio=3, squeeze_factor=30)
+        self.cab1 = CAB(c1, compress_ratio=3, squeeze_factor=30)
+        self.cab2 = CAB(c0, compress_ratio=3, squeeze_factor=30)
+
+        self.up0 = SRUpBlock3D(in_channels=c2, out_channels=c1, skip_channels=(c1 if self.if_transskip else 0))
+        self.up1 = SRUpBlock3D(in_channels=c1, out_channels=c0, skip_channels=(c0 if self.if_transskip else 0))
+        
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-        self.c1 = Conv3dReLU(2, embed_dim // 2, kernel_size=3, stride=1, use_batchnorm=False)
+        self.c1 = Conv3dReLU(2, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False)
+        self.up2 = SRUpBlock3D(in_channels=c0,out_channels=self.c_mid,skip_channels=(self.c_mid if self.if_convskip else 0))
+
+        reg_ch = int(config.reg_head_chan)
 
         self.cs = nn.ModuleList()
         self.up3s = nn.ModuleList()
         self.reg_heads = nn.ModuleList()
 
         for _ in range(self.time_steps):
-            self.cs.append(Conv3dReLU(2, embed_dim // 2, kernel_size=3, stride=1, use_batchnorm=False))
-            self.up3s.append(
-                SRUpBlock3D(
-                    in_channels=embed_dim // 2,
-                    out_channels=embed_dim // 2,
-                    skip_channels=(embed_dim // 2 if self.if_convskip else 0),
-                )
-            )
-            self.reg_heads.append(
-                RegistrationHead(
-                    in_channels=embed_dim // 2,
-                    out_channels=3,
-                    kernel_size=3,
-                )
-            )
+            self.cs.append(Conv3dReLU(2, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False))
+            self.up3s.append(SRUpBlock3D(in_channels=self.c_mid,out_channels=reg_ch,skip_channels=(self.c_mid if self.if_convskip else 0)))
+            self.reg_heads.append(RegistrationHead(in_channels=reg_ch, out_channels=3, kernel_size=3))
 
-        self.spatial_trans = SpatialTransformer(self.img_size)
+        self.spatial_trans = SpatialTransformer(self.img_size)  # HALF grid
 
-    def forward(
-        self,
+    def forward(self,
         mov_half: torch.Tensor,
         fix_half: torch.Tensor,
         *,
         init_flow_half: Optional[torch.Tensor] = None,
         return_all_flows: bool = False,
     ):
-        """
-        Returns:
-          def_x_half, flow_half
-          optionally also per-step flows list
-        """
         if init_flow_half is None:
             flow_prev = torch.zeros(
                 (mov_half.shape[0], 3, *self.img_size),
@@ -131,8 +101,9 @@ class CTCF_DCA_CoreHalf(nn.Module):
             flow_prev = init_flow_half
             def_x = self.spatial_trans(mov_half, flow_prev)
 
-        f3 = self.c1(torch.cat((mov_half, fix_half), dim=1))
-        f3 = self.avg_pool(f3).to(mov_half.dtype) if self.if_convskip else None
+        x_cat = torch.cat((mov_half, fix_half), dim=1)
+        x_s1 = self.avg_pool(x_cat)
+        f3 = self.c1(x_s1).to(mov_half.dtype) if self.if_convskip else None
 
         out_feats = self.transformer((mov_half, fix_half))
 
@@ -153,13 +124,15 @@ class CTCF_DCA_CoreHalf(nn.Module):
         x = self.up1(x, f2)
         xx = self.up2(x, f3)
 
-        flows: List[torch.Tensor] = []
+        flows = [] if return_all_flows else None
 
         for t in range(self.time_steps):
             f_out = self.cs[t](torch.cat((def_x, fix_half), dim=1))
             x_t = self.up3s[t](xx, f_out if self.if_convskip else None)
             flow_step = self.reg_heads[t](x_t)
-            flows.append(flow_step)
+
+            if flows is not None:
+                flows.append(flow_step)
 
             flow_new = flow_prev + self.spatial_trans(flow_step, flow_prev)
             def_x = self.spatial_trans(mov_half, flow_new)
@@ -168,7 +141,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
         if return_all_flows:
             return def_x, flow_prev, flows
         return def_x, flow_prev
-
+    
 
 class CTCF_CascadeA(nn.Module):
     """
@@ -180,107 +153,75 @@ class CTCF_CascadeA(nn.Module):
     """
     def __init__(self, config):
         super().__init__()
-        self.cfg = config
 
-        self.img_size_half: Tuple[int, int, int] = tuple(config.img_size)
+        self.img_size_full: Tuple[int, int, int] = tuple(config.img_size)
         self.use_level1 = bool(config.use_level1)
         self.use_level2 = bool(config.use_level2)
         self.use_level3 = bool(config.use_level3)
+        self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch) if self.use_level1 else None
+        self.level2 = CTCF_DCA_CoreHalf(config, time_steps=config.time_steps) if self.use_level2 else None
+        self.level3 = FlowRefiner3D(base_ch=config.level3_base_ch) if self.use_level3 else None
 
-        self.st_half = SpatialTransformer(self.img_size_half)
-
-        if self.use_level1:
-            self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch)
-        else:
-            self.level1 = None
-
-        if self.use_level2:
-            self.level2 = CTCF_DCA_CoreHalf(config, time_steps=config.time_steps)
-        else:
-            self.level2 = None
-
-        if self.use_level3:
-            self.level3 = FlowRefiner3D(
-                base_ch=config.level3_base_ch,
-                error_mode=config.level3_error_mode,
-            )
-        else:
-            self.level3 = None
+        self.st_full = SpatialTransformer(self.img_size_full)
 
     def forward(
         self,
-        mov: torch.Tensor,
-        fix: torch.Tensor,
+        mov_full: torch.Tensor,
+        fix_full: torch.Tensor,
         *,
         return_all: bool = False,
+        alpha_l1: float = 1.0,
+        alpha_l3: float = 1.0,
     ):
-        """
-        Inputs: mov, fix on FULL-res [B,1,2D,2H,2W]
-        Internals:
-          - half: avg_pool3d(2)
-          - quarter: avg_pool3d(4)
-        Returns:
-          def_full, flow_full
-          if return_all: also dict with intermediate flows/maps
-        """
-        mov_half = F.avg_pool3d(mov, kernel_size=2, stride=2)
-        fix_half = F.avg_pool3d(fix, kernel_size=2, stride=2)
+        mov_half = nn.functional.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
+        fix_half = nn.functional.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
 
-        flow_half = torch.zeros(
-            (mov.shape[0], 3, *self.img_size_half),
-            device=mov.device,
-            dtype=mov.dtype,
+        aux = {} if return_all else None
+        flow_half_init = None
+
+        if self.level1 is not None and alpha_l1 > 0.0:
+            mov_quarter = nn.functional.interpolate(mov_full, scale_factor=0.25, mode="trilinear", align_corners=False)
+            fix_quarter = nn.functional.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=False)
+            flow_quarter = self.level1(mov_quarter, fix_quarter)
+            flow_half_init = upsample_flow(flow_quarter, scale_factor=2) * float(alpha_l1)
+
+            if aux is not None:
+                aux["flow_quarter"] = flow_quarter
+                aux["flow_half_init"] = flow_half_init
+
+        if self.level2 is None:
+            raise RuntimeError("CTCF_CascadeA requires level2 enabled (use_level2=True).")
+
+        out_l2 = self.level2(
+            mov_half,
+            fix_half,
+            init_flow_half=flow_half_init,
+            return_all_flows=return_all,
         )
 
-        aux = {}
+        if return_all:
+            def_half_l2, flow_half_l2, flows_l2 = out_l2
+            if aux is not None:
+                aux["flows_l2"] = flows_l2
+                aux["flow_half_l2"] = flow_half_l2
+        else:
+            def_half_l2, flow_half_l2 = out_l2
 
-        if self.use_level1:
-            mov_q = F.avg_pool3d(mov, kernel_size=4, stride=4)
-            fix_q = F.avg_pool3d(fix, kernel_size=4, stride=4)
-
-            flow_q = self.level1(mov_q, fix_q)              # (B,3,D/4,H/4,W/4)
-            flow_half_l1 = upsample_flow(flow_q, scale=2)   # -> half with correct scaling
-
-            flow_half = flow_half + flow_half_l1
-            aux["flow_q"] = flow_q
-            aux["flow_half_l1"] = flow_half_l1
-
-        mov_w_half = self.st_half(mov_half, flow_half)
-
-        if self.use_level2:
-            def_half_l2, flow_half_l2 = self.level2(
-                mov_half,
-                fix_half,
-                init_flow_half=flow_half,
-                return_all_flows=False,
-            )
+        if self.level3 is not None and alpha_l3 > 0.0:
+            flow_half_ref = self.level3(def_half_l2, fix_half, flow_half_l2) * float(alpha_l3)
+            flow_half = flow_half_l2 + flow_half_ref
+            if aux is not None:
+                aux["flow_half_ref"] = flow_half_ref
+        else:
             flow_half = flow_half_l2
-            mov_w_half = def_half_l2
-            aux["flow_half_l2"] = flow_half_l2
 
-        if self.use_level3:
-            delta_half = self.level3(mov_w_half, fix_half, flow_half)
-            flow_half = flow_half + delta_half
-            mov_w_half = self.st_half(mov_half, flow_half)
-            aux["delta_flow_half_l3"] = delta_half
-            aux["flow_half_l3"] = flow_half
+        flow_full = upsample_flow(flow_half, scale_factor=2)
+        def_full = self.st_full(mov_full, flow_full)
 
-        flow_full = upsample_flow(flow_half, scale=2)
-        full_size = tuple(mov.shape[2:])
-        st_full = SpatialTransformer(full_size).to(mov.device)
-        def_full = st_full(mov, flow_full)
+        if aux is not None:
+            aux["flow_half_final"] = flow_half
+            aux["flow_full"] = flow_full
 
         if return_all:
-            aux["flow_half_final"] = flow_half
-            aux["mov_half"] = mov_half
-            aux["fix_half"] = fix_half
-            aux["mov_w_half_final"] = mov_w_half
             return def_full, flow_full, aux
-
         return def_full, flow_full
-
-
-CONFIGS = {
-    "CTCF-CascadeA": configs.get_CTCF_config(),
-    "CTCF-CascadeA-Debug": configs.get_CTCF_debug_config(),
-}

@@ -14,7 +14,7 @@ class ValResult:
 
 
 @torch.no_grad()
-def validate_oasis(
+def validate(
     *,
     model: torch.nn.Module,
     val_loader,

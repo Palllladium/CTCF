@@ -118,12 +118,18 @@ class SRUpBlock3D(nn.Module):
         return self.conv2(self.conv1(x))
 
 
-def upsample_flow(flow: torch.Tensor, scale: int) -> torch.Tensor:
+def upsample_flow(flow: torch.Tensor, scale_factor: float = 2.0) -> torch.Tensor:
     """
-    Upsample displacement field by integer `scale` (2,4,...) with proper magnitude scaling.
+    Upsample displacement field with proper magnitude scaling.
     flow: [B,3,D,H,W]
     """
-    if scale == 1:
+    if scale_factor == 1:
         return flow
-    flow_up = F.interpolate(flow, scale_factor=scale, mode="trilinear", align_corners=False)
-    return flow_up * float(scale)
+
+    flow_up = F.interpolate(
+        flow,
+        scale_factor=scale_factor,
+        mode="trilinear",
+        align_corners=False,
+    )
+    return flow_up * float(scale_factor)

@@ -23,8 +23,10 @@ class OASISBrainDataset(Dataset):
         tar_list.remove(path)
         random.shuffle(tar_list)
         tar_file = tar_list[0]
-        x, x_seg = pkload(path)
-        y, y_seg = pkload(tar_file)
+        data = pkload(path)
+        x, x_seg = data if len(data) == 2 else (data[0], data[2])
+        data = pkload(tar_file)
+        y, y_seg = data if len(data) == 2 else (data[0], data[2])
         x, y = x[None, ...], y[None, ...]
         x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])

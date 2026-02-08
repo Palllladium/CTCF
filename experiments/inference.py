@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from experiments.OASIS import datasets
+from datasets import OASIS
 
 from utils import (
     NumpyType,
@@ -378,7 +378,7 @@ def run_inference(args):
         raise RuntimeError(f"No .pkl files found in test_dir: {test_dir}")
 
     test_tf = transforms.Compose([NumpyType((np.float32, np.int16))])
-    test_set = datasets.OASISBrainInferDataset(test_files, transforms=test_tf)
+    test_set = OASIS.OASISBrainInferDataset(test_files, transforms=test_tf)
     test_loader = DataLoader(
         test_set,
         batch_size=1,

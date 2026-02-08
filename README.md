@@ -40,3 +40,12 @@
 - Автоматическое сохранение логов и чекпойнтов (`logs/`, `experiments/`)  
 - Готов к воспроизводимым экспериментам и публикации результатов  
   *(ElCon Conference 2026, Biomedical Engineering track)*
+
+Guide:
+python -m experiments.train_CTCF --ds OASIS --1
+python -m experiments.train_TransMorphDCA --ds OASIS --1
+python -m experiments.train_UTSRMorph --ds OASIS --1
+
+python -m experiments.train_CTCF --ds IXI --2
+python -m experiments.train_TransMorphDCA --ds IXI --2
+python -m experiments.train_UTSRMorph --ds IXI --2
