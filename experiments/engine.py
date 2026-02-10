@@ -203,11 +203,25 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                     meters.setdefault(k, AverageMeter()).update(float(v), 1)
 
             iter_time_sum += (time.perf_counter() - t_it)
+            
             if it % 10 == 0 and meters:
-                keys = list(meters.keys()); main = keys[0]
+                main = "all" if "all" in meters else next(iter(meters.keys()))
                 msg = f"Iter {it:4d} / {len(train_loader):4d} | {main}(avg)={meters[main].avg:.4f}"
-                if "ncc" in meters and "reg" in meters:
-                    msg += f" | last NCC={meters['ncc'].val:.4f} REG={meters['reg'].val:.4f}"
+
+                if "ncc" in meters:  msg += f" | ncc={meters['ncc'].val:.4f}"
+                if "reg" in meters:  msg += f" reg={meters['reg'].val:.4f}"
+                if "icon" in meters: msg += f" icon={meters['icon'].val:.4f}"
+                if "cyc" in meters:  msg += f" cyc={meters['cyc'].val:.4f}"
+                if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
+
+                msg += f" | lr={lr_now:.3e}"
+
+                if "phase" in meters:
+                    msg += (
+                        f" | ctrl: ph={int(meters['phase'].val)}"
+                        f" a3={meters['a3'].val:.2f}"
+                        f" wJ={meters['wJ'].val:.2f} wI={meters['wI'].val:.2f} wC={meters['wC'].val:.2f}"
+                    )
                 print(msg)
 
         for k, m in meters.items(): 
@@ -236,6 +250,10 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_fold_percent=foldp)
             for k, v in (ctrl.tb_scalars() or {}).items():
                 writer.add_scalar(k, float(v), epoch)
+            ctrl_suffix = (
+                f" | ctrl: ph={ctrl.phase} a3={ctrl.alpha_l3:.2f}"
+                f" wJ={ctrl.w_jac_mul:.2f} wI={ctrl.w_icon_mul:.2f} wC={ctrl.w_cyc_mul:.2f}"
+            )
 
         if args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
             write_tb_images(writer, val_res.last_vis or {}, epoch)
@@ -257,6 +275,6 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         save_checkpoint(state, save_dir=os.path.join(ckpt_dir, "epochs"),
                         filename=f"epoch_{epoch:04d}.pth", max_model_num=8)
 
-        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | fold%={foldp:.2f}")
+        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | fold%={foldp:.2f}{ctrl_suffix}")
 
     writer.close()

@@ -95,8 +95,10 @@ class CTCFController:
         self._dice_hist: List[float] = []
         self._fold_hist: List[float] = []
 
+
     def get(self) -> CTCFKnobs:
         return self.knobs
+
 
     def tb_scalars(self) -> Dict[str, float]:
         phase_map = {"S0": 0.0, "S1": 1.0, "S2": 2.0, "S3": 3.0}
@@ -109,6 +111,7 @@ class CTCFController:
             "sched/phase": float(phase_map.get(self.phase, -1.0)),
         }
 
+
     def on_val_end(self, *, epoch: int, val_dice: float, val_fold_percent: float) -> None:
         self.push_hist(val_dice, val_fold_percent)
 
@@ -120,7 +123,6 @@ class CTCFController:
 
         self.update_jac(foldp)
 
-        # one transition per call
         if self.phase == "S0":
             if dice_stable and (not fold_bad_soft):
                 self.phase = "S1"
@@ -152,6 +154,7 @@ class CTCFController:
 
         self.clamp_all()
 
+
     def push_hist(self, dice: float, foldp: float) -> None:
         self._dice_hist.append(float(dice))
         self._fold_hist.append(float(foldp))
@@ -159,6 +162,7 @@ class CTCFController:
             self._dice_hist.pop(0)
         if len(self._fold_hist) > int(self.cfg.hist_len):
             self._fold_hist.pop(0)
+
 
     def dice_is_stable(self) -> bool:
         W = int(self.cfg.stab_window)
@@ -179,6 +183,7 @@ class CTCFController:
 
         return (std <= float(self.cfg.stab_std_tol)) and (gain <= float(self.cfg.stab_gain_tol))
 
+
     def update_jac(self, fold_percent: float) -> None:
         foldp = float(fold_percent)
         if foldp <= float(self.cfg.fold_soft):
@@ -189,6 +194,7 @@ class CTCFController:
             rate = float(self.cfg.jac_rate_boost)
 
         self.knobs.w_jac_mul = move_towards(self.knobs.w_jac_mul, float(self.cfg.jac_mul_max), rate)
+
 
     def clamp_all(self) -> None:
         self.knobs.alpha_l1 = 1.0

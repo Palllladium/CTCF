@@ -47,9 +47,13 @@ class Runner:
         w = ctrl.get()
         a1, a3 = float(w.alpha_l1), float(w.alpha_l3)
         
-        W_icon = float(args.w_icon) * float(w.w_icon_mul)
-        W_cyc  = float(args.w_cyc)  * float(w.w_cyc_mul)
-        W_jac  = float(args.w_jac)  * float(w.w_jac_mul)
+        wI = float(w.w_icon_mul)
+        wC = float(w.w_cyc_mul)
+        wJ = float(w.w_jac_mul)
+
+        W_icon = float(args.w_icon) * wI
+        W_cyc  = float(args.w_cyc)  * wC
+        W_jac  = float(args.w_jac)  * wJ
 
         def_xy, flow_xy = self.model(x, y, return_all=False, alpha_l1=a1, alpha_l3=a3)
         def_yx, flow_yx = self.model(y, x, return_all=False, alpha_l1=a1, alpha_l3=a3)
@@ -64,11 +68,18 @@ class Runner:
 
         loss = L_ncc + L_icon + L_reg + L_jac + L_cyc
         logs = {
-            "all": loss.item(), "ncc": L_ncc.item(), 
-            "reg": L_reg.item(), "icon": L_icon.item(), 
-            "cyc": L_cyc.item(), "jac": L_jac.item(), 
-            "a3": a3, "W_icon": W_icon, 
-            "W_cyc": W_cyc, "W_jac": W_jac}
+            "all":  loss.item(),
+            "ncc":  L_ncc.item(),
+            "reg":  L_reg.item(),
+            "icon": L_icon.item(),
+            "cyc":  L_cyc.item(),
+            "jac":  L_jac.item(),
+
+            "phase": float(ctrl.phase),
+            "a3":    a3,
+            "wI":    wI, "wC": wC, "wJ": wJ,
+            "W_icon": W_icon, "W_cyc": W_cyc, "W_jac": W_jac,
+        }
         return loss, logs
 
 
