@@ -251,8 +251,8 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             for k, v in (ctrl.tb_scalars() or {}).items():
                 writer.add_scalar(k, float(v), epoch)
             ctrl_suffix = (
-                f" | ctrl: ph={ctrl.phase} a3={ctrl.alpha_l3:.2f}"
-                f" wJ={ctrl.w_jac_mul:.2f} wI={ctrl.w_icon_mul:.2f} wC={ctrl.w_cyc_mul:.2f}"
+                f"ctrl: ph={ctrl.phase} a3={ctrl.knobs.alpha_l3:.2f} "
+                f"wJ={ctrl.knobs.w_jac_mul:.2f} wI={ctrl.knobs.w_icon_mul:.2f} wC={ctrl.knobs.w_cyc_mul:.2f}"
             )
 
         if args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
