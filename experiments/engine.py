@@ -11,10 +11,9 @@ from dataclasses import dataclass
 
 from datasets import OASIS, IXI
 from utils import (
-    AverageMeter, setup_device, make_exp_dirs, attach_stdout_logger,
-    load_checkpoint_if_exists, perf_epoch_start, perf_epoch_end,
-    dice_val_VOI, mk_grid_img, comput_fig, validate, save_checkpoint,
-    register_model, NCC_vxm, Grad3d, NumpyType, trans as trans_utils
+    adjust_learning_rate_poly, setup_device, make_exp_dirs, attach_stdout_logger, load_checkpoint_if_exists, 
+    perf_epoch_start, perf_epoch_end, dice_val_VOI, mk_grid_img, comput_fig, validate, save_checkpoint, 
+    AverageMeter, register_model, NCC_vxm, Grad3d, NumpyType, trans as trans_utils
 )
 
 
@@ -154,7 +153,7 @@ def write_tb_images(writer: SummaryWriter, last_vis: dict, epoch: int):
 def run_train(*, args, runner, build_loaders=loaders_baseline):
     assert torch.cuda.is_available(), "CUDA required"
 
-    device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
+    device = getattr(runner, "device", None)
     paths = make_exp_dirs(args.exp or "EXP")
     attach_stdout_logger(paths.log_dir)
     ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
@@ -183,8 +182,9 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
     for epoch in range(epoch_start, int(args.max_epoch)):
         runner.model.train()
         t0 = perf_epoch_start()
-        if hasattr(runner, "lr_step") and callable(getattr(runner, "lr_step")):
-            writer.add_scalar("LR", float(runner.lr_step(epoch)), epoch)
+        
+        lr_now = adjust_learning_rate_poly(runner.optimizer, epoch, int(args.max_epoch), args.lr)
+        writer.add_scalar("LR", lr_now, epoch)
 
         meters, iter_time_sum = {}, 0.0
         print(f"Training Starts (epoch {epoch:03d})")
@@ -194,7 +194,9 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             runner.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
                 loss, logs = runner.train_step(batch, epoch)
-            scaler.scale(loss).backward(); scaler.step(runner.optimizer); scaler.update()
+            scaler.scale(loss).backward()
+            scaler.step(runner.optimizer)
+            scaler.update()
 
             if logs:
                 for k, v in logs.items():
@@ -208,12 +210,13 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                     msg += f" | last NCC={meters['ncc'].val:.4f} REG={meters['reg'].val:.4f}"
                 print(msg)
 
-        for k, m in meters.items(): writer.add_scalar(f"Loss/train_{k}", m.avg, epoch)
+        for k, m in meters.items(): 
+            writer.add_scalar(f"Loss/train_{k}", m.avg, epoch)
 
         perf = perf_epoch_end(t0, iters=len(train_loader), iter_time_sum=iter_time_sum)
         writer.add_scalar("perf/epoch_time_sec", perf.epoch_time_sec, epoch)
         writer.add_scalar("perf/iter_time_ms", perf.mean_iter_time_ms, epoch)
-        if perf.peak_gpu_mem_gib is not None: writer.add_scalar("perf/peak_gpu_mem_GB", perf.peak_gpu_mem_gib, epoch)
+        writer.add_scalar("perf/peak_gpu_mem_GB", perf.peak_gpu_mem_gib, epoch)
 
         runner.model.eval()
         with torch.no_grad():
@@ -225,13 +228,21 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             )
 
         dsc, foldp = float(val_res.dsc), float(val_res.fold_percent)
-        writer.add_scalar("DSC/validate", dsc, epoch)
-        writer.add_scalar("Metric/validate_fold_percent", foldp, epoch)
+        writer.add_scalar("val/Dice", dsc, epoch)
+        writer.add_scalar("val/Fold%", foldp, epoch)
+
+        ctrl = getattr(getattr(runner, "ctx", None), "ctcf_ctrl", None)
+        if ctrl is not None:
+            ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_fold_percent=foldp)
+            for k, v in (ctrl.tb_scalars() or {}).items():
+                writer.add_scalar(k, float(v), epoch)
+
         if args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
             write_tb_images(writer, val_res.last_vis or {}, epoch)
 
         is_best = dsc > best_dsc
-        if is_best: best_dsc = dsc
+        if is_best: 
+            best_dsc = dsc
 
         state = {
             "epoch": epoch,

@@ -151,41 +151,6 @@ def adjust_learning_rate_poly(
     return new_lr
 
 
-
-def adjust_lr_ctcf_schedule(
-    optimizer: optim.Optimizer,
-    epoch: int,
-    max_epochs: int,
-    init_lr: float,
-    *,
-    power: float = 0.9,
-    min_lr: float = 2e-5,
-    warm_end_frac: float = 0.15,
-) -> float:
-    """
-    Two-phase schedule:
-      1) Hold LR = init_lr until warm is fully ON (epoch < warm_end)
-      2) After that: polynomial decay on the remaining epochs
-         lr = init_lr * (1 - t)^power, t in [0..1]
-    """
-    E = int(max_epochs)
-    e = int(epoch)
-    e1 = int(warm_end_frac * E)
-
-    if e < e1:
-        lr = float(init_lr)
-    else:
-        denom = float(max(1, E - e1))
-        t = float(e - e1) / denom
-        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
-        lr = float(init_lr * np.power(1.0 - t, power))
-
-    lr = float(max(lr, min_lr))
-    for pg in optimizer.param_groups:
-        pg["lr"] = lr
-    return lr
-
-
 # ----------------------------- Checkpoints ----------------------------- #
 def save_checkpoint(state: Dict[str, Any], save_dir: str, filename: str, max_model_num: int = 8) -> None:
     os.makedirs(save_dir, exist_ok=True)
@@ -293,31 +258,3 @@ def mk_grid_img(flow: torch.Tensor, grid_step: int = 8, line_thickness: int = 1)
         grid_img[:, :, :, :, i0:i1] = 1.0
 
     return grid_img
-
-
-def ctcf_schedule(epoch: int, max_epoch: int):
-    max_epoch = max(1, int(max_epoch))
-    e = int(epoch)
-
-    def clamp01(x):
-        return 0.0 if x <= 0.0 else 1.0 if x >= 1.0 else float(x)
-
-    def ramp(p):
-        p = clamp01(p)
-        return p * p * (3.0 - 2.0 * p)  # smoothstep
-
-    # unified schedule: 5% -> 15%
-    s0 = max(1, int(0.05 * max_epoch))
-    s1 = max(s0 + 1, int(0.15 * max_epoch))
-
-    if e < s0:
-        v = 0.0
-    elif e >= s1:
-        v = 1.0
-    else:
-        v = ramp((e - s0) / float(s1 - s0))
-
-    alpha = float(v)
-    warm = float(v)
-
-    return alpha, alpha, warm
