@@ -75,7 +75,7 @@ class Runner:
             "cyc":  L_cyc.item(),
             "jac":  L_jac.item(),
 
-            "phase": float(ctrl.phase),
+            "phase": float({"S0": 0, "S1": 1, "S2": 2, "S3": 3}.get(ctrl.phase, -1)),
             "a3":    a3,
             "wI":    wI, "wC": wC, "wJ": wJ,
             "W_icon": W_icon, "W_cyc": W_cyc, "W_jac": W_jac,

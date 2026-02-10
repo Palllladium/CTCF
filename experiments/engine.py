@@ -152,8 +152,7 @@ def write_tb_images(writer: SummaryWriter, last_vis: dict, epoch: int):
 
 def run_train(*, args, runner, build_loaders=loaders_baseline):
     assert torch.cuda.is_available(), "CUDA required"
-
-    device = getattr(runner, "device", None)
+    device = runner.device
     paths = make_exp_dirs(args.exp or "EXP")
     attach_stdout_logger(paths.log_dir)
     ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
@@ -245,6 +244,7 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         writer.add_scalar("val/Dice", dsc, epoch)
         writer.add_scalar("val/Fold%", foldp, epoch)
 
+        ctrl_suffix = ""
         ctrl = getattr(getattr(runner, "ctx", None), "ctcf_ctrl", None)
         if ctrl is not None:
             ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_fold_percent=foldp)
