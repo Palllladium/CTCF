@@ -13,6 +13,7 @@ class Runner:
 
         cfg = CONFIGS_CTCF[args.config] 
         cfg.time_steps = int(args.time_steps)
+        cfg.use_checkpoint = bool(int(args.use_checkpoint))
 
         self.model = CTCF_CascadeA(cfg).to(device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -96,6 +97,9 @@ def parse_args():
     p.add_argument("--fold_hard", type=float, default=10.0)
     p.add_argument("--alpha_l3_start", type=float, default=0.10)
     p.add_argument("--time_steps", type=int, default=12)
+    p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1)
+    p.add_argument("--max_train_iters", type=int, default=0, help="Limit train iterations per epoch; <=0 disables limit.")
+    p.add_argument("--max_val_batches", type=int, default=0, help="Limit validation batches per epoch; <=0 disables limit.")
     return p.parse_args()
 
 

@@ -736,12 +736,12 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             blk.H, blk.W, blk.T = H, W, T
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, attn_mask)
+                x = checkpoint.checkpoint(blk, x, attn_mask, use_reentrant=False)
             else:
                 x = blk(x, attn_mask)
         self.overlap_attn.H, self.overlap_attn.W, self.overlap_attn.T = H, W, T
         if self.use_checkpoint:
-            x = checkpoint.checkpoint(self.overlap_attn, x, None)
+            x = checkpoint.checkpoint(self.overlap_attn, x, None, use_reentrant=False)
         else:
             x = self.overlap_attn(x, None)
 

@@ -25,6 +25,7 @@ def validate(
     mk_grid_img_fn: Optional[Callable[..., torch.Tensor]] = None,
     grid_step: int = 8,
     line_thickness: int = 1,
+    max_batches: Optional[int] = None,
 ) -> ValResult:
     """
     Universal OASIS validation:
@@ -45,7 +46,10 @@ def validate(
 
     last_vis: Dict[str, Any] = {}
 
-    for batch in val_loader:
+    max_batches = None if max_batches is None else int(max_batches)
+    for bidx, batch in enumerate(val_loader):
+        if max_batches is not None and max_batches > 0 and bidx >= max_batches:
+            break
         # expected: x, y, x_seg, y_seg
         x, y, x_seg, y_seg = [t.to(device, non_blocking=True) for t in batch]
         vol_shape = tuple(x.shape[2:])  # (D,H,W) from tensor

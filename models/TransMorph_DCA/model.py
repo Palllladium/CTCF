@@ -744,7 +744,7 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             blk.H, blk.W, blk.T = H, W, T
             if self.use_checkpoint:
-                x_m, x_f = checkpoint.checkpoint(blk, x_m, x_f, attn_mask)
+                x_m, x_f = checkpoint.checkpoint(blk, x_m, x_f, attn_mask, use_reentrant=False)
             else:
                 x_m, x_f = blk(x_m, x_f, attn_mask)
         mov, fix = x_m, x_f

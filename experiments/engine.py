@@ -69,6 +69,8 @@ def add_common_args(p: argparse.ArgumentParser):
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--resume", default="")
+    p.add_argument("--save_ckpt", type=int, choices=[0, 1], default=1, help="Enable/disable checkpoint saving to disk.")
+    p.add_argument("--use_tb", type=int, choices=[0, 1], default=1, help="Enable/disable TensorBoard logging.")
     p.add_argument("--tb_images_every", type=int, default=5)
     p.add_argument("--grid_step", type=int, default=8)
     p.add_argument("--line_thickness", type=int, default=1)
@@ -156,11 +158,17 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
     paths = make_exp_dirs(args.exp or "EXP")
     attach_stdout_logger(paths.log_dir)
     ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
-    os.makedirs(ckpt_dir, exist_ok=True)
+    save_ckpt = bool(int(getattr(args, "save_ckpt", 1)))
+    use_tb = bool(int(getattr(args, "use_tb", 1)))
+    if save_ckpt:
+        os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(os.path.join(paths.exp_dir, "vis"), exist_ok=True)
-    writer = SummaryWriter(log_dir=paths.log_dir)
+    writer = SummaryWriter(log_dir=paths.log_dir) if use_tb else None
 
     train_loader, val_loader = build_loaders(args)
+    max_train_iters = int(getattr(args, "max_train_iters", 0) or 0)
+    max_val_batches = int(getattr(args, "max_val_batches", 0) or 0)
+    max_val_batches = None if max_val_batches <= 0 else max_val_batches
     scaler = torch.amp.GradScaler("cuda")
     use_amp = True
 
@@ -183,12 +191,15 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         t0 = perf_epoch_start()
         
         lr_now = adjust_learning_rate_poly(runner.optimizer, epoch, int(args.max_epoch), args.lr)
-        writer.add_scalar("LR", lr_now, epoch)
+        if writer is not None:
+            writer.add_scalar("LR", lr_now, epoch)
 
         meters, iter_time_sum = {}, 0.0
         print(f"Training Starts (epoch {epoch:03d})")
 
         for it, batch in enumerate(train_loader, start=1):
+            if max_train_iters > 0 and it > max_train_iters:
+                break
             t_it = time.perf_counter()
             runner.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
@@ -212,6 +223,7 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 if "icon" in meters: msg += f" icon={meters['icon'].val:.4f}"
                 if "cyc" in meters:  msg += f" cyc={meters['cyc'].val:.4f}"
                 if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
+                if "dice_tr" in meters: msg += f" dice_tr={meters['dice_tr'].val:.4f}"
 
                 msg += f" | lr={lr_now:.3e}"
 
@@ -223,13 +235,15 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                     )
                 print(msg)
 
-        for k, m in meters.items(): 
-            writer.add_scalar(f"Loss/train_{k}", m.avg, epoch)
+        if writer is not None:
+            for k, m in meters.items():
+                writer.add_scalar(f"Loss/train_{k}", m.avg, epoch)
 
         perf = perf_epoch_end(t0, iters=len(train_loader), iter_time_sum=iter_time_sum)
-        writer.add_scalar("perf/epoch_time_sec", perf.epoch_time_sec, epoch)
-        writer.add_scalar("perf/iter_time_ms", perf.mean_iter_time_ms, epoch)
-        writer.add_scalar("perf/peak_gpu_mem_GB", perf.peak_gpu_mem_gib, epoch)
+        if writer is not None:
+            writer.add_scalar("perf/epoch_time_sec", perf.epoch_time_sec, epoch)
+            writer.add_scalar("perf/iter_time_ms", perf.mean_iter_time_ms, epoch)
+            writer.add_scalar("perf/peak_gpu_mem_GB", perf.peak_gpu_mem_gib, epoch)
 
         runner.model.eval()
         with torch.no_grad():
@@ -237,25 +251,28 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 model=runner.model, val_loader=val_loader, device=device,
                 forward_flow_fn=lambda x, y: runner.forward_flow(x, y),
                 dice_fn=dice_val_VOI, register_model_cls=register_model, mk_grid_img_fn=mk_grid_img,
-                grid_step=int(args.grid_step), line_thickness=int(args.line_thickness)
+                grid_step=int(args.grid_step), line_thickness=int(args.line_thickness),
+                max_batches=max_val_batches,
             )
 
         dsc, foldp = float(val_res.dsc), float(val_res.fold_percent)
-        writer.add_scalar("val/Dice", dsc, epoch)
-        writer.add_scalar("val/Fold%", foldp, epoch)
+        if writer is not None:
+            writer.add_scalar("val/Dice", dsc, epoch)
+            writer.add_scalar("val/Fold%", foldp, epoch)
 
         ctrl_suffix = ""
         ctrl = getattr(getattr(runner, "ctx", None), "ctcf_ctrl", None)
         if ctrl is not None:
             ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_fold_percent=foldp)
-            for k, v in (ctrl.tb_scalars() or {}).items():
-                writer.add_scalar(k, float(v), epoch)
+            if writer is not None:
+                for k, v in (ctrl.tb_scalars() or {}).items():
+                    writer.add_scalar(k, float(v), epoch)
             ctrl_suffix = (
                 f"ctrl: ph={ctrl.phase} a3={ctrl.knobs.alpha_l3:.2f} "
                 f"wJ={ctrl.knobs.w_jac_mul:.2f} wI={ctrl.knobs.w_icon_mul:.2f} wC={ctrl.knobs.w_cyc_mul:.2f}"
             )
 
-        if args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
+        if writer is not None and args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
             write_tb_images(writer, val_res.last_vis or {}, epoch)
 
         is_best = dsc > best_dsc
@@ -270,11 +287,18 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             "scaler": scaler.state_dict(),
         }
 
-        torch.save(state, os.path.join(ckpt_dir, "last.pth"))
-        if is_best: torch.save(state, os.path.join(ckpt_dir, "best.pth"))
-        save_checkpoint(state, save_dir=os.path.join(ckpt_dir, "epochs"),
-                        filename=f"epoch_{epoch:04d}.pth", max_model_num=8)
+        if save_ckpt:
+            torch.save(state, os.path.join(ckpt_dir, "last.pth"))
+            if is_best:
+                torch.save(state, os.path.join(ckpt_dir, "best.pth"))
+            save_checkpoint(
+                state,
+                save_dir=os.path.join(ckpt_dir, "epochs"),
+                filename=f"epoch_{epoch:04d}.pth",
+                max_model_num=8,
+            )
 
         print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | fold%={foldp:.2f}{ctrl_suffix}")
 
-    writer.close()
+    if writer is not None:
+        writer.close()
