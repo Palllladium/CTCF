@@ -5,6 +5,7 @@ __pycache__/
 # data & outputs
 logs/
 results/
+tools/
 *.pth
 *.pt
 *.ckpt
@@ -13,5 +14,4 @@ results/
 .vscode/
 
 # misc
-docs/
-.\parse.py
+tools/

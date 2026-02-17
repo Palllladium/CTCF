@@ -79,7 +79,7 @@ def add_common_args(p: argparse.ArgumentParser):
 
 def apply_paths(args):
     ds = args.ds.upper()
-    prof = int(getattr(args, "paths", 1) or 1)
+    prof = int(getattr(args, "paths", 1) or 2)
     prof_map = PATHS.get(prof, {}).get(ds, {})
 
     if not args.train_dir: args.train_dir = prof_map.get("train_dir", "")
