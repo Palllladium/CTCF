@@ -65,7 +65,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
 
         self.up0 = SRUpBlock3D(in_channels=c2, out_channels=c1, skip_channels=(c1 if self.if_transskip else 0))
         self.up1 = SRUpBlock3D(in_channels=c1, out_channels=c0, skip_channels=(c0 if self.if_transskip else 0))
-        
+
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
         self.c1 = Conv3dReLU(2, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False)
         self.up2 = SRUpBlock3D(in_channels=c0,out_channels=self.c_mid,skip_channels=(self.c_mid if self.if_convskip else 0))
@@ -141,7 +141,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
         if return_all_flows:
             return def_x, flow_prev, flows
         return def_x, flow_prev
-    
+
 
 class CTCF_CascadeA(nn.Module):
     """

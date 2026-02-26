@@ -1,14 +1,15 @@
+import math
+from typing import Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-from timm.layers import DropPath, trunc_normal_, to_3tuple
-from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
-from typing import Tuple, Union
+import torch.utils.checkpoint as checkpoint
 from einops import rearrange
-import numpy as np
-import math
+from torch.distributions.normal import Normal
+from timm.layers import DropPath, trunc_normal_, to_3tuple
 
 import models.UTSRMorph.configs as configs
 
@@ -30,17 +31,11 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
-    
+
 
 class CA(nn.Module):
-    """Channel attention used in RCAN.
-    Args:
-        num_feat (int): Channel number of intermediate features.
-        squeeze_factor (int): Channel squeeze factor. Default: 16.
-    """
-
     def __init__(self, num_feat, squeeze_factor=16):
-        super(CA, self).__init__()
+        super().__init__()
         self.attention = nn.Sequential(
             nn.AdaptiveAvgPool3d(1),
             nn.Conv3d(num_feat, num_feat // squeeze_factor, 1, padding=0),
@@ -51,12 +46,12 @@ class CA(nn.Module):
     def forward(self, x):
         y = self.attention(x)
         return x * y
-    
+
 
 class CAB(nn.Module):
 
     def __init__(self, num_feat, compress_ratio=3, squeeze_factor=30):
-        super(CAB, self).__init__()
+        super().__init__()
 
         self.cab = nn.Sequential(
             nn.Conv3d(num_feat, num_feat // compress_ratio, 3, 1, 1),
@@ -67,34 +62,16 @@ class CAB(nn.Module):
 
     def forward(self, x):
         return self.cab(x)
-    
+
 
 def window_partition(x, window_size):
-    """
-    Args:
-        x: (B, H, W, L, C)
-        window_size (int): window size
-    Returns:
-        windows: (num_windows*B, window_size, window_size, window_size, C)
-    """
     B, H, W, L, C = x.shape
     x = x.view(B, H // window_size[0], window_size[0], W // window_size[1], window_size[1], L // window_size[2], window_size[2], C)
-
     windows = x.permute(0, 1, 3, 5, 2, 4, 6, 7).contiguous().view(-1, window_size[0], window_size[1], window_size[2], C)
     return windows
 
 
 def window_reverse(windows, window_size, H, W, L):
-    """
-    Args:
-        windows: (num_windows*B, window_size, window_size, window_size, C)
-        window_size (int): Window size
-        H (int): Height of image
-        W (int): Width of image
-        L (int): Length of image
-    Returns:
-        x: (B, H, W, L, C)
-    """
     B = int(windows.shape[0] / (H * W * L / window_size[0] / window_size[1] / window_size[2]))
     x = windows.view(B, H // window_size[0], W // window_size[1], L // window_size[2], window_size[0], window_size[1], window_size[2], -1)
     x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous().view(B, H, W, L, -1)
@@ -107,32 +84,6 @@ def filter_dilated_rows(
     dilated_kernel_size: Tuple[int, int, int],
     kernel_size: Tuple[int, int, int],
 ):
-    """
-    A helper function that removes extra rows created during the process of
-    implementing dilation.
-
-    Args:
-        tensor: A tensor containing the output slices resulting from unfolding
-                the input tensor to `unfold3d()`.
-                Shape is ``(B, C, D_out, H_out, W_out, dilated_kernel_size[0],
-                dilated_kernel_size[1], dilated_kernel_size[2])``.
-        dilation: The dilation given to `unfold3d()`.
-        dilated_kernel_size: The size of the dilated kernel.
-        kernel_size: The size of the kernel given to `unfold3d()`.
-
-    Returns:
-        A tensor of shape (B, C, D_out, H_out, W_out, kernel_size[0], kernel_size[1], kernel_size[2])
-        For D_out, H_out, W_out definitions see :class:`torch.nn.Unfold`.
-
-    Example:
-        >>> tensor = torch.zeros([1, 1, 3, 3, 3, 5, 5, 5])
-        >>> dilation = (2, 2, 2)
-        >>> dilated_kernel_size = (5, 5, 5)
-        >>> kernel_size = (3, 3, 3)
-        >>> filter_dilated_rows(tensor, dilation, dilated_kernel_size, kernel_size).shape
-        torch.Size([1, 1, 3, 3, 3, 3, 3, 3])
-    """
-
     kernel_rank = len(kernel_size)
     indices_to_keep = [list(range(0, dilated_kernel_size[i], dilation[i])) for i in range(kernel_rank)]
     tensor_np = tensor.numpy()
@@ -152,30 +103,6 @@ def unfold3d(
     stride: Union[int, Tuple[int, int, int]] = 1,
     dilation: Union[int, Tuple[int, int, int]] = 1,
 ):
-    r"""
-    Extracts sliding local blocks from an batched input tensor.
-
-    :class:`torch.nn.Unfold` only supports 4D inputs (batched image-like tensors).
-    This method implements the same action for 5D inputs
-
-    Args:
-        tensor: An input tensor of shape ``(B, C, D, H, W)``.
-        kernel_size: the size of the sliding blocks
-        padding: implicit zero padding to be added on both sides of input
-        stride: the stride of the sliding blocks in the input spatial dimensions
-        dilation: the spacing between the kernel points.
-
-    Returns:
-        A tensor of shape ``(B, C * np.product(kernel_size), L)``, where L - output spatial dimensions.
-        See :class:`torch.nn.Unfold` for more details
-
-    Example:
-        >>> B, C, D, H, W = 3, 4, 5, 6, 7
-        >>> tensor = torch.arange(1, B*C*D*H*W + 1.).view(B, C, D, H, W)
-        >>> unfold3d(tensor, kernel_size=2, padding=0, stride=1).shape
-        torch.Size([3, 32, 120])
-    """
-
     if len(tensor.shape) != 5:
         raise ValueError(
             f"Input tensor must be of the shape [B, C, D, H, W]. Got{tensor.shape}"
@@ -328,6 +255,7 @@ class OAB(nn.Module):
         self.W = None
         self.T = None
 
+
     def forward(self, x, mask=None):
         H, W, T = self.H, self.W, self.T
         B, L, C = x.shape
@@ -392,7 +320,7 @@ class OAB(nn.Module):
 
         x = x + self.mlp(self.norm2(x))
         return x
-    
+
 
 class WindowAttention(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
@@ -444,6 +372,7 @@ class WindowAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
+
 
     def forward(self, x, mask=None):
         """ Forward function.
@@ -520,6 +449,7 @@ class SwinTransformerBlock(nn.Module):
         self.H = None
         self.W = None
         self.T = None
+
 
     def forward(self, x, mask_matrix):
         H, W, T = self.H, self.W, self.T
@@ -701,6 +631,7 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
+
     def forward(self, x, H, W, T):
         """ Forward function.
         Args:
@@ -776,6 +707,7 @@ class PatchEmbed(nn.Module):
         else:
             self.norm = None
 
+
     def forward(self, x):
         """Forward function."""
         # padding
@@ -803,6 +735,7 @@ class SinusoidalPositionEmbedding(nn.Module):
     def __init__(self,):
         super(SinusoidalPositionEmbedding, self).__init__()
 
+
     def forward(self, x):
         batch_sz, n_patches, hidden = x.shape
         position_ids = torch.arange(0, n_patches).float().cuda()
@@ -826,6 +759,7 @@ class SinPositionalEncoding3D(nn.Module):
         self.channels = channels
         self.inv_freq = 1. / (10000 ** (torch.arange(0, channels, 2).float() / channels))
         #self.register_buffer('inv_freq', inv_freq)
+
 
     def forward(self, tensor):
         """
@@ -963,6 +897,7 @@ class SwinTransformer(nn.Module):
 
         self._freeze_stages()
 
+
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
@@ -979,6 +914,7 @@ class SwinTransformer(nn.Module):
                 m.eval()
                 for param in m.parameters():
                     param.requires_grad = False
+
 
     def init_weights(self, pretrained=None):
         """Initialize the weights in backbone.
@@ -1002,6 +938,7 @@ class SwinTransformer(nn.Module):
             self.apply(_init_weights)
         else:
             raise TypeError('pretrained must be a str or None')
+
 
     def forward(self, x):
         """Forward function."""
@@ -1030,6 +967,7 @@ class SwinTransformer(nn.Module):
                 out = x_out.view(-1, H, W, T, self.num_features[i]).permute(0, 4, 1, 2, 3).contiguous()
                 outs.append(out)
         return outs
+
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""

@@ -1,32 +1,26 @@
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-from utils import pkload
 
-import numpy as np
+from utils import pkload
 
 
 class IXIBrainDataset(Dataset):
     def __init__(self, data_path, atlas_path, transforms):
-        self.paths = data_path
-        self.atlas_path = atlas_path
+        self.paths = list(data_path)
         self.transforms = transforms
+        self.atlas_x, _ = pkload(atlas_path)
 
-    def one_hot(self, img, C):
-        out = np.zeros((C, img.shape[1], img.shape[2], img.shape[3]))
-        for i in range(C):
-            out[i,...] = img == i
-        return out
 
     def __getitem__(self, index):
-        path = self.paths[index]
-        x, x_seg = pkload(self.atlas_path)
-        y, y_seg = pkload(path)
+        y, _ = pkload(self.paths[index])
+        x = self.atlas_x
         x, y = x[None, ...], y[None, ...]
-        x,y = self.transforms([x, y])
-        x = np.ascontiguousarray(x)
-        y = np.ascontiguousarray(y)
-        x, y = torch.from_numpy(x), torch.from_numpy(y)
+        x, y = self.transforms([x, y])
+        x = torch.from_numpy(np.ascontiguousarray(x)).float()
+        y = torch.from_numpy(np.ascontiguousarray(y)).float()
         return x, y
+
 
     def __len__(self):
         return len(self.paths)
@@ -34,30 +28,24 @@ class IXIBrainDataset(Dataset):
 
 class IXIBrainInferDataset(Dataset):
     def __init__(self, data_path, atlas_path, transforms):
-        self.atlas_path = atlas_path
-        self.paths = data_path
+        self.paths = list(data_path)
         self.transforms = transforms
+        self.atlas_x, self.atlas_seg = pkload(atlas_path)
 
-    def one_hot(self, img, C):
-        out = np.zeros((C, img.shape[1], img.shape[2], img.shape[3]))
-        for i in range(C):
-            out[i,...] = img == i
-        return out
 
     def __getitem__(self, index):
-        path = self.paths[index]
-        x, x_seg = pkload(self.atlas_path)
-        y, y_seg = pkload(path)
+        y, y_seg = pkload(self.paths[index])
+        x, x_seg = self.atlas_x, self.atlas_seg
         x, y = x[None, ...], y[None, ...]
-        x_seg, y_seg= x_seg[None, ...], y_seg[None, ...]
+        x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])
         y, y_seg = self.transforms([y, y_seg])
-        x = np.ascontiguousarray(x)
-        y = np.ascontiguousarray(y)
-        x_seg = np.ascontiguousarray(x_seg)
-        y_seg = np.ascontiguousarray(y_seg)
-        x, y, x_seg, y_seg = torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(x_seg), torch.from_numpy(y_seg)
+        x = torch.from_numpy(np.ascontiguousarray(x)).float()
+        y = torch.from_numpy(np.ascontiguousarray(y)).float()
+        x_seg = torch.from_numpy(np.ascontiguousarray(x_seg)).long()
+        y_seg = torch.from_numpy(np.ascontiguousarray(y_seg)).long()
         return x, y, x_seg, y_seg
+
 
     def __len__(self):
         return len(self.paths)

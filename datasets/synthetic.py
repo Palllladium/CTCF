@@ -2,13 +2,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from utils import register_model
+from utils import RegisterModel
 
 
 class SyntheticCTCFDataset(Dataset):
     """
     Deterministic synthetic registration pairs for fast ablation runs.
-
     Output contract matches OASIS datasets:
       x, y, x_seg, y_seg with shapes [1, D, H, W].
     """
@@ -28,11 +27,13 @@ class SyntheticCTCFDataset(Dataset):
         self.flow_max_disp = float(flow_max_disp)
         self.seed = int(seed)
 
-        self._st_lin = register_model(self.vol_size, mode="bilinear")
-        self._st_near = register_model(self.vol_size, mode="nearest")
+        self._st_lin = RegisterModel(self.vol_size, mode="bilinear")
+        self._st_near = RegisterModel(self.vol_size, mode="nearest")
+
 
     def __len__(self):
         return self.num_samples
+
 
     def _make_seg(self, g: torch.Generator) -> torch.Tensor:
         d, h, w = self.vol_size
@@ -40,7 +41,6 @@ class SyntheticCTCFDataset(Dataset):
 
         logits = torch.randn((1, self.num_labels, *lr), generator=g) * 0.8
 
-        # Force each class to appear at least locally.
         for c in range(self.num_labels):
             zz = int(torch.randint(0, lr[0], (1,), generator=g).item())
             yy = int(torch.randint(0, lr[1], (1,), generator=g).item())
@@ -48,8 +48,9 @@ class SyntheticCTCFDataset(Dataset):
             logits[0, c, zz, yy, xx] += 6.0
 
         logits = F.interpolate(logits, size=self.vol_size, mode="trilinear", align_corners=False)
-        seg = logits.argmax(dim=1, keepdim=True).long()  # [1,1,D,H,W]
+        seg = logits.argmax(dim=1, keepdim=True).long()
         return seg
+
 
     def _make_img_from_seg(self, seg: torch.Tensor, g: torch.Generator) -> torch.Tensor:
         d, h, w = self.vol_size
@@ -64,6 +65,7 @@ class SyntheticCTCFDataset(Dataset):
         img = torch.clamp(img + 0.08 * lf_noise, 0.0, 1.0)
         return img
 
+
     def _make_flow(self, g: torch.Generator) -> torch.Tensor:
         d, h, w = self.vol_size
         lr = (max(6, d // 8), max(6, h // 8), max(6, w // 8))
@@ -76,6 +78,7 @@ class SyntheticCTCFDataset(Dataset):
         flow = flow * (self.flow_max_disp * amp)
         return flow.float()
 
+
     def __getitem__(self, index):
         g = torch.Generator().manual_seed(self.seed + int(index))
 
@@ -83,7 +86,7 @@ class SyntheticCTCFDataset(Dataset):
         x = self._make_img_from_seg(x_seg, g)          # [1,1,D,H,W]
         flow = self._make_flow(g)                      # [1,3,D,H,W]
 
-        y = self._st_lin((x, flow))                    # [1,1,D,H,W]
+        y = self._st_lin((x, flow))
         y_seg = self._st_near((x_seg.float(), flow)).long()
 
         x = x[0].float()
@@ -109,8 +112,7 @@ def build_synth_loaders(args):
         seed=int(args.synth_seed) + 100_000,
     )
 
-    train_loader = DataLoader(
-        train_ds,
+    train_loader = DataLoader(train_ds,
         batch_size=int(args.batch_size),
         shuffle=True,
         num_workers=int(args.num_workers),

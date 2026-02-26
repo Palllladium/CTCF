@@ -1,26 +1,16 @@
-'''
-TransMorph-DCA model
-Chen, J., Liu, Y., He, Y., & Du, Y. (2023).
-Deformable Cross-Attention Transformer for Medical Image Registration.
-TransMorph: Transformer for unsupervised medical image registration.
-In Machine Learning in Medical Imaging: 14th International Workshop, MLMI 2023,
-Held in Conjunction with MICCAI 2023.
+"""TransMorph-DCA model."""
 
-Created by:
-Junyu Chen
-jchen245@jhmi.edu
-Johns Hopkins University
-'''
-
+import einops
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as checkpoint
-from timm.layers import DropPath, trunc_normal_, to_3tuple
-from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
-import numpy as np
+import torch.utils.checkpoint as checkpoint
+from torch.distributions.normal import Normal
+from timm.layers import DropPath, trunc_normal_, to_3tuple
+
 import models.TransMorph_DCA.configs as configs
-import einops
+
 
 class LayerNormProxy(nn.Module):
 
@@ -32,6 +22,7 @@ class LayerNormProxy(nn.Module):
         x = einops.rearrange(x, 'b c h w d -> b h w d c')
         x = self.norm(x)
         return einops.rearrange(x, 'b h w d c -> b c h w d')
+
 
 class Offset_block0(nn.Module):
     def __init__(self, in_channels, num_heads, kernel_size=3):
@@ -51,6 +42,7 @@ class Offset_block0(nn.Module):
         dz = self.offsetz(x).unsqueeze(2)
         x = torch.cat((dx, dy, dz), dim=2)
         return x
+
 
 class Offset_block(nn.Module):
     def __init__(self, in_channels, num_heads, kernel_size=3):
@@ -79,6 +71,7 @@ class Offset_block(nn.Module):
         x = self.conv3d_3(x)
         return x
 
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -96,6 +89,7 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
+
 
 class XMlp(nn.Module):
     def __init__(self, in_size, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, reduction=4, drop=0.):
@@ -157,6 +151,7 @@ def window_partition(x, window_size):
     windows = x.permute(0, 1, 3, 5, 2, 4, 6, 7).contiguous().view(-1, window_size[0], window_size[1], window_size[2], C)
     return windows
 
+
 def deform_window_partition(x, window_size):
     """
     Args:
@@ -170,6 +165,7 @@ def deform_window_partition(x, window_size):
 
     windows = x.permute(0, 1, 2, 4, 6, 3, 5, 7, 8).contiguous().view(B, Head, -1, window_size[0], window_size[1], window_size[2], C)
     return windows
+
 
 def window_reverse(windows, window_size, H, W, L):
     """
@@ -186,6 +182,7 @@ def window_reverse(windows, window_size, H, W, L):
     x = windows.view(B, H // window_size[0], W // window_size[1], L // window_size[2], window_size[0], window_size[1], window_size[2], -1)
     x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous().view(B, H, W, L, -1)#
     return x
+
 
 class WindowAttentionReverse(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
@@ -242,6 +239,7 @@ class WindowAttentionReverse(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
+
     def forward(self, x, mask=None):
         """ Forward function.
         Args:
@@ -294,6 +292,7 @@ class WindowAttentionReverse(nn.Module):
         fix = self.proj_drop(fix)
 
         return mov, fix
+
 
 class WindowAttention(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
@@ -350,6 +349,7 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
+
     def forward(self, mov, fix, dmov, dfix, mask=None):
         """ Forward function.
         Args:
@@ -401,6 +401,7 @@ class WindowAttention(nn.Module):
         fix = self.proj_drop(fix)
 
         return mov, fix
+
 
 class SwinTransformerBlock(nn.Module):
     r""" Swin Transformer Block.
@@ -595,6 +596,7 @@ class SwinTransformerBlock(nn.Module):
         fix = fix + self.drop_path(self.f_mlp(fix_norm))#, mov_norm))
         return mov, fix
 
+
 class PatchMerging(nn.Module):
     r""" Patch Merging Layer.
     Args:
@@ -639,6 +641,7 @@ class PatchMerging(nn.Module):
         x = self.reduction(x)
 
         return x
+
 
 class BasicLayer(nn.Module):
     """ A basic Swin Transformer layer for one stage.
@@ -707,6 +710,7 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
+
     def forward(self, x, H, W, T):
         """ Forward function.
         Args:
@@ -756,6 +760,7 @@ class BasicLayer(nn.Module):
         else:
             return (mov, fix), H, W, T, (mov, fix), H, W, T
 
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     Args:
@@ -799,6 +804,7 @@ class PatchEmbed(nn.Module):
 
         return x
 
+
 class SinusoidalPositionEmbedding(nn.Module):
     '''
     Rotary Position Embedding
@@ -815,6 +821,7 @@ class SinusoidalPositionEmbedding(nn.Module):
         embeddings = torch.stack([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
         embeddings = torch.reshape(embeddings, (1, n_patches, hidden))
         return embeddings
+
 
 class SinPositionalEncoding3D(nn.Module):
     def __init__(self, channels):
@@ -853,6 +860,7 @@ class SinPositionalEncoding3D(nn.Module):
         emb[:,:,:,2*self.channels:] = emb_z
         emb = emb[None,:,:,:,:orig_ch].repeat(batch_size, 1, 1, 1, 1)
         return emb.permute(0, 4, 1, 2, 3)
+
 
 class SwinTransformer(nn.Module):
     r""" Swin Transformer
@@ -1056,6 +1064,7 @@ class SwinTransformer(nn.Module):
         super(SwinTransformer, self).train(mode)
         self._freeze_stages()
 
+
 class Conv3dReLU(nn.Sequential):
     def __init__(
             self,
@@ -1116,6 +1125,7 @@ class DecoderBlock(nn.Module):
         x = self.conv2(x)
         return x
 
+
 class RegistrationHead(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3, upsampling=1):
         conv3d = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)
@@ -1169,134 +1179,6 @@ class SpatialTransformer(nn.Module):
 
         return nnf.grid_sample(src, new_locs, align_corners=False, mode=self.mode)
 
-class ConstrainedConv3d(nn.Conv3d):
-    def forward(self, input):
-        weight = self.weight/torch.sum(self.weight, dim=(2, 3, 4), keepdim=True)
-        return nnf.conv3d(input, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-
-class NCC_volume(torch.nn.Module):
-    """
-    Local (over window) correlation.
-    """
-    def __init__(self, in_dim, img_size, win=3, num_head=1):
-        super(NCC_volume, self).__init__()
-        self.win = win
-        self.num_head = num_head
-        self.conv3D = ConstrainedConv3d(in_dim, in_dim, kernel_size=win, padding=win // 2, groups=in_dim, bias=False)
-        self.conv3D.weight.data.fill_(1/win**3)
-        self.layer_norm_1 = nn.LayerNorm([in_dim//num_head, img_size[0], img_size[1], img_size[2]])
-        self.layer_norm_2 = nn.LayerNorm([in_dim//num_head, img_size[0], img_size[1], img_size[2]])
-
-    def forward(self, y_true, y_pred):
-        N, C, H, W, L = y_true.shape
-        I = torch.reshape(y_true, (N, self.num_head, C // self.num_head, H, W, L)).view(N * self.num_head, C//self.num_head, H, W, L)
-        J = torch.reshape(y_pred, (N, self.num_head, C // self.num_head, H, W, L)).view(N * self.num_head, C // self.num_head, H, W, L)
-
-        Ii = I#self.layer_norm_1(I)
-        Ji = J#self.layer_norm_2(J)
-        # compute CC squares
-        mu1 = self.conv3D(Ii)
-        mu2 = self.conv3D(Ji)
-
-        mu1_sq = mu1.pow(2)
-        mu2_sq = mu2.pow(2)
-        mu1_mu2 = mu1 * mu2
-
-        sigma1_sq = self.conv3D(Ii * Ii) - mu1_sq
-        sigma2_sq = self.conv3D(Ji * Ji) - mu2_sq
-        sigma12 = self.conv3D(Ii * Ji) - mu1_mu2
-
-        cc = (sigma12 * sigma12 + 1e-4) / (sigma1_sq * sigma2_sq + 1e-4)
-        cc = 1-torch.sigmoid(cc)
-        return cc
-        
-class TransMorphCascadeAd1(nn.Module):
-    def __init__(self, config, time_steps=4):
-        '''
-        Multi-resolution TransMorph
-        '''
-        super(TransMorphCascadeAd, self).__init__()
-        if_convskip = config.if_convskip
-        self.if_convskip = if_convskip
-        if_transskip = config.if_transskip
-        self.if_transskip = if_transskip
-        embed_dim = config.embed_dim
-        self.time_steps = time_steps
-        self.transformer = SwinTransformer(patch_size=config.patch_size,
-                                           in_chans=config.in_chans,
-                                           embed_dim=config.embed_dim,
-                                           depths=config.depths,
-                                           num_heads=config.num_heads,
-                                           window_size=config.window_size,
-                                           mlp_ratio=config.mlp_ratio,
-                                           qkv_bias=config.qkv_bias,
-                                           drop_rate=config.drop_rate,
-                                           drop_path_rate=config.drop_path_rate,
-                                           ape=config.ape,
-                                           spe=config.spe,
-                                           rpe=config.rpe,
-                                           patch_norm=config.patch_norm,
-                                           use_checkpoint=config.use_checkpoint,
-                                           out_indices=config.out_indices,
-                                           pat_merg_rf=config.pat_merg_rf,
-                                           img_size=config.img_size,
-                                           dwin_size=config.dwin_kernel_size)
-        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0,
-                                use_batchnorm=False)
-        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0,
-                                use_batchnorm=False)  # 384, 20, 20, 64
-        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0,
-                                use_batchnorm=False)  # 384, 20, 20, 64
-        self.c1 = Conv3dReLU(2, embed_dim//2, 3, 1, use_batchnorm=False)
-        self.spatial_trans = SpatialTransformer(config.img_size)
-        self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-        self.reg_heads = nn.ModuleList()
-        self.up3s = nn.ModuleList()
-        self.cs = nn.ModuleList()
-        for t in range(self.time_steps):
-            self.cs.append(Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False))
-            self.reg_heads.append(RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3, ))
-            self.up3s.append(DecoderBlock(embed_dim//2, config.reg_head_chan, skip_channels=embed_dim // 2 if if_convskip else 0, use_batchnorm=False))
-        self.tri_up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-
-    def forward(self, inputs):
-        mov, fix = inputs
-        source_d = self.avg_pool(mov)
-        x_cat = torch.cat((mov, fix), dim=1)
-        out_feats = self.transformer((mov, fix))  # (B, n_patch, hidden)
-        if self.if_convskip:
-            x_s0 = x_cat.clone()
-            f3 = self.c1(x_s0)
-        else:
-            f3 = None
-
-        if self.if_transskip:
-            mov_f1, fix_f1 = out_feats[-2]
-            f1 = (mov_f1 + fix_f1)
-            mov_f2, fix_f2 = out_feats[-3]
-            f2 = (mov_f2 + fix_f2)
-        else:
-            f1 = None
-            f2 = None
-        mov_f0, fix_f0 = out_feats[-1]
-        f0 = (mov_f0 + fix_f0)
-        x = self.up0(f0, f1)
-        x = self.up1(x, f2)
-        xx = self.up2(x, f3) # 40
-        def_x = x_s0[:, 0:1,...]
-        flow_previous = torch.zeros((source_d.shape[0], 3, source_d.shape[2], source_d.shape[3], source_d.shape[4])).to(source_d.device)
-        flows = []
-        # flow integration
-        for t in range(self.time_steps):
-            f_out = self.cs[t](torch.cat((def_x, x_s0[:, 1:2,...]), dim=1))
-            x = self.up3s[t](xx, f_out)
-            flow = self.reg_heads[t](x)
-            flows.append(flow)
-            flow_new = flow_previous + self.spatial_trans(flow, flow)
-            def_x = self.spatial_trans(source_d, flow_new)
-            flow_previous = flow_new
-        flow = flow_new
-        return flow
 
 class TransMorphCascadeAd(nn.Module):
     def __init__(self, config, time_steps=7):
@@ -1386,84 +1268,6 @@ class TransMorphCascadeAd(nn.Module):
 
         return flow
 
-class TransMorphCascadeAdFullRes(nn.Module):
-    def __init__(self, config, time_steps=4):
-        '''
-        Multi-resolution TransMorph
-        '''
-        super(TransMorphCascadeAdFullRes, self).__init__()
-        if_convskip = config.if_convskip
-        self.if_convskip = if_convskip
-        if_transskip = config.if_transskip
-        self.if_transskip = if_transskip
-        embed_dim = config.embed_dim
-        self.time_steps = time_steps
-        self.transformer = SwinTransformer(patch_size=config.patch_size,
-                                           in_chans=config.in_chans,
-                                           embed_dim=config.embed_dim,
-                                           depths=config.depths,
-                                           num_heads=config.num_heads,
-                                           window_size=config.window_size,
-                                           mlp_ratio=config.mlp_ratio,
-                                           qkv_bias=config.qkv_bias,
-                                           drop_rate=config.drop_rate,
-                                           drop_path_rate=config.drop_path_rate,
-                                           ape=config.ape,
-                                           spe=config.spe,
-                                           rpe=config.rpe,
-                                           patch_norm=config.patch_norm,
-                                           use_checkpoint=config.use_checkpoint,
-                                           out_indices=config.out_indices,
-                                           pat_merg_rf=config.pat_merg_rf,
-                                           img_size=config.img_size, )
-        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0,
-                                use_batchnorm=False)
-        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0,
-                                use_batchnorm=False)  # 384, 20, 20, 64
-        self.spatial_trans = SpatialTransformer(config.img_size)
-        self.spatial_trans_down = SpatialTransformer((config.img_size[0]//2, config.img_size[1]//2, config.img_size[2]//2))
-        self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-        self.reg_heads = nn.ModuleList()
-        self.up2s = nn.ModuleList()
-        self.cs = nn.ModuleList()
-        for t in range(self.time_steps):
-            self.cs.append(Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False))
-            self.reg_heads.append(RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3, ))
-            self.up2s.append(DecoderBlock(embed_dim, config.reg_head_chan, skip_channels=embed_dim // 2 if if_convskip else 0,
-                                   use_batchnorm=False))
-
-    def forward(self, inputs):
-        mov, fix = inputs
-        source_d = self.avg_pool(mov)
-        x_cat = torch.cat((mov, fix), dim=1)
-        x_s1 = self.avg_pool(x_cat)
-        out_feats = self.transformer((mov, fix))  # (B, n_patch, hidden)
-        if self.if_transskip:
-            mov_f1, fix_f1 = out_feats[-2]
-            f1 = (mov_f1 + fix_f1)
-            mov_f2, fix_f2 = out_feats[-3]
-            f2 = (mov_f2 + fix_f2)
-        else:
-            f1 = None
-            f2 = None
-        mov_f0, fix_f0 = out_feats[-1]
-        f0 = mov_f0 + fix_f0
-        x = self.up0(f0, f1)
-        xx = self.up1(x, f2)
-        def_x = x_s1[:, 0:1,...]
-        flow_previous = torch.zeros((source_d.shape[0], 3, source_d.shape[2], source_d.shape[3], source_d.shape[4])).to(source_d.device)
-        flows = []
-        # flow integration
-        for t in range(self.time_steps):
-            f_out = self.cs[t](torch.cat((def_x, x_s1[:, 1:2,...]), dim=1))
-            x = self.up2s[t](xx, f_out)
-            flow = self.reg_heads[t](x)
-            flows.append(flow)
-            flow_new = flow_previous + self.spatial_trans_down(flow, flow_previous)
-            def_x = self.spatial_trans_down(source_d, flow_new)
-            flow_previous = flow_new
-        flow = flow_new
-        return  flow
 
 CONFIGS = {
     'TransMorph-3-LVL': configs.get_3DTransMorphDWin3Lvl_config(),

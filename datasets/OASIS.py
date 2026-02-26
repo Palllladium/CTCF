@@ -1,51 +1,42 @@
+import random
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import random
-import numpy as np
 
 from utils import pkload
 
 
 class OASISBrainDataset(Dataset):
     def __init__(self, data_path, transforms):
-        self.paths = data_path
+        self.paths = list(data_path)
         self.transforms = transforms
+        if len(self.paths) < 2:
+            raise RuntimeError("OASISBrainDataset requires at least 2 samples.")
 
-    def one_hot(self, img, C):
-        out = np.zeros((C, img.shape[1], img.shape[2], img.shape[3]))
-        for i in range(C):
-            out[i,...] = img == i
-        return out
 
     def __getitem__(self, index):
-        path = self.paths[index]
-        tar_list = self.paths.copy()
-        tar_list.remove(path)
-        random.shuffle(tar_list)
-        tar_file = tar_list[0]
-        data = pkload(path)
-        x, x_seg = data if len(data) == 2 else (data[0], data[2])
-        data = pkload(tar_file)
-        y, y_seg = data if len(data) == 2 else (data[0], data[2])
+        src_path = self.paths[index]
+        j = random.randrange(len(self.paths) - 1)
+        if j >= index:
+            j += 1
+        tar_path = self.paths[j]
+
+        src = pkload(src_path)
+        x, x_seg = src if len(src) == 2 else (src[0], src[2])
+        tar = pkload(tar_path)
+        y, y_seg = tar if len(tar) == 2 else (tar[0], tar[2])
+
         x, y = x[None, ...], y[None, ...]
         x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])
         y, y_seg = self.transforms([y, y_seg])
-        x = np.ascontiguousarray(x)
-        y = np.ascontiguousarray(y)
-        x_seg = np.ascontiguousarray(x_seg)
-        y_seg = np.ascontiguousarray(y_seg)
-        x, y, x_seg, y_seg = torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(x_seg), torch.from_numpy(y_seg)
-
-        # images must be float
-        x = x.float()
-        y = y.float()
-
-        # labels must be Long for one_hot and for any index-based ops
-        x_seg = x_seg.long()
-        y_seg = y_seg.long()
-
+        x = torch.from_numpy(np.ascontiguousarray(x)).float()
+        y = torch.from_numpy(np.ascontiguousarray(y)).float()
+        x_seg = torch.from_numpy(np.ascontiguousarray(x_seg)).long()
+        y_seg = torch.from_numpy(np.ascontiguousarray(y_seg)).long()
         return x, y, x_seg, y_seg
+
 
     def __len__(self):
         return len(self.paths)
@@ -53,37 +44,22 @@ class OASISBrainDataset(Dataset):
 
 class OASISBrainInferDataset(Dataset):
     def __init__(self, data_path, transforms):
-        self.paths = data_path
+        self.paths = list(data_path)
         self.transforms = transforms
 
-    def one_hot(self, img, C):
-        out = np.zeros((C, img.shape[1], img.shape[2], img.shape[3]))
-        for i in range(C):
-            out[i,...] = img == i
-        return out
 
     def __getitem__(self, index):
-        path = self.paths[index]
-        x, y, x_seg, y_seg = pkload(path)
+        x, y, x_seg, y_seg = pkload(self.paths[index])
         x, y = x[None, ...], y[None, ...]
-        x_seg, y_seg= x_seg[None, ...], y_seg[None, ...]
+        x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])
         y, y_seg = self.transforms([y, y_seg])
-        x = np.ascontiguousarray(x)
-        y = np.ascontiguousarray(y)
-        x_seg = np.ascontiguousarray(x_seg)
-        y_seg = np.ascontiguousarray(y_seg)
-        x, y, x_seg, y_seg = torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(x_seg), torch.from_numpy(y_seg)
-
-        # images must be float
-        x = x.float()
-        y = y.float()   
-
-        # labels must be Long for one_hot and for any index-based ops
-        x_seg = x_seg.long()
-        y_seg = y_seg.long()
-
+        x = torch.from_numpy(np.ascontiguousarray(x)).float()
+        y = torch.from_numpy(np.ascontiguousarray(y)).float()
+        x_seg = torch.from_numpy(np.ascontiguousarray(x_seg)).long()
+        y_seg = torch.from_numpy(np.ascontiguousarray(y_seg)).long()
         return x, y, x_seg, y_seg
+
 
     def __len__(self):
         return len(self.paths)

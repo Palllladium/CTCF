@@ -1,17 +1,33 @@
-# python
+# Python artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyd
 
-# data & outputs
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build/test caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime outputs
 logs/
 results/
 tools/
+
+# Checkpoints and large artifacts
 *.pth
 *.pt
 *.ckpt
-
-# OS / IDE junk
-.vscode/
-
-# misc
-tools/
+*.npz

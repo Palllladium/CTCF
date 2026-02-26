@@ -1,13 +1,16 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Any
+from typing import Any, Callable, Dict, Optional
+
 import torch
 
-from utils import AverageMeter, jacobian_det
+from .common import AverageMeter
+from .field import fold_percent_from_flow
 
 
 @dataclass
 class ValResult:
+    """Validation outputs for one epoch."""
     dsc: float
     fold_percent: float
     last_vis: Dict[str, Any]
@@ -27,55 +30,49 @@ def validate(
     line_thickness: int = 1,
     max_batches: Optional[int] = None,
 ) -> ValResult:
-    """
-    Universal OASIS validation:
-      - computes DSC on VOI labels using warped segmentation (nearest)
-      - computes folding percent (detJ <= 0)
-      - optionally returns a deformed grid for visualization
-
-    Contract:
-      forward_flow_fn(x, y) -> flow_full of shape [B,3,D,H,W] on `device`
-    """
+    """Run validation loop and return aggregated Dice/Fold with last visualization tensors."""
     model.eval()
-
     reg_nearest = None
     reg_bilin = None
-
     dsc_meter = AverageMeter()
     fold_meter = AverageMeter()
-
     last_vis: Dict[str, Any] = {}
-
     max_batches = None if max_batches is None else int(max_batches)
+    expected_batches = None
+    
+    if mk_grid_img_fn is not None:
+        try:
+            expected_batches = len(val_loader)
+            if max_batches is not None and max_batches > 0:
+                expected_batches = min(expected_batches, max_batches)
+        except TypeError:
+            expected_batches = None
+
     for bidx, batch in enumerate(val_loader):
         if max_batches is not None and max_batches > 0 and bidx >= max_batches:
             break
-        # expected: x, y, x_seg, y_seg
+        
         x, y, x_seg, y_seg = [t.to(device, non_blocking=True) for t in batch]
-        vol_shape = tuple(x.shape[2:])  # (D,H,W) from tensor
-
+        vol_shape = tuple(x.shape[2:])
+        
         if reg_nearest is None:
             reg_nearest = register_model_cls(vol_shape, mode="nearest").to(device)
             reg_bilin = register_model_cls(vol_shape, mode="bilinear").to(device)
-
-        flow = forward_flow_fn(x, y)  # [B,3,D,H,W]
-
-        # warp seg (nearest)
+        
+        flow = forward_flow_fn(x, y)
         def_seg = reg_nearest((x_seg.float(), flow.float()))
         dsc = dice_fn(def_seg.long(), y_seg.long())
         dsc_meter.update(float(dsc), x.size(0))
-
-        # fold %
-        detJ = jacobian_det(flow.float())  # [B,1,D,H,W]
-        fold = (detJ <= 0.0).float().mean() * 100.0
+        fold = fold_percent_from_flow(flow)
         fold_meter.update(float(fold), x.size(0))
-
-        # optional grid for visuals (only keep last batch)
+        
         def_grid = None
-        if mk_grid_img_fn is not None:
+        make_grid = mk_grid_img_fn is not None and (expected_batches is None or bidx == expected_batches - 1)
+        
+        if make_grid:
             grid_img = mk_grid_img_fn(flow, grid_step=grid_step, line_thickness=line_thickness)
             def_grid = reg_bilin((grid_img.float(), flow.float()))
-
+        
         last_vis = {
             "x_seg": x_seg,
             "y_seg": y_seg,
@@ -83,9 +80,4 @@ def validate(
             "def_grid": def_grid,
             "flow": flow,
         }
-
-    return ValResult(
-        dsc=dsc_meter.avg,
-        fold_percent=fold_meter.avg,
-        last_vis=last_vis,
-    )
+    return ValResult(dsc=dsc_meter.avg, fold_percent=fold_meter.avg, last_vis=last_vis)

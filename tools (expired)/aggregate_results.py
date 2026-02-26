@@ -1,10 +1,7 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
 aggregate_results.py
 
-Aggregates multiple summary.json files (from inference_msit.py) into a single CSV table
+Aggregates multiple summary.json files (from experiments/inference.py) into a single CSV table
 suitable for MSIT paper tables.
 
 Usage:

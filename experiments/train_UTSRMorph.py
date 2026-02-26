@@ -1,28 +1,22 @@
-import argparse, torch
+import argparse
+
+import torch
 from torch import optim
 
 from utils import setup_device
-from models.UTSRMorph.model import CONFIGS as CONFIGS_UM, UTSRMorph
-from experiments.engine import add_common_args, apply_paths, run_train, make_ctx, loaders_baseline
+from experiments.core.train_runtime import Ctx, add_common_args, run_train, loaders_baseline
+from experiments.core.model_adapters import get_model_adapter
 
 
 class Runner:
     def __init__(self, args, device):
         self.args, self.device = args, device
-        
-        cfg = CONFIGS_UM[args.config]
-        self.model = UTSRMorph(cfg).to(device)
+        self.adapter = get_model_adapter("utsrmorph")
+
+        self.model = self.adapter.build(config_key=args.config).to(device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
-        self.ctx = make_ctx(device, vol_size=cfg.img_size, ncc_win=(9, 9, 9))
-
-
-    @torch.no_grad()
-    def forward_flow(self, x, y):
-        inp = torch.cat((x, y), dim=1)
-        use_amp = torch.cuda.is_available()
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = self.model(inp)
-        return flow
+        self.ctx = Ctx(device, vol_size=self.model.cfg.img_size, ncc_win=(9, 9, 9))
+        self.forward_flow = lambda x, y: self.adapter.forward(self.model, x, y, amp=True)
 
 
     def train_step(self, batch, epoch):
@@ -47,17 +41,17 @@ def parse_args():
     p = argparse.ArgumentParser()
     add_common_args(p)
     p.set_defaults(exp="UTSRMorph")
-    p.add_argument("--config", type=str, default="UTSRMorph-Large")
-    p.add_argument("--w_ncc", type=float, default=1.0)
-    p.add_argument("--w_reg", type=float, default=1.0)
+    
+    p.add_argument("--config", type=str, default="UTSRMorph-Large", help="Model config key.")
+    p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
+    p.add_argument("--w_reg", type=float, default=1.0, help="Flow regularization loss weight.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    apply_paths(args)
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
-    runner = Runner(args, device) # addressing own class
+    runner = Runner(args, device)
     run_train(args=args, runner=runner, build_loaders=loaders_baseline)
 
 
