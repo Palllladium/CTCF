@@ -167,7 +167,7 @@ class InferRunner:
                 row = {
                     "case_id": cid,
                     "dice_mean": dice_mean,
-                    "fold_percent": fold_percent_from_flow(flow),
+                    "fold_percent": fold_percent_from_flow(flow, mask=(x_seg if self.args.ds.upper() == "IXI" else None), crop=1),
                     "logdet_std": logdet_std_from_flow(flow),
                     "time_sec": dt,
                 }

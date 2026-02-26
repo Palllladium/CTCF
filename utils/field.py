@@ -2,6 +2,16 @@ import torch
 import torch.nn.functional as F
 
 
+def _crop_spatial(t: torch.Tensor, n: int) -> torch.Tensor:
+    """Crop n voxels from each spatial side for [B,C,D,H,W] tensors."""
+    n = int(n)
+    if n <= 0:
+        return t
+    if min(t.shape[-3:]) <= 2 * n:
+        return t
+    return t[..., n:-n, n:-n, n:-n]
+
+
 def _warp(tensor: torch.Tensor, flow: torch.Tensor, mode: str = "bilinear") -> torch.Tensor:
     """Warp tensor by dense flow on voxel grid."""
     _, _, d, h, w = tensor.shape
@@ -51,15 +61,36 @@ def jacobian_det(flow: torch.Tensor) -> torch.Tensor:
     return det.unsqueeze(1)
 
 
-def neg_jacobian_penalty(flow: torch.Tensor) -> torch.Tensor:
+def neg_jacobian_penalty(flow: torch.Tensor, mask: torch.Tensor = None, crop: int = 1) -> torch.Tensor:
     """Mean penalty over non-positive Jacobian determinant voxels."""
-    return torch.relu(-jacobian_det(flow)).mean()
+    pen = torch.relu(-_crop_spatial(jacobian_det(flow), int(crop)))
+
+    if mask is None:
+        return pen.mean()
+
+    if mask.dim() == 4:
+        mask = mask.unsqueeze(1)
+    m = (mask > 0).to(pen.dtype)
+    m = _crop_spatial(m, int(crop))
+    denom = torch.clamp(m.sum(), min=1.0)
+    return (pen * m).sum() / denom
 
 
-def fold_percent_from_flow(flow: torch.Tensor) -> float:
+def fold_percent_from_flow(flow: torch.Tensor, mask: torch.Tensor = None, crop: int = 0) -> float:
     """Compute folding ratio in percent (detJ <= 0)."""
-    det = jacobian_det(flow.float())
-    return float((det <= 0.0).float().mean().item() * 100.0)
+    det = _crop_spatial(jacobian_det(flow.float()), int(crop))
+    neg = (det <= 0.0).float()
+
+    if mask is None:
+        return float(neg.mean().item() * 100.0)
+
+    if mask.dim() == 4:
+        mask = mask.unsqueeze(1)
+    m = (mask > 0).to(neg.dtype)
+    m = _crop_spatial(m, int(crop))
+    denom = float(torch.clamp(m.sum(), min=1.0).item())
+    num = float((neg * m).sum().item())
+    return num / denom * 100.0
 
 
 def logdet_std_from_flow(flow: torch.Tensor, eps: float = 1e-9) -> float:

@@ -279,6 +279,8 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 grid_step=8,
                 line_thickness=1,
                 max_batches=max_val_batches,
+                fold_use_mask=(args.ds == "IXI"),
+                fold_crop=1,
             )
 
         dsc, foldp = float(val_res.dsc), float(val_res.fold_percent)

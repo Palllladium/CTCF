@@ -29,6 +29,8 @@ def validate(
     grid_step: int = 8,
     line_thickness: int = 1,
     max_batches: Optional[int] = None,
+    fold_use_mask: bool = False,
+    fold_crop: int = 0,
 ) -> ValResult:
     """Run validation loop and return aggregated Dice/Fold with last visualization tensors."""
     model.eval()
@@ -63,7 +65,8 @@ def validate(
         def_seg = reg_nearest((x_seg.float(), flow.float()))
         dsc = dice_fn(def_seg.long(), y_seg.long())
         dsc_meter.update(float(dsc), x.size(0))
-        fold = fold_percent_from_flow(flow)
+        fold_mask = x_seg if bool(fold_use_mask) else None
+        fold = fold_percent_from_flow(flow, mask=fold_mask, crop=int(fold_crop))
         fold_meter.update(float(fold), x.size(0))
         
         def_grid = None
