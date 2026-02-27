@@ -51,7 +51,7 @@ class Runner:
         self.ctx = Ctx(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
 
-        ctrl_cfg = CTCFControllerCfg()
+        ctrl_cfg = CTCFControllerCfg.for_ds(args.ds, args.max_epoch)
         self.ctx.ctcf_ctrl = CTCFController(ctrl_cfg)
         self.forward_flow = self._forward_flow
 
@@ -151,7 +151,7 @@ def parse_args():
     p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1, help="Enable gradient checkpointing in Swin blocks.")
 
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
-    p.add_argument("--w_reg", type=float, default=1.0, help="Flow regularization loss weight.")
+    p.add_argument("--w_reg", type=float, default=None, help="Flow regularization loss weight (auto: IXI=4.0, others=1.0).")
     p.add_argument("--w_icon", type=float, default=0.05, help="ICON loss base weight (multiplied by controller knob).")
     p.add_argument("--w_cyc", type=float, default=0.02, help="Cycle consistency loss base weight (multiplied by controller knob).")
     p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight (multiplied by controller knob).")
@@ -169,6 +169,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.w_reg is None:
+        args.w_reg = 4.0 if str(args.ds).upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else loaders_baseline
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
