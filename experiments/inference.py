@@ -17,20 +17,10 @@ from datasets import OASIS, IXI
 from experiments.core.train_runtime import PATHS, add_common_args
 from experiments.core.model_adapters import get_model_adapter
 from utils import (
-    dice_per_label, fold_percent_from_flow, hd95_mean_labels,
-    logdet_std_from_flow, mk_grid_img, setup_device, NumpyType, RegisterModel, SegNorm, dice_val
+    IXI_VOI_LABELS, OASIS_VOI_LABELS, dice_per_label, hd95_mean_labels,
+    digital_jacobian_metrics, logdet_std_from_flow, mk_grid_img,
+    setup_device, NumpyType, RegisterModel, SegNorm
 )
-
-
-LABELS_BY_DS = {
-    "OASIS": tuple(range(1, 36)),
-    "IXI": tuple(range(0, 46)),
-}
-
-HD95_LABELS_BY_DS = {
-    "OASIS": tuple(range(1, 36)),
-    "IXI": tuple(range(1, 46)),
-}
 
 
 def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, *, strict: bool) -> None:
@@ -100,16 +90,35 @@ class InferRunner:
             raise RuntimeError(f"No .pkl files found in test_dir: {self.test_dir}")
 
         ds_key = args.ds.upper()
-        self.labels = LABELS_BY_DS[ds_key]
-        self.hd95_labels = HD95_LABELS_BY_DS[ds_key]
-        self.ixi_multiclass_dice = ds_key == "IXI"
-        if ds_key == "OASIS":
-            tfm = transforms.Compose([NumpyType((np.float32, np.int16))])
-            ds = OASIS.OASISBrainInferDataset(self.test_files, transforms=tfm)
-        else:
-            atlas_path = str(PATHS[int(args.paths)][ds_key]["atlas_path"]).rstrip("/\\")
-            tfm = transforms.Compose([SegNorm(), NumpyType((np.float32, np.int16))])
-            ds = IXI.IXIBrainInferDataset(self.test_files, atlas_path, transforms=tfm)
+        self.ds_key = ds_key
+        paths_profile = PATHS[int(args.paths)]
+        profile = {
+            "IXI": {
+                "labels": IXI_VOI_LABELS,
+                "jac_metrics": lambda flow, x_seg: {"j_leq0_percent": float((m := digital_jacobian_metrics(flow, mask=x_seg))[0]), "ndv_percent": float(m[1])},
+                "jac_log": lambda r: f" j<=0%={r['j_leq0_percent']:.4f} ndv%={r['ndv_percent']:.4f}",
+                "dataset": lambda files: IXI.IXIBrainInferDataset(
+                    files,
+                    str(paths_profile["IXI"]["atlas_path"]).rstrip("/\\"),
+                    transforms=transforms.Compose([SegNorm(), NumpyType((np.float32, np.int16))]),
+                ),
+            },
+            "OASIS": {
+                "labels": OASIS_VOI_LABELS,
+                "jac_metrics": lambda flow, x_seg: {"sdlogj": float(logdet_std_from_flow(flow))},
+                "jac_log": lambda r: f" sdlogj={r['sdlogj']:.4f}",
+                "dataset": lambda files: OASIS.OASISBrainInferDataset(
+                    files,
+                    transforms=transforms.Compose([NumpyType((np.float32, np.int16))]),
+                ),
+            },
+        }[ds_key]
+
+        self.labels = profile["labels"]
+        self.hd95_labels = self.labels
+        self.jac_metrics = profile["jac_metrics"]
+        self.jac_log = profile["jac_log"]
+        ds = profile["dataset"](self.test_files)
         self.loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=False)
 
         self.adapter = get_model_adapter(args.model)
@@ -162,18 +171,10 @@ class InferRunner:
                 def_seg = reg_nearest((x_seg.float(), flow.float()))
                 dt = time.perf_counter() - t0
                 dice_lbl = dice_per_label(def_seg.long(), y_seg.long(), labels=self.labels)
-                dice_mean = float(dice_val(def_seg.long(), y_seg.long(), 46).item()) if self.ixi_multiclass_dice else float(np.mean(dice_lbl))
+                row = {"case_id": cid, "dice_mean": float(np.mean(dice_lbl)), "time_sec": dt}
+                row.update(self.jac_metrics(flow, x_seg))
 
-                row = {
-                    "case_id": cid,
-                    "dice_mean": dice_mean,
-                    "fold_percent": fold_percent_from_flow(flow, mask=(x_seg if self.args.ds.upper() == "IXI" else None), crop=1),
-                    "logdet_std": logdet_std_from_flow(flow),
-                    "time_sec": dt,
-                }
-
-                if args.hd95:
-                    row["hd95_mean"] = hd95_mean_labels(def_seg.long(), y_seg.long(), labels=self.hd95_labels, spacing=(1.0, 1.0, 1.0))
+                if args.hd95: row["hd95_mean"] = hd95_mean_labels(def_seg.long(), y_seg.long(), labels=self.hd95_labels, spacing=(1.0, 1.0, 1.0))
                 for lbl, v in zip(self.labels, dice_lbl):
                     row[f"dice_lbl_{lbl}"] = float(v)
                 rows.append(row)
@@ -185,7 +186,7 @@ class InferRunner:
                     save_preview(os.path.join(png_dir, f"{cid}.png"), x, y, x_seg, y_seg, def_seg, def_grid)
 
                 if (idx + 1) % max(1, args.print_every) == 0:
-                    msg = f"[{idx+1:03d}/{len(self.loader):03d}] {cid} dice={row['dice_mean']:.4f} fold%={row['fold_percent']:.4f} time={dt:.3f}s"
+                    msg = f"[{idx+1:03d}/{len(self.loader):03d}] {cid} dice={row['dice_mean']:.4f} time={dt:.3f}s{self.jac_log(row)}"
                     if args.hd95:
                         msg += f" hd95={row['hd95_mean']:.4f}"
                     print(msg)
@@ -196,10 +197,10 @@ class InferRunner:
     def _save_results(self, rows, out_dir):
         """Persist per-case and aggregated summaries to CSV/JSON."""
         args = self.args
-        header = ["case_id", "dice_mean", "fold_percent", "logdet_std", "time_sec"]
-        
-        if args.hd95: header.append("hd95_mean")
-        header += [f"dice_lbl_{lbl}" for lbl in self.labels]
+        if not rows:
+            raise RuntimeError("No inference rows produced; check dataset/checkpoint setup.")
+
+        header = list(rows[0].keys())
         per_case_path = os.path.join(out_dir, "per_case.csv")
         
         with open(per_case_path, "w", newline="", encoding="utf-8") as f:
@@ -208,7 +209,7 @@ class InferRunner:
             w.writerows(rows)
 
         n = len(rows)
-        keys = ["dice_mean", "fold_percent", "logdet_std", "time_sec"] + (["hd95_mean"] if args.hd95 else [])
+        keys = [k for k in header if k != "case_id" and not k.startswith("dice_lbl_")]
         metrics = {}
         for k in keys:
             arr = np.array([r[k] for r in rows], dtype=np.float64)
@@ -256,7 +257,7 @@ def parse_args():
     p.add_argument("--save_pngs", action="store_true", help="Save per-case preview PNGs.")
     p.add_argument("--png_limit", type=int, default=5, help="Max PNG count (-1 for all cases).")
     
-    p.add_argument("--hd95", action="store_true", help="Compute HD95 in addition to Dice/fold metrics.")
+    p.add_argument("--hd95", action="store_true", help="Compute HD95 in addition to core protocol metrics.")
     p.add_argument("--time_steps", type=int, default=12, help="Integration steps for velocity-based models.")
     p.add_argument("--tm_config", type=str, default="TransMorph-3-LVL", help="TransMorph-DCA config key.")
     p.add_argument("--utsr_config", type=str, default="UTSRMorph-Large", help="UTSRMorph config key.")

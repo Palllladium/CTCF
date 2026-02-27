@@ -5,14 +5,16 @@ from typing import Any, Callable, Dict, Optional
 import torch
 
 from .common import AverageMeter
-from .field import fold_percent_from_flow
+from .field import jacobian_nonpositive_percent, digital_jacobian_metrics, logdet_std_from_flow
 
 
 @dataclass
 class ValResult:
     """Validation outputs for one epoch."""
     dsc: float
-    fold_percent: float
+    jac_nonpos_percent: float
+    ndv_percent: Optional[float]
+    sdlogj: Optional[float]
     last_vis: Dict[str, Any]
 
 
@@ -29,15 +31,33 @@ def validate(
     grid_step: int = 8,
     line_thickness: int = 1,
     max_batches: Optional[int] = None,
-    fold_use_mask: bool = False,
-    fold_crop: int = 0,
+    ds: str = "OASIS",
 ) -> ValResult:
-    """Run validation loop and return aggregated Dice/Fold with last visualization tensors."""
+    """Run validation loop and return protocol metrics plus last visualization tensors."""
     model.eval()
     reg_nearest = None
     reg_bilin = None
     dsc_meter = AverageMeter()
-    fold_meter = AverageMeter()
+    jac_meter = AverageMeter()
+
+    ds_key = str(ds).upper()
+    is_ixi = ds_key == "IXI"
+    ndv_meter = AverageMeter() if is_ixi else None
+    sdlogj_meter = None if is_ixi else AverageMeter()
+
+
+
+    if is_ixi:
+        def calc_jac(flow, x_seg):
+            jac, ndv = digital_jacobian_metrics(flow, mask=x_seg)
+            return float(jac), float(ndv), None
+    else:
+        def calc_jac(flow, x_seg):
+            del x_seg
+            jac = jacobian_nonpositive_percent(flow, crop=1)
+            sdlogj = logdet_std_from_flow(flow)
+            return float(jac), None, float(sdlogj)
+
     last_vis: Dict[str, Any] = {}
     max_batches = None if max_batches is None else int(max_batches)
     expected_batches = None
@@ -65,9 +85,11 @@ def validate(
         def_seg = reg_nearest((x_seg.float(), flow.float()))
         dsc = dice_fn(def_seg.long(), y_seg.long())
         dsc_meter.update(float(dsc), x.size(0))
-        fold_mask = x_seg if bool(fold_use_mask) else None
-        fold = fold_percent_from_flow(flow, mask=fold_mask, crop=int(fold_crop))
-        fold_meter.update(float(fold), x.size(0))
+        jac, ndv, sdlogj = calc_jac(flow, x_seg)
+        jac_meter.update(float(jac), x.size(0))
+
+        if ndv_meter is not None and ndv is not None: ndv_meter.update(float(ndv), x.size(0))
+        if sdlogj_meter is not None and sdlogj is not None: sdlogj_meter.update(float(sdlogj), x.size(0))
         
         def_grid = None
         make_grid = mk_grid_img_fn is not None and (expected_batches is None or bidx == expected_batches - 1)
@@ -83,4 +105,7 @@ def validate(
             "def_grid": def_grid,
             "flow": flow,
         }
-    return ValResult(dsc=dsc_meter.avg, fold_percent=fold_meter.avg, last_vis=last_vis)
+
+    ndv_avg = ndv_meter.avg if ndv_meter is not None and ndv_meter.count > 0 else None
+    sdlogj_avg = sdlogj_meter.avg if sdlogj_meter is not None and sdlogj_meter.count > 0 else None
+    return ValResult(dsc=dsc_meter.avg, jac_nonpos_percent=jac_meter.avg, ndv_percent=ndv_avg, sdlogj=sdlogj_avg, last_vis=last_vis)

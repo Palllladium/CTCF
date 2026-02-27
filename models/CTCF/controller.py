@@ -16,9 +16,9 @@ def move_towards(prev, target, delta):
 
 @dataclass
 class CTCFControllerCfg:
-    fold_soft: float = 0.35
-    fold_hard: float = 0.80
-    fold_recover: float = 0.20
+    jac_soft: float = 0.35
+    jac_hard: float = 0.80
+    jac_recover: float = 0.20
     icon_rate: float = 0.01
     cyc_rate: float = 0.005
     icon_decay_bad: float = 0.03
@@ -30,8 +30,8 @@ class CTCFControllerCfg:
     jac_mul_max: float = 2.00
     cyc_mul_max: float = 0.20
     icon_mul_max: float = 1.00
-    icon_start_fold_max: float = 0.50
-    cyc_start_fold_max: float = 0.40
+    icon_start_jac_max: float = 0.50
+    cyc_start_jac_max: float = 0.40
     hist_len: int = 12
     stab_window: int = 7
     stab_std_tol: float = 0.005
@@ -69,21 +69,21 @@ class CTCFController:
         }
 
 
-    def on_val_end(self, *, epoch: int, val_dice: float, val_fold_percent: float):
+    def on_val_end(self, *, epoch: int, val_dice: float, val_jac_percent: float):
         del epoch
         self._push_dice(val_dice)
         stable = self._stable()
-        fold = float(val_fold_percent)
-        bad_soft = fold > float(self.cfg.fold_soft)
-        bad_hard = fold > float(self.cfg.fold_hard)
+        jac = float(val_jac_percent)
+        bad_soft = jac > float(self.cfg.jac_soft)
+        bad_hard = jac > float(self.cfg.jac_hard)
 
-        self._update_jac(fold)
+        self._update_jac(jac)
 
         if self.phase == "S0" and stable and not bad_soft:
             self.phase = "S1"
-        elif self.phase == "S1" and self.knobs.w_icon_mul >= 0.8 and stable and fold <= float(self.cfg.icon_start_fold_max):
+        elif self.phase == "S1" and self.knobs.w_icon_mul >= 0.8 and stable and jac <= float(self.cfg.icon_start_jac_max):
             self.phase = "S2"
-        elif self.phase == "S2" and self.knobs.w_cyc_mul >= 0.12 and stable and fold <= float(self.cfg.cyc_start_fold_max):
+        elif self.phase == "S2" and self.knobs.w_cyc_mul >= 0.12 and stable and jac <= float(self.cfg.cyc_start_jac_max):
             self.phase = "S3"
 
         if bad_hard:
@@ -91,12 +91,12 @@ class CTCFController:
             self.knobs.w_icon_mul = move_towards(self.knobs.w_icon_mul, 0.0, float(self.cfg.icon_decay_bad))
         else:
             if self.phase in ("S1", "S2", "S3"):
-                if fold <= float(self.cfg.icon_start_fold_max):
+                if jac <= float(self.cfg.icon_start_jac_max):
                     self.knobs.w_icon_mul = move_towards(self.knobs.w_icon_mul, float(self.cfg.icon_mul_max), float(self.cfg.icon_rate))
                 elif bad_soft:
                     self.knobs.w_icon_mul = move_towards(self.knobs.w_icon_mul, 0.0, float(self.cfg.icon_decay_bad))
             if self.phase in ("S2", "S3"):
-                if fold <= float(self.cfg.cyc_start_fold_max):
+                if jac <= float(self.cfg.cyc_start_jac_max):
                     self.knobs.w_cyc_mul = move_towards(self.knobs.w_cyc_mul, float(self.cfg.cyc_mul_max), float(self.cfg.cyc_rate))
                 elif bad_soft:
                     self.knobs.w_cyc_mul = move_towards(self.knobs.w_cyc_mul, 0.0, float(self.cfg.cyc_decay_bad))
@@ -125,12 +125,12 @@ class CTCFController:
         return (std <= float(self.cfg.stab_std_tol)) and (g <= float(self.cfg.stab_gain_tol))
 
 
-    def _update_jac(self, fold):
-        if fold > float(self.cfg.fold_hard):
+    def _update_jac(self, jac):
+        if jac > float(self.cfg.jac_hard):
             tgt, rate = float(self.cfg.jac_mul_max), float(self.cfg.jac_rate_boost)
-        elif fold > float(self.cfg.fold_soft):
+        elif jac > float(self.cfg.jac_soft):
             tgt, rate = float(self.cfg.jac_mul_max), float(self.cfg.jac_rate_boost) * 0.5
-        elif fold < float(self.cfg.fold_recover):
+        elif jac < float(self.cfg.jac_recover):
             tgt, rate = float(self.cfg.jac_mul_min), float(self.cfg.jac_rate_relax)
         else:
             tgt = max(float(self.cfg.jac_mul_min), self.knobs.w_jac_mul - float(self.cfg.jac_rate_base))

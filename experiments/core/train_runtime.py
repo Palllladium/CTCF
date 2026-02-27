@@ -16,7 +16,7 @@ from utils import (
     adjust_learning_rate_poly, make_exp_dirs, attach_stdout_logger, load_checkpoint_if_exists,
     perf_epoch_start, perf_epoch_end, mk_grid_img, compute_fig, validate,
     AverageMeter, RegisterModel, NCCVxm, Grad3d, NumpyType, RandomFlip, SegNorm,
-    dice_val, dice_val_VOI
+    dice_val, dice_val_subset, OASIS_VOI_LABELS, IXI_VOI_LABELS
 )
 
 
@@ -185,7 +185,14 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
     max_val_batches = None if max_val_batches <= 0 else max_val_batches
     scaler = torch.amp.GradScaler("cuda")
     train_total = len(train_loader) if max_train_iters <= 0 else min(len(train_loader), max_train_iters)
-    val_dice_fn = (lambda p, t: dice_val_VOI(p, t)) if args.ds == "OASIS" else (lambda p, t: dice_val(p, t, 46))
+
+    ds_key = args.ds.upper()
+    jac_name = "j<=0%"
+    jac_tb_tag = "val/J<=0%"
+    
+    if ds_key == "SYNTH": val_dice_fn = lambda p, t: dice_val(p, t, int(getattr(args, "synth_num_labels", 36)))
+    elif ds_key == "IXI": val_dice_fn = lambda p, t: dice_val_subset(p, t, labels=IXI_VOI_LABELS)
+    else: val_dice_fn = lambda p, t: dice_val_subset(p, t, labels=OASIS_VOI_LABELS)
 
     epoch_start, best_dsc = 0, -1.0
     if args.resume:
@@ -279,19 +286,22 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 grid_step=8,
                 line_thickness=1,
                 max_batches=max_val_batches,
-                fold_use_mask=(args.ds == "IXI"),
-                fold_crop=1,
+                ds=args.ds,
             )
 
-        dsc, foldp = float(val_res.dsc), float(val_res.fold_percent)
+        dsc, jacp = float(val_res.dsc), float(val_res.jac_nonpos_percent)
+        ndvp = None if val_res.ndv_percent is None else float(val_res.ndv_percent)
+        sdlogj = None if val_res.sdlogj is None else float(val_res.sdlogj)
         if writer is not None:
             writer.add_scalar("val/Dice", dsc, epoch)
-            writer.add_scalar("val/Fold%", foldp, epoch)
+            writer.add_scalar(jac_tb_tag, jacp, epoch)
+            if ndvp is not None: writer.add_scalar("val/NDV%", ndvp, epoch)
+            if sdlogj is not None: writer.add_scalar("val/SDlogJ", sdlogj, epoch)
 
         ctrl_suffix = ""
         ctrl = getattr(getattr(runner, "ctx", None), "ctcf_ctrl", None)
         if ctrl is not None:
-            ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_fold_percent=foldp)
+            ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_jac_percent=jacp)
             if writer is not None:
                 for k, v in (ctrl.tb_scalars() or {}).items():
                     writer.add_scalar(k, float(v), epoch)
@@ -321,7 +331,11 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             if is_best:
                 torch.save(state, os.path.join(ckpt_dir, "best.pth"))
 
-        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | fold%={foldp:.2f}{ctrl_suffix}")
+        metric_suffix = ""
+        if ndvp is not None: metric_suffix += f" | ndv%={ndvp:.2f}"
+        if sdlogj is not None: metric_suffix += f" | sdlogj={sdlogj:.4f}"
+        
+        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{ctrl_suffix}")
         peak_mem = "n/a" if perf.peak_gpu_mem_gib is None else f"{perf.peak_gpu_mem_gib:.2f}GB"
         print(f"[perf  {epoch:03d}] epoch={perf.epoch_time_sec:.2f}s iter={perf.mean_iter_time_ms:.1f}ms peak={peak_mem}")
 

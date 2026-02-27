@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -76,8 +77,8 @@ def neg_jacobian_penalty(flow: torch.Tensor, mask: torch.Tensor = None, crop: in
     return (pen * m).sum() / denom
 
 
-def fold_percent_from_flow(flow: torch.Tensor, mask: torch.Tensor = None, crop: int = 0) -> float:
-    """Compute folding ratio in percent (detJ <= 0)."""
+def jacobian_nonpositive_percent(flow: torch.Tensor, mask: torch.Tensor = None, crop: int = 0) -> float:
+    """Compute non-positive Jacobian ratio in percent (detJ <= 0)."""
     det = _crop_spatial(jacobian_det(flow.float()), int(crop))
     neg = (det <= 0.0).float()
 
@@ -97,3 +98,92 @@ def logdet_std_from_flow(flow: torch.Tensor, eps: float = 1e-9) -> float:
     """Compute std(log(detJ)) with safe clamping."""
     det = torch.clamp(jacobian_det(flow.float()), min=float(eps), max=1e9)
     return float(torch.std(torch.log(det)).item())
+
+
+def digital_jacobian_metrics(flow: torch.Tensor, mask: torch.Tensor) -> tuple[float, float]:
+    """Compute digital Jacobian metrics: %|J|<=0 and %NDV from displacement + brain mask."""
+    if flow.dim() != 5 or int(flow.shape[0]) != 1 or int(flow.shape[1]) != 3:
+        raise ValueError(f"Expected flow shape [1,3,D,H,W], got {tuple(flow.shape)}.")
+    if mask is None: raise ValueError("digital_jacobian_metrics requires x_seg mask.")
+
+    if mask.dim() == 5: mask_np = mask.detach().cpu().numpy()[0, 0]
+    elif mask.dim() == 4: mask_np = mask.detach().cpu().numpy()[0]
+    else: raise ValueError(f"Expected mask shape [1,1,D,H,W] or [1,D,H,W], got {tuple(mask.shape)}.")
+
+    disp = flow.detach().float().cpu().numpy()[0]
+    d, h, w = disp.shape[1:]
+    zz, yy, xx = np.meshgrid(np.arange(d), np.arange(h), np.arange(w), indexing="ij")
+    trans = disp + np.stack([zz, yy, xx], axis=0).astype(np.float32)
+
+    def _det_from_axis_modes(mx: str, my: str, mz: str) -> np.ndarray:
+        def fd(arr: np.ndarray, axis: int, mode: str) -> np.ndarray:
+            n = arr.shape[axis]
+            idx = np.arange(n)
+            if mode == "+":
+                return np.take(arr, np.clip(idx + 1, 0, n - 1), axis=axis) - arr
+            if mode == "-":
+                return arr - np.take(arr, np.clip(idx - 1, 0, n - 1), axis=axis)
+            return 0.5 * (
+                np.take(arr, np.clip(idx + 1, 0, n - 1), axis=axis)
+                - np.take(arr, np.clip(idx - 1, 0, n - 1), axis=axis)
+            )
+
+        dx0, dx1, dx2 = fd(trans[0], 0, mx), fd(trans[1], 0, mx), fd(trans[2], 0, mx)
+        dy0, dy1, dy2 = fd(trans[0], 1, my), fd(trans[1], 1, my), fd(trans[2], 1, my)
+        dz0, dz1, dz2 = fd(trans[0], 2, mz), fd(trans[1], 2, mz), fd(trans[2], 2, mz)
+        det = dx0 * (dy1 * dz2 - dy2 * dz1) - dx1 * (dy0 * dz2 - dy2 * dz0) + dx2 * (dy0 * dz1 - dy1 * dz0)
+        return det[1:-1, 1:-1, 1:-1]
+
+    def _corr3d_nearest(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+        kz, ky, kx = kernel.shape
+        pz, py, px = kz // 2, ky // 2, kx // 2
+        pad = np.pad(arr, ((pz, pz), (py, py), (px, px)), mode="edge")
+        out = np.zeros_like(arr, dtype=np.float32)
+        d0, h0, w0 = arr.shape
+        for iz in range(kz):
+            for iy in range(ky):
+                for ix in range(kx):
+                    w = float(kernel[iz, iy, ix])
+                    if w == 0.0:
+                        continue
+                    out += w * pad[iz:iz + d0, iy:iy + h0, ix:ix + w0]
+        return out
+
+    def _det_from_kernels(kx: np.ndarray, ky: np.ndarray, kz: np.ndarray) -> np.ndarray:
+        gradx = np.stack([_corr3d_nearest(trans[c], kx) for c in range(3)], axis=0)
+        grady = np.stack([_corr3d_nearest(trans[c], ky) for c in range(3)], axis=0)
+        gradz = np.stack([_corr3d_nearest(trans[c], kz) for c in range(3)], axis=0)
+        det = (
+            gradx[0] * (grady[1] * gradz[2] - grady[2] * gradz[1])
+            - gradx[1] * (grady[0] * gradz[2] - grady[2] * gradz[0])
+            + gradx[2] * (grady[0] * gradz[1] - grady[1] * gradz[0])
+        )
+        return det[1:-1, 1:-1, 1:-1]
+
+    det_pm = []
+    for mx, my, mz in (
+        ("+", "+", "+"), ("+", "+", "-"), ("+", "-", "+"), ("+", "-", "-"),
+        ("-", "+", "+"), ("-", "+", "-"), ("-", "-", "+"), ("-", "-", "-"),
+    ):
+        det_pm.append(_det_from_axis_modes(mx, my, mz))
+
+    all_pos = np.ones_like(det_pm[0], dtype=np.bool_)
+    for det in det_pm:
+        all_pos &= (det > 0.0)
+    j_leq0_percent = float((~all_pos).sum() / all_pos.size * 100.0)
+
+    k1 = np.array([[1, 0, 0], [0, -1, 0], [0, 0, 0]], dtype=np.float32)
+    k2 = np.array([[0, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=np.float32)
+    jstar1 = _det_from_kernels(k1.reshape(3, 3, 1), k1.reshape(3, 1, 3), k1.reshape(1, 3, 3))
+    jstar2 = _det_from_kernels(k2.reshape(3, 3, 1), k2.reshape(1, 3, 3), k2.reshape(3, 1, 3))
+
+    brain = (mask_np[1:-1, 1:-1, 1:-1] > 0).astype(np.float32)
+    denom = float(brain.sum())
+    if denom <= 0.0:
+        return j_leq0_percent, 0.0
+
+    ndv = 0.0
+    for det in (*det_pm, jstar1, jstar2):
+        ndv += float((-0.5 * np.minimum(det, 0.0) * brain / 6.0).sum())
+    ndv_percent = ndv / denom * 100.0
+    return j_leq0_percent, float(ndv_percent)
