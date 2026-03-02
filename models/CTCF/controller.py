@@ -107,6 +107,8 @@ class CTCFController:
         self.cfg = cfg
         self.knobs = CTCFKnobs(w_jac_mul=cfg.jac_mul_min)
         self.phase = "S0"
+        self.last_phase_change = ""
+        self.last_jac_update = ""
 
 
     def get(self):
@@ -131,7 +133,7 @@ class CTCFController:
         bad_hard = jac > self.cfg.jac_hard
 
         self._update_jac(jac)
-        self._update_phase(epoch=epoch, jac=jac)
+        self.last_phase_change = self._update_phase(epoch=epoch, jac=jac)
 
         if bad_hard:
             self.knobs.w_icon_mul = move_towards(self.knobs.w_icon_mul, 0.0, self.cfg.icon_decay_bad)
@@ -150,18 +152,34 @@ class CTCFController:
 
 
     def _epoch_gate(self, epoch: int, at: float):
-        if at >= 1.0: return False
-        return epoch >= int(round(self.cfg.max_epoch * at))
+        if at >= 1.0:
+            return False
+        gate_epoch = max(1, int(round(self.cfg.max_epoch * at)))
+        return epoch >= gate_epoch
 
 
     def _update_phase(self, *, epoch: int, jac: float):
-        if self.phase == "S0" and self._epoch_gate(epoch, self.cfg.s1_at) and jac <= self.cfg.icon_start_jac_max: self.phase = "S1"
-        if self.phase == "S1" and self._epoch_gate(epoch, self.cfg.s2_at) and jac <= self.cfg.cyc_start_jac_max: self.phase = "S2"
-        if self.phase == "S2" and self._epoch_gate(epoch, self.cfg.s3_at) and jac <= self.cfg.cyc_start_jac_max: self.phase = "S3"
-        if jac > self.cfg.jac_hard and self.phase in ("S2", "S3"): self.phase = "S1"
+        prev = self.phase
+        reason = ""
+        if self.phase == "S0" and self._epoch_gate(epoch, self.cfg.s1_at) and jac <= self.cfg.icon_start_jac_max:
+            self.phase = "S1"
+            reason = f"epoch>=S1({self.cfg.s1_at:.2f}) and jac<={self.cfg.icon_start_jac_max:.2f}"
+        if self.phase == "S1" and self._epoch_gate(epoch, self.cfg.s2_at) and jac <= self.cfg.cyc_start_jac_max:
+            self.phase = "S2"
+            reason = f"epoch>=S2({self.cfg.s2_at:.2f}) and jac<={self.cfg.cyc_start_jac_max:.2f}"
+        if self.phase == "S2" and self._epoch_gate(epoch, self.cfg.s3_at) and jac <= self.cfg.cyc_start_jac_max:
+            self.phase = "S3"
+            reason = f"epoch>=S3({self.cfg.s3_at:.2f}) and jac<={self.cfg.cyc_start_jac_max:.2f}"
+        if jac > self.cfg.jac_hard and self.phase in ("S2", "S3"):
+            self.phase = "S1"
+            reason = f"fallback jac>{self.cfg.jac_hard:.2f}"
+        if self.phase != prev:
+            return f"{prev}->{self.phase} ({reason})"
+        return ""
 
 
     def _update_jac(self, jac: float):
+        prev = self.knobs.w_jac_mul
         if jac > self.cfg.jac_hard: tgt, rate = self.cfg.jac_mul_max, self.cfg.jac_rate_up
         elif jac > self.cfg.jac_soft:
             mid = self.cfg.jac_mul_min + 0.5 * (self.cfg.jac_mul_max - self.cfg.jac_mul_min)
@@ -169,3 +187,4 @@ class CTCFController:
         elif jac < self.cfg.jac_relax: tgt, rate = self.cfg.jac_mul_min, self.cfg.jac_rate_down
         else: tgt, rate = self.cfg.jac_mul_min, self.cfg.jac_rate_down
         self.knobs.w_jac_mul = move_towards(self.knobs.w_jac_mul, tgt, rate)
+        self.last_jac_update = f"{prev:.2f}->{self.knobs.w_jac_mul:.2f} (tgt={tgt:.2f}, jac={jac:.2f})"

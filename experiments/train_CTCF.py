@@ -1,15 +1,24 @@
 import argparse
 
 import torch
+import torch.nn.functional as F
 from torch import optim
 
 from datasets.synthetic import build_synth_loaders
 from experiments.core.train_runtime import Ctx, add_common_args, loaders_baseline, run_train
 from experiments.core.model_adapters import get_model_adapter
 from models.CTCF.controller import CTCFController, CTCFControllerCfg
+from models.CTCF.blocks import upsample_flow
 from utils import RegisterModel, dice_val, icon_loss, neg_jacobian_penalty, setup_device
 
 PHASE_TO_ID = {"S0": 0.0, "S1": 1.0, "S2": 2.0, "S3": 3.0}
+PHASE_AUX_SCALE = {
+    "S0": (1.00, 0.85),
+    "S1": (0.90, 0.90),
+    "S2": (0.75, 1.00),
+    "S3": (0.60, 1.00),
+}
+GATE_REG_WEIGHT = 2e-4
 
 
 class Runner:
@@ -79,7 +88,7 @@ class Runner:
 
 
     def train_step(self, batch, epoch):
-        """Compute bidirectional CTCF losses for one optimization step."""
+        """Compute bidirectional CTCF losses with multi-level auxiliary supervision."""
         args, ctx = self.args, self.ctx
 
         if self.is_synth:
@@ -100,8 +109,8 @@ class Runner:
         W_cyc = float(args.w_cyc) * wC
         W_jac = float(args.w_jac) * wJ
 
-        def_xy, flow_xy = self.model(x, y, return_all=False, alpha_l1=1.0, alpha_l3=a3)
-        def_yx, flow_yx = self.model(y, x, return_all=False, alpha_l1=1.0, alpha_l3=a3)
+        def_xy, flow_xy, aux_xy = self.model(x, y, return_all=True, alpha_l1=1.0, alpha_l3=a3)
+        def_yx, flow_yx, aux_yx = self.model(y, x, return_all=True, alpha_l1=1.0, alpha_l3=a3)
 
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
@@ -113,16 +122,75 @@ class Runner:
             (ctx.reg_model((def_xy, flow_yx)) - x).abs().mean()
             + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()
         ) * W_cyc
-        loss = L_ncc + L_icon + L_reg + L_jac + L_cyc
+        L_main = L_ncc + L_icon + L_reg + L_jac + L_cyc
+
+        x_half = F.interpolate(x, scale_factor=0.5, mode="trilinear", align_corners=False)
+        y_half = F.interpolate(y, scale_factor=0.5, mode="trilinear", align_corners=False)
+
+        L_reg_l1 = x.new_tensor(0.0)
+        if "flow_quarter" in aux_xy and "flow_quarter" in aux_yx:
+            flow_l1_xy = upsample_flow(aux_xy["flow_quarter"], scale_factor=4)
+            flow_l1_yx = upsample_flow(aux_yx["flow_quarter"], scale_factor=4)
+            L_reg_l1 = 0.5 * (ctx.reg(flow_l1_xy) + ctx.reg(flow_l1_yx)) * args.w_reg
+
+        L_reg_l2 = x.new_tensor(0.0)
+        if "flow_half_l2" in aux_xy and "flow_half_l2" in aux_yx:
+            flow_l2_xy = upsample_flow(aux_xy["flow_half_l2"], scale_factor=2)
+            flow_l2_yx = upsample_flow(aux_yx["flow_half_l2"], scale_factor=2)
+            L_reg_l2 = 0.5 * (ctx.reg(flow_l2_xy) + ctx.reg(flow_l2_yx)) * args.w_reg
+
+        with torch.autocast(device_type="cuda", enabled=False):
+            L_ncc_l2 = 0.5 * (
+                ctx.ncc(aux_xy["def_half_l2"].float(), y_half.float()) + ctx.ncc(aux_yx["def_half_l2"].float(), x_half.float())
+            ) * args.w_ncc
+
+        p = min(1.0, max(0.0, float(epoch) / max(1.0, float(args.max_epoch - 1))))
+        lam_l1 = 0.30 * (1.0 - p) * (1.0 - p) + 0.03
+        lam_l2 = 0.20 * (1.0 - p) * (1.0 - p) + 0.02
+        lam_ncc2 = 0.12 * max(0.0, 1.0 - p / 0.6)
+        reg_scale, ncc2_scale = PHASE_AUX_SCALE.get(ctrl.phase, (1.0, 1.0))
+        lam_l1 *= reg_scale
+        lam_l2 *= reg_scale
+        lam_ncc2 *= ncc2_scale
+
+        L_aux = L_reg_l1 * lam_l1 + L_reg_l2 * lam_l2 + L_ncc_l2 * lam_ncc2
+
+        gate_xy = aux_xy.get("gate")
+        gate_yx = aux_yx.get("gate")
+        if gate_xy is not None and gate_yx is not None:
+            gate_mean_t = 0.5 * (gate_xy.mean() + gate_yx.mean())
+            L_gate = gate_mean_t * GATE_REG_WEIGHT
+            gate_cat = torch.cat((gate_xy.detach().reshape(-1), gate_yx.detach().reshape(-1)), dim=0).float()
+            gate_mean = float(gate_mean_t.detach().item())
+            gate_p95 = float(torch.quantile(gate_cat, 0.95).item())
+        else:
+            L_gate = x.new_tensor(0.0)
+            gate_mean = 0.0
+            gate_p95 = 0.0
+
+        loss = L_main + L_aux + L_gate
 
         phase_id = float(PHASE_TO_ID.get(ctrl.phase, -1.0))
         logs = {
             "all": loss.item(),
+            "main": L_main.item(),
             "ncc": L_ncc.item(),
             "reg": L_reg.item(),
             "icon": L_icon.item(),
             "cyc": L_cyc.item(),
             "jac": L_jac.item(),
+            "aux": L_aux.item(),
+            "aux_l1": L_reg_l1.item(),
+            "aux_l2": L_reg_l2.item(),
+            "aux_ncc2": L_ncc_l2.item(),
+            "gate_reg": L_gate.item(),
+            "gate_mean": gate_mean,
+            "gate_p95": gate_p95,
+            "lam_l1": lam_l1,
+            "lam_l2": lam_l2,
+            "lam_ncc2": lam_ncc2,
+            "aux_reg_scale": reg_scale,
+            "aux_ncc2_scale": ncc2_scale,
             "phase": phase_id,
             "a3": a3,
             "wI": wI,

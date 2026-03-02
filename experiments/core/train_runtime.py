@@ -250,16 +250,19 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 if "icon" in meters: msg += f" icon={meters['icon'].val:.4f}"
                 if "cyc" in meters:  msg += f" cyc={meters['cyc'].val:.4f}"
                 if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
+                if "aux" in meters:  msg += f" aux={meters['aux'].val:.4f}"
+                if "gate_reg" in meters: msg += f" gR={meters['gate_reg'].val:.4f}"
+                if "gate_mean" in meters: msg += f" gM={meters['gate_mean'].val:.3f}"
                 if "dice_tr" in meters: msg += f" dice_tr={meters['dice_tr'].val:.4f}"
 
                 msg += f" | lr={lr_now:.3e}"
 
                 if "phase" in meters:
-                    msg += (
-                        f" | ctrl: ph={int(meters['phase'].val)}"
-                        f" a3={meters['a3'].val:.2f}"
-                        f" wJ={meters['wJ'].val:.2f} wI={meters['wI'].val:.2f} wC={meters['wC'].val:.2f}"
-                    )
+                    ph_id = int(round(meters["phase"].val))
+                    ph = {0: "S0", 1: "S1", 2: "S2", 3: "S3"}.get(ph_id, f"?{ph_id}")
+                    msg += f" | ctrl:{ph}"
+                    if "aux_reg_scale" in meters and "aux_ncc2_scale" in meters:
+                        msg += f" aR={meters['aux_reg_scale'].val:.2f} aN2={meters['aux_ncc2_scale'].val:.2f}"
                 print(msg)
 
         if writer is not None:
@@ -305,11 +308,8 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             if writer is not None:
                 for k, v in (ctrl.tb_scalars() or {}).items():
                     writer.add_scalar(k, float(v), epoch)
-            a3 = float(ctrl.knobs.alpha_l3)
-            ctrl_suffix = (
-                f"ctrl: ph={ctrl.phase} a3={a3:.2f} "
-                f"wJ={ctrl.knobs.w_jac_mul:.2f} wI={ctrl.knobs.w_icon_mul:.2f} wC={ctrl.knobs.w_cyc_mul:.2f}"
-            )
+            phase_note = f" tr={ctrl.last_phase_change}" if getattr(ctrl, "last_phase_change", "") else ""
+            ctrl_suffix = f" | ctrl: ph={ctrl.phase}{phase_note}"
 
         if writer is not None and args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
             write_tb_images(writer, val_res.last_vis or {}, epoch)
@@ -334,8 +334,15 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         metric_suffix = ""
         if ndvp is not None: metric_suffix += f" | ndv%={ndvp:.2f}"
         if sdlogj is not None: metric_suffix += f" | sdlogj={sdlogj:.4f}"
+        train_suffix = ""
+        if "main" in meters:
+            train_suffix += f" | train_main={meters['main'].avg:.4f}"
+        if "aux" in meters:
+            train_suffix += f" train_aux={meters['aux'].avg:.4f}"
+        if "gate_mean" in meters:
+            train_suffix += f" train_gM={meters['gate_mean'].avg:.3f}"
         
-        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{ctrl_suffix}")
+        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{train_suffix}{ctrl_suffix}")
         peak_mem = "n/a" if perf.peak_gpu_mem_gib is None else f"{perf.peak_gpu_mem_gib:.2f}GB"
         print(f"[perf  {epoch:03d}] epoch={perf.epoch_time_sec:.2f}s iter={perf.mean_iter_time_ms:.1f}ms peak={peak_mem}")
 
