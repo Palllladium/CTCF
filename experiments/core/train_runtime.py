@@ -13,7 +13,7 @@ from torchvision import transforms
 
 from datasets import OASIS, IXI
 from utils import (
-    adjust_learning_rate_poly, make_exp_dirs, attach_stdout_logger, load_checkpoint_if_exists,
+    adjust_learning_rate_poly, adjust_lr_ctcf_schedule, make_exp_dirs, attach_stdout_logger, load_checkpoint_if_exists,
     perf_epoch_start, perf_epoch_end, mk_grid_img, compute_fig, validate,
     AverageMeter, RegisterModel, NCCVxm, Grad3d, NumpyType, RandomFlip, SegNorm,
     dice_val, dice_val_subset, OASIS_VOI_LABELS, IXI_VOI_LABELS
@@ -216,7 +216,8 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         runner.model.train()
         t0 = perf_epoch_start()
 
-        lr_now = adjust_learning_rate_poly(runner.optimizer, epoch, int(args.max_epoch), args.lr)
+        if getattr(runner, "lr_policy", "") == "ctcf": lr_now = adjust_lr_ctcf_schedule(runner.optimizer, epoch, args.max_epoch, args.lr)
+        else: lr_now = adjust_learning_rate_poly(runner.optimizer, epoch, int(args.max_epoch), args.lr)
         if writer is not None: writer.add_scalar("LR", lr_now, epoch)
 
         meters, iter_time_sum = {}, 0.0
@@ -251,18 +252,9 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 if "cyc" in meters:  msg += f" cyc={meters['cyc'].val:.4f}"
                 if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
                 if "aux" in meters:  msg += f" aux={meters['aux'].val:.4f}"
-                if "gate_reg" in meters: msg += f" gR={meters['gate_reg'].val:.4f}"
-                if "gate_mean" in meters: msg += f" gM={meters['gate_mean'].val:.3f}"
                 if "dice_tr" in meters: msg += f" dice_tr={meters['dice_tr'].val:.4f}"
 
                 msg += f" | lr={lr_now:.3e}"
-
-                if "phase" in meters:
-                    ph_id = int(round(meters["phase"].val))
-                    ph = {0: "S0", 1: "S1", 2: "S2", 3: "S3"}.get(ph_id, f"?{ph_id}")
-                    msg += f" | ctrl:{ph}"
-                    if "aux_reg_scale" in meters and "aux_ncc2_scale" in meters:
-                        msg += f" aR={meters['aux_reg_scale'].val:.2f} aN2={meters['aux_ncc2_scale'].val:.2f}"
                 print(msg)
 
         if writer is not None:
@@ -301,15 +293,8 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             if ndvp is not None: writer.add_scalar("val/NDV%", ndvp, epoch)
             if sdlogj is not None: writer.add_scalar("val/SDlogJ", sdlogj, epoch)
 
-        ctrl_suffix = ""
-        ctrl = getattr(getattr(runner, "ctx", None), "ctcf_ctrl", None)
-        if ctrl is not None:
-            ctrl.on_val_end(epoch=epoch, val_dice=dsc, val_jac_percent=jacp)
-            if writer is not None:
-                for k, v in (ctrl.tb_scalars() or {}).items():
-                    writer.add_scalar(k, float(v), epoch)
-            phase_note = f" tr={ctrl.last_phase_change}" if getattr(ctrl, "last_phase_change", "") else ""
-            ctrl_suffix = f" | ctrl: ph={ctrl.phase}{phase_note}"
+        if hasattr(runner, "on_val_end"):
+            runner.on_val_end(epoch, dsc, jacp)
 
         if writer is not None and args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
             write_tb_images(writer, val_res.last_vis or {}, epoch)
@@ -334,15 +319,12 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         metric_suffix = ""
         if ndvp is not None: metric_suffix += f" | ndv%={ndvp:.2f}"
         if sdlogj is not None: metric_suffix += f" | sdlogj={sdlogj:.4f}"
-        train_suffix = ""
-        if "main" in meters:
-            train_suffix += f" | train_main={meters['main'].avg:.4f}"
-        if "aux" in meters:
-            train_suffix += f" train_aux={meters['aux'].avg:.4f}"
-        if "gate_mean" in meters:
-            train_suffix += f" train_gM={meters['gate_mean'].avg:.3f}"
         
-        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{train_suffix}{ctrl_suffix}")
+        train_suffix = ""
+        if "main" in meters: train_suffix += f" | train_main={meters['main'].avg:.4f}"
+        if "aux" in meters: train_suffix += f" train_aux={meters['aux'].avg:.4f}"
+        
+        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{train_suffix}")
         peak_mem = "n/a" if perf.peak_gpu_mem_gib is None else f"{perf.peak_gpu_mem_gib:.2f}GB"
         print(f"[perf  {epoch:03d}] epoch={perf.epoch_time_sec:.2f}s iter={perf.mean_iter_time_ms:.1f}ms peak={peak_mem}")
 

@@ -1,27 +1,18 @@
 import argparse
 
 import torch
-import torch.nn.functional as F
 from torch import optim
 
 from datasets.synthetic import build_synth_loaders
-from experiments.core.train_runtime import Ctx, add_common_args, loaders_baseline, run_train
 from experiments.core.model_adapters import get_model_adapter
-from models.CTCF.controller import CTCFController, CTCFControllerCfg
+from experiments.core.train_rules import CtcfTrainRules, apply_ctcf_dataset_defaults
+from experiments.core.train_runtime import Ctx, add_common_args, loaders_baseline, run_train
 from models.CTCF.blocks import upsample_flow
 from utils import RegisterModel, dice_val, icon_loss, neg_jacobian_penalty, setup_device
 
-PHASE_TO_ID = {"S0": 0.0, "S1": 1.0, "S2": 2.0, "S3": 3.0}
-PHASE_AUX_SCALE = {
-    "S0": (1.00, 0.85),
-    "S1": (0.90, 0.90),
-    "S2": (0.75, 1.00),
-    "S3": (0.60, 1.00),
-}
-GATE_REG_WEIGHT = 2e-4
-
 
 class Runner:
+    """CTCF trainer with deterministic schedules and jacobian governor (no controller phases)."""
     def __init__(self, args, device):
         self.args = args
         self.device = device
@@ -30,49 +21,33 @@ class Runner:
 
         synth_img_size = None
         synth_dwin = None
-        use_level1 = None
-        use_level3 = None
 
         if self.is_synth:
             synth_img_size = tuple(int(v) for v in args.synth_vol_size)
             synth_dwin = self._adapt_swin_windows(synth_img_size)
-            use_level1 = bool(int(args.use_level1))
-            use_level3 = bool(int(args.use_level3))
 
         self.model = self.adapter.build(
             time_steps=int(args.time_steps),
             config_key=args.config,
-            use_level1=use_level1,
-            use_level3=use_level3,
             use_checkpoint=bool(int(args.use_checkpoint)),
             synth_img_size=synth_img_size,
             synth_dwin=synth_dwin,
         ).to(device)
-        
-        if self.is_synth:
-            print(
-                f"Synth architecture: use_level1={self.model.use_level1}, "
-                f"use_level2={self.model.use_level2}, use_level3={self.model.use_level3}"
-            )
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
         self.img_size = tuple(int(v) for v in self.model.img_size_full)
         self.ctx = Ctx(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
-
-        ctrl_cfg = CTCFControllerCfg.for_ds(args.ds, args.max_epoch)
-        self.ctx.ctcf_ctrl = CTCFController(ctrl_cfg)
         self.forward_flow = self._forward_flow
+        self.lr_policy = "ctcf"
+        self.rules = CtcfTrainRules(ds=args.ds, max_epoch=args.max_epoch)
 
 
     @staticmethod
     def _adapt_swin_windows(img):
-        """Compute Swin window sizes from full-resolution synthetic volume size."""
         img = tuple(int(v) for v in img)
         if any(v % 32 != 0 for v in img):
-            raise ValueError(
-                f"synth_vol_size={img} must be divisible by 32. Example: 96 96 96 or 160 192 224."
-            )
+            raise ValueError(f"synth_vol_size={img} must be divisible by 32.")
         ws = tuple(max(2, v // 32) for v in img)
         print(f"Synth cfg: img_size={img}, window_size={ws}, dwin_size={ws}")
         return ws
@@ -80,16 +55,20 @@ class Runner:
 
     @torch.no_grad()
     def _forward_flow(self, x, y):
-        a3 = float(self.ctx.ctcf_ctrl.get().alpha_l3)
         use_amp = torch.cuda.is_available()
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = self.model(x, y, return_all=False, alpha_l1=1.0, alpha_l3=a3)
+            _, flow = self.model(x, y, return_all=False, alpha_l1=1.0)
         return flow.float()
 
 
+    def on_val_end(self, epoch: int, _val_dice: float, val_jac_percent: float):
+        del epoch, _val_dice
+        self.rules.update_from_val(val_jac_percent)
+
+
     def train_step(self, batch, epoch):
-        """Compute bidirectional CTCF losses with multi-level auxiliary supervision."""
         args, ctx = self.args, self.ctx
+        self.rules.on_epoch_start(int(epoch))
 
         if self.is_synth:
             x, y, x_seg, y_seg = batch[0], batch[1], batch[2], batch[3]
@@ -100,32 +79,21 @@ class Runner:
 
         x, y = x.to(self.device).float(), y.to(self.device).float()
 
-        ctrl = ctx.ctcf_ctrl
-        w = ctrl.get()
-        a3 = float(w.alpha_l3)
+        W_icon = float(args.w_icon) * float(self.rules.w_icon_mul)
+        W_cyc = float(args.w_cyc) * float(self.rules.w_cyc_mul)
+        W_jac = float(args.w_jac) * float(self.rules.w_jac_mul)
 
-        wI, wC, wJ = float(w.w_icon_mul), float(w.w_cyc_mul), float(w.w_jac_mul)
-        W_icon = float(args.w_icon) * wI
-        W_cyc = float(args.w_cyc) * wC
-        W_jac = float(args.w_jac) * wJ
-
-        def_xy, flow_xy, aux_xy = self.model(x, y, return_all=True, alpha_l1=1.0, alpha_l3=a3)
-        def_yx, flow_yx, aux_yx = self.model(y, x, return_all=True, alpha_l1=1.0, alpha_l3=a3)
+        def_xy, flow_xy, aux_xy = self.model(x, y, return_all=True, alpha_l1=1.0)
+        def_yx, flow_yx, aux_yx = self.model(y, x, return_all=True, alpha_l1=1.0)
 
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx) * W_icon
         L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
-        L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
-        L_cyc = (
-            (ctx.reg_model((def_xy, flow_yx)) - x).abs().mean()
-            + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()
-        ) * W_cyc
+        L_jac = 0.5 * (neg_jacobian_penalty(flow_xy, crop=1) + neg_jacobian_penalty(flow_yx, crop=1)) * W_jac
+        L_cyc = ((ctx.reg_model((def_xy, flow_yx)) - x).abs().mean() + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()) * W_cyc
         L_main = L_ncc + L_icon + L_reg + L_jac + L_cyc
-
-        x_half = F.interpolate(x, scale_factor=0.5, mode="trilinear", align_corners=False)
-        y_half = F.interpolate(y, scale_factor=0.5, mode="trilinear", align_corners=False)
 
         L_reg_l1 = x.new_tensor(0.0)
         if "flow_quarter" in aux_xy and "flow_quarter" in aux_yx:
@@ -139,38 +107,10 @@ class Runner:
             flow_l2_yx = upsample_flow(aux_yx["flow_half_l2"], scale_factor=2)
             L_reg_l2 = 0.5 * (ctx.reg(flow_l2_xy) + ctx.reg(flow_l2_yx)) * args.w_reg
 
-        with torch.autocast(device_type="cuda", enabled=False):
-            L_ncc_l2 = 0.5 * (
-                ctx.ncc(aux_xy["def_half_l2"].float(), y_half.float()) + ctx.ncc(aux_yx["def_half_l2"].float(), x_half.float())
-            ) * args.w_ncc
+        lam_l1, lam_l2 = self.rules.aux_lambdas(int(epoch))
+        L_aux = L_reg_l1 * lam_l1 + L_reg_l2 * lam_l2
+        loss = L_main + L_aux
 
-        p = min(1.0, max(0.0, float(epoch) / max(1.0, float(args.max_epoch - 1))))
-        lam_l1 = 0.30 * (1.0 - p) * (1.0 - p) + 0.03
-        lam_l2 = 0.20 * (1.0 - p) * (1.0 - p) + 0.02
-        lam_ncc2 = 0.12 * max(0.0, 1.0 - p / 0.6)
-        reg_scale, ncc2_scale = PHASE_AUX_SCALE.get(ctrl.phase, (1.0, 1.0))
-        lam_l1 *= reg_scale
-        lam_l2 *= reg_scale
-        lam_ncc2 *= ncc2_scale
-
-        L_aux = L_reg_l1 * lam_l1 + L_reg_l2 * lam_l2 + L_ncc_l2 * lam_ncc2
-
-        gate_xy = aux_xy.get("gate")
-        gate_yx = aux_yx.get("gate")
-        if gate_xy is not None and gate_yx is not None:
-            gate_mean_t = 0.5 * (gate_xy.mean() + gate_yx.mean())
-            L_gate = gate_mean_t * GATE_REG_WEIGHT
-            gate_cat = torch.cat((gate_xy.detach().reshape(-1), gate_yx.detach().reshape(-1)), dim=0).float()
-            gate_mean = float(gate_mean_t.detach().item())
-            gate_p95 = float(torch.quantile(gate_cat, 0.95).item())
-        else:
-            L_gate = x.new_tensor(0.0)
-            gate_mean = 0.0
-            gate_p95 = 0.0
-
-        loss = L_main + L_aux + L_gate
-
-        phase_id = float(PHASE_TO_ID.get(ctrl.phase, -1.0))
         logs = {
             "all": loss.item(),
             "main": L_main.item(),
@@ -182,23 +122,8 @@ class Runner:
             "aux": L_aux.item(),
             "aux_l1": L_reg_l1.item(),
             "aux_l2": L_reg_l2.item(),
-            "aux_ncc2": L_ncc_l2.item(),
-            "gate_reg": L_gate.item(),
-            "gate_mean": gate_mean,
-            "gate_p95": gate_p95,
             "lam_l1": lam_l1,
             "lam_l2": lam_l2,
-            "lam_ncc2": lam_ncc2,
-            "aux_reg_scale": reg_scale,
-            "aux_ncc2_scale": ncc2_scale,
-            "phase": phase_id,
-            "a3": a3,
-            "wI": wI,
-            "wC": wC,
-            "wJ": wJ,
-            "W_icon": W_icon,
-            "W_cyc": W_cyc,
-            "W_jac": W_jac,
         }
 
         if self.is_synth:
@@ -220,9 +145,9 @@ def parse_args():
 
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
     p.add_argument("--w_reg", type=float, default=None, help="Flow regularization loss weight (auto: IXI=4.0, others=1.0).")
-    p.add_argument("--w_icon", type=float, default=0.05, help="ICON loss base weight (multiplied by controller knob).")
-    p.add_argument("--w_cyc", type=float, default=0.02, help="Cycle consistency loss base weight (multiplied by controller knob).")
-    p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight (multiplied by controller knob).")
+    p.add_argument("--w_icon", type=float, default=0.05, help="ICON loss base weight.")
+    p.add_argument("--w_cyc", type=float, default=0.02, help="Cycle consistency loss base weight.")
+    p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight.")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")
@@ -230,15 +155,13 @@ def parse_args():
     p.add_argument("--synth_vol_size", type=int, nargs=3, default=(96, 96, 96), help="Synthetic volume size D H W (each must be divisible by 32).")
     p.add_argument("--synth_flow_max_disp", type=float, default=6.0, help="Max synthetic displacement amplitude in voxels.")
     p.add_argument("--synth_seed", type=int, default=123, help="Base seed for synthetic pair generation.")
-    p.add_argument("--use_level1", type=int, choices=[0, 1], default=1, help="Enable Level-1 coarse path (SYNTH mode only).")
-    p.add_argument("--use_level3", type=int, choices=[0, 1], default=1, help="Enable Level-3 refiner path (SYNTH mode only).")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    if args.w_reg is None:
-        args.w_reg = 4.0 if str(args.ds).upper() == "IXI" else 1.0
+    apply_ctcf_dataset_defaults(args)
+
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else loaders_baseline
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)

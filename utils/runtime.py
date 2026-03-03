@@ -88,6 +88,33 @@ def adjust_learning_rate_poly(optimizer: optim.Optimizer, epoch: int, max_epochs
     return lr
 
 
+def adjust_lr_ctcf_schedule(
+    optimizer: optim.Optimizer,
+    epoch: int,
+    max_epochs: int,
+    init_lr: float,
+    *,
+    power: float = 0.9,
+    min_lr: float = 2e-5,
+    warm_end_frac: float = 0.15,
+) -> float:
+    e = int(epoch)
+    me = max(1, int(max_epochs))
+    warm_end = max(1, int(round(float(warm_end_frac) * me)))
+
+    if e < warm_end:
+        lr = float(init_lr)
+    else:
+        t = float(e - warm_end) / float(max(1, me - warm_end))
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        lr = float(init_lr * np.power(1.0 - t, float(power)))
+
+    lr = float(max(lr, float(min_lr)))
+    for pg in optimizer.param_groups:
+        pg["lr"] = lr
+    return lr
+
+
 def save_checkpoint(state: Dict[str, Any], save_dir: str, filename: str, max_model_num: int = 8) -> None:
     os.makedirs(save_dir, exist_ok=True)
     torch.save(state, os.path.join(save_dir, filename))

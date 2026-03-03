@@ -60,8 +60,6 @@ class CtcfAdapter(ModelAdapter):
         *,
         time_steps: int = 12,
         config_key: str = "CTCF-CascadeA",
-        use_level1: Optional[bool] = None,
-        use_level3: Optional[bool] = None,
         use_checkpoint: Optional[bool] = None,
         synth_img_size: Optional[Tuple[int, int, int]] = None,
         synth_dwin: Optional[Tuple[int, int, int]] = None,
@@ -76,12 +74,8 @@ class CtcfAdapter(ModelAdapter):
             cfg.img_size = (d, h, w)
             cfg.window_size = (d // 32, h // 32, w // 32)
 
-        if synth_dwin is not None:
-            cfg.dwin_size = tuple(int(v) for v in synth_dwin)
-
-        for k, v in {"use_level1": use_level1, "use_level3": use_level3, "use_checkpoint": use_checkpoint}.items():
-            if v is not None:
-                setattr(cfg, k, bool(v))
+        if synth_dwin is not None: cfg.dwin_size = tuple(int(v) for v in synth_dwin)
+        if use_checkpoint is not None: cfg.use_checkpoint = bool(use_checkpoint)
 
         model = CTCF_CascadeA(cfg)
         model.cfg = cfg
@@ -90,7 +84,7 @@ class CtcfAdapter(ModelAdapter):
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
         use_amp = bool(amp and torch.cuda.is_available())
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = model(x, y, return_all=False, alpha_l1=1.0, alpha_l3=1.0)
+            _, flow = model(x, y, return_all=False, alpha_l1=1.0)
         return flow.float()
 
 

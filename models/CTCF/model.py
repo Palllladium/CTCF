@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from models.TransMorph_DCA.model import SpatialTransformer
-from models.CTCF.blocks import upsample_flow, RefineGate3D
+from models.CTCF.blocks import upsample_flow
 from models.CTCF.stages import CTCF_DCA_CoreHalf, CoarseFlowNetQuarter, FlowRefiner3D
 from models.CTCF.configs import CONFIGS
 
@@ -14,7 +14,7 @@ class CTCF_CascadeA(nn.Module):
     Variant A:
       L1: CoarseFlowNetQuarter (1/4)
       L2: CTCF_DCA_CoreHalf    (1/2) with init_flow from L1
-      L3: FlowRefiner3D        (1/2) with gated residual refinement
+      L3: FlowRefiner3D        (1/2) with residual refinement
     Output is produced on FULL-res by upsampling final half-res flow by x2.
     """
     def __init__(self, config):
@@ -28,7 +28,6 @@ class CTCF_CascadeA(nn.Module):
         self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch) if self.use_level1 else None
         self.level2 = CTCF_DCA_CoreHalf(config, time_steps=config.time_steps) if self.use_level2 else None
         self.level3 = FlowRefiner3D(base_ch=config.level3_base_ch) if self.use_level3 else None
-        self.level3_gate = RefineGate3D(in_ch=4, base_ch=max(8, int(config.level3_base_ch // 2))) if self.use_level3 else None
 
         self.st_full = SpatialTransformer(self.img_size_full)
 
@@ -39,7 +38,6 @@ class CTCF_CascadeA(nn.Module):
         *,
         return_all: bool = False,
         alpha_l1: float = 1.0,
-        alpha_l3: float = 1.0,
     ):
         mov_half = nn.functional.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
         fix_half = nn.functional.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
@@ -64,16 +62,11 @@ class CTCF_CascadeA(nn.Module):
             aux["def_half_l2"] = def_half_l2
             aux["flow_half_l2"] = flow_half_l2
 
-        if self.level3 is not None and alpha_l3 > 0.0:
-            flow_half_ref = self.level3(def_half_l2, fix_half, flow_half_l2) * float(alpha_l3)
-            flow_mag = torch.linalg.vector_norm(flow_half_l2, ord=2, dim=1, keepdim=True)
-            flow_mag_norm = flow_mag / (flow_mag.mean(dim=(2, 3, 4), keepdim=True) + 1e-6)
-            gate_in = torch.cat((def_half_l2, fix_half, (def_half_l2 - fix_half).abs(), flow_mag_norm), dim=1)
-            gate = self.level3_gate(gate_in) if self.level3_gate is not None else torch.ones_like(def_half_l2)
-            flow_half = flow_half_l2 + gate * flow_half_ref
+        if self.level3 is not None:
+            flow_half_ref = self.level3(def_half_l2, fix_half, flow_half_l2)
+            flow_half = flow_half_l2 + flow_half_ref
             if aux is not None:
                 aux["flow_half_ref"] = flow_half_ref
-                aux["gate"] = gate
         else:
             flow_half = flow_half_l2
 

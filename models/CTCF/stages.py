@@ -177,7 +177,7 @@ class FlowRefiner3D(nn.Module):
     Output:
       - delta_flow_half: (B,3,D,H,W)
     """
-    def __init__(self, base_ch: int = 16, error_mode: str = "gradmag"):
+    def __init__(self, base_ch: int = 16, error_mode: str = "absdiff"):
         super().__init__()
         self.error_mode = str(error_mode)
         c = int(base_ch)

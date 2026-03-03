@@ -4,6 +4,7 @@ from .field import compose_flows, digital_jacobian_metrics, jacobian_det, jacobi
 from .losses import Grad3d, NCCVxm, icon_loss
 from .runtime import (
     adjust_learning_rate_poly,
+    adjust_lr_ctcf_schedule,
     attach_stdout_logger,
     compute_fig,
     load_checkpoint_if_exists,
@@ -39,6 +40,7 @@ __all__ = [
     "SpatialTransformer",
     "RegisterModel",
     "adjust_learning_rate_poly",
+    "adjust_lr_ctcf_schedule",
     "attach_stdout_logger",
     "compute_fig",
     "load_checkpoint_if_exists",
