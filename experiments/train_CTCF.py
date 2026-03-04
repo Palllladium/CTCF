@@ -95,6 +95,9 @@ class Runner:
             "icon": L_icon.item(),
             "cyc": L_cyc.item(),
             "jac": L_jac.item(),
+            "alpha_l1": alpha_l1,
+            "alpha_l3": alpha_l3,
+            "warm": warm,
         }
 
         if self.is_synth:

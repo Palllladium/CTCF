@@ -323,6 +323,7 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         train_suffix = ""
         if "main" in meters: train_suffix += f" | train_main={meters['main'].avg:.4f}"
         if "aux" in meters: train_suffix += f" train_aux={meters['aux'].avg:.4f}"
+        if "alpha_l1" in meters: train_suffix += f" | a1={meters['alpha_l1'].val:.3f} a3={meters['alpha_l3'].val:.3f} w={meters['warm'].val:.3f}"
         
         print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{train_suffix}")
         peak_mem = "n/a" if perf.peak_gpu_mem_gib is None else f"{perf.peak_gpu_mem_gib:.2f}GB"
