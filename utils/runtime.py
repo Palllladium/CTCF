@@ -115,6 +115,32 @@ def adjust_lr_ctcf_schedule(
     return lr
 
 
+def ctcf_schedule(epoch: int, max_epoch: int):
+    max_epoch = max(1, int(max_epoch))
+    e = int(epoch)
+
+    def clamp01(x):
+        return 0.0 if x <= 0.0 else 1.0 if x >= 1.0 else float(x)
+
+    def ramp(p):
+        p = clamp01(p)
+        return p * p * (3.0 - 2.0 * p)
+
+    s0 = max(1, int(0.05 * max_epoch))
+    s1 = max(s0 + 1, int(0.15 * max_epoch))
+
+    if e < s0:
+        v = 0.0
+    elif e >= s1:
+        v = 1.0
+    else:
+        v = ramp((e - s0) / float(s1 - s0))
+
+    alpha = float(v)
+    warm = float(v)
+    return alpha, alpha, warm
+
+
 def save_checkpoint(state: Dict[str, Any], save_dir: str, filename: str, max_model_num: int = 8) -> None:
     os.makedirs(save_dir, exist_ok=True)
     torch.save(state, os.path.join(save_dir, filename))

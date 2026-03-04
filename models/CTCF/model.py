@@ -38,6 +38,7 @@ class CTCF_CascadeA(nn.Module):
         *,
         return_all: bool = False,
         alpha_l1: float = 1.0,
+        alpha_l3: float = 1.0,
     ):
         mov_half = nn.functional.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
         fix_half = nn.functional.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
@@ -62,8 +63,8 @@ class CTCF_CascadeA(nn.Module):
             aux["def_half_l2"] = def_half_l2
             aux["flow_half_l2"] = flow_half_l2
 
-        if self.level3 is not None:
-            flow_half_ref = self.level3(def_half_l2, fix_half, flow_half_l2)
+        if self.level3 is not None and alpha_l3 > 0.0:
+            flow_half_ref = self.level3(def_half_l2, fix_half, flow_half_l2) * float(alpha_l3)
             flow_half = flow_half_l2 + flow_half_ref
             if aux is not None:
                 aux["flow_half_ref"] = flow_half_ref

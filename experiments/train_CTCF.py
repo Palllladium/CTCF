@@ -5,14 +5,13 @@ from torch import optim
 
 from datasets.synthetic import build_synth_loaders
 from experiments.core.model_adapters import get_model_adapter
-from experiments.core.train_rules import CtcfTrainRules, apply_ctcf_dataset_defaults
+from experiments.core.train_rules import apply_ctcf_dataset_defaults
 from experiments.core.train_runtime import Ctx, add_common_args, loaders_baseline, run_train
-from models.CTCF.blocks import upsample_flow
-from utils import RegisterModel, dice_val, icon_loss, neg_jacobian_penalty, setup_device
+from utils import RegisterModel, ctcf_schedule, dice_val, icon_loss, neg_jacobian_penalty, setup_device
 
 
 class Runner:
-    """CTCF trainer with deterministic schedules and jacobian governor (no controller phases)."""
+    """CTCF trainer with legacy cascade warm-up schedule and bidirectional losses."""
     def __init__(self, args, device):
         self.args = args
         self.device = device
@@ -40,7 +39,6 @@ class Runner:
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
-        self.rules = CtcfTrainRules(ds=args.ds, max_epoch=args.max_epoch)
 
 
     @staticmethod
@@ -57,18 +55,12 @@ class Runner:
     def _forward_flow(self, x, y):
         use_amp = torch.cuda.is_available()
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = self.model(x, y, return_all=False, alpha_l1=1.0)
+            _, flow = self.model(x, y, return_all=False, alpha_l1=1.0, alpha_l3=1.0)
         return flow.float()
-
-
-    def on_val_end(self, epoch: int, _val_dice: float, val_jac_percent: float):
-        del epoch, _val_dice
-        self.rules.update_from_val(val_jac_percent)
 
 
     def train_step(self, batch, epoch):
         args, ctx = self.args, self.ctx
-        self.rules.on_epoch_start(int(epoch))
 
         if self.is_synth:
             x, y, x_seg, y_seg = batch[0], batch[1], batch[2], batch[3]
@@ -79,51 +71,30 @@ class Runner:
 
         x, y = x.to(self.device).float(), y.to(self.device).float()
 
-        W_icon = float(args.w_icon) * float(self.rules.w_icon_mul)
-        W_cyc = float(args.w_cyc) * float(self.rules.w_cyc_mul)
-        W_jac = float(args.w_jac) * float(self.rules.w_jac_mul)
+        alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=args.max_epoch)
+        W_icon = float(args.w_icon) * warm
+        W_cyc = float(args.w_cyc) * warm
+        W_jac = float(args.w_jac) * warm
 
-        def_xy, flow_xy, aux_xy = self.model(x, y, return_all=True, alpha_l1=1.0)
-        def_yx, flow_yx, aux_yx = self.model(y, x, return_all=True, alpha_l1=1.0)
+        def_xy, flow_xy = self.model(x, y, return_all=False, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+        def_yx, flow_yx = self.model(y, x, return_all=False, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
 
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx) * W_icon
         L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
-        L_jac = 0.5 * (neg_jacobian_penalty(flow_xy, crop=1) + neg_jacobian_penalty(flow_yx, crop=1)) * W_jac
+        L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
         L_cyc = ((ctx.reg_model((def_xy, flow_yx)) - x).abs().mean() + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()) * W_cyc
-        L_main = L_ncc + L_icon + L_reg + L_jac + L_cyc
-
-        L_reg_l1 = x.new_tensor(0.0)
-        if "flow_quarter" in aux_xy and "flow_quarter" in aux_yx:
-            flow_l1_xy = upsample_flow(aux_xy["flow_quarter"], scale_factor=4)
-            flow_l1_yx = upsample_flow(aux_yx["flow_quarter"], scale_factor=4)
-            L_reg_l1 = 0.5 * (ctx.reg(flow_l1_xy) + ctx.reg(flow_l1_yx)) * args.w_reg
-
-        L_reg_l2 = x.new_tensor(0.0)
-        if "flow_half_l2" in aux_xy and "flow_half_l2" in aux_yx:
-            flow_l2_xy = upsample_flow(aux_xy["flow_half_l2"], scale_factor=2)
-            flow_l2_yx = upsample_flow(aux_yx["flow_half_l2"], scale_factor=2)
-            L_reg_l2 = 0.5 * (ctx.reg(flow_l2_xy) + ctx.reg(flow_l2_yx)) * args.w_reg
-
-        lam_l1, lam_l2 = self.rules.aux_lambdas(int(epoch))
-        L_aux = L_reg_l1 * lam_l1 + L_reg_l2 * lam_l2
-        loss = L_main + L_aux
+        loss = L_ncc + L_icon + L_reg + L_jac + L_cyc
 
         logs = {
             "all": loss.item(),
-            "main": L_main.item(),
             "ncc": L_ncc.item(),
             "reg": L_reg.item(),
             "icon": L_icon.item(),
             "cyc": L_cyc.item(),
             "jac": L_jac.item(),
-            "aux": L_aux.item(),
-            "aux_l1": L_reg_l1.item(),
-            "aux_l2": L_reg_l2.item(),
-            "lam_l1": lam_l1,
-            "lam_l2": lam_l2,
         }
 
         if self.is_synth:
@@ -140,7 +111,7 @@ def parse_args():
     p.set_defaults(exp="CTCF")
 
     p.add_argument("--config", type=str, default="CTCF-CascadeA", help="Model config key.")
-    p.add_argument("--time_steps", type=int, default=12, help="Number of velocity integration steps.")
+    p.add_argument("--time_steps", type=int, default=8, help="Number of velocity integration steps.")
     p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1, help="Enable gradient checkpointing in Swin blocks.")
 
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
