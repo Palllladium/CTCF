@@ -95,8 +95,8 @@ def jacobian_nonpositive_percent(flow: torch.Tensor, mask: torch.Tensor = None, 
 
 
 def logdet_std_from_flow(flow: torch.Tensor, eps: float = 1e-9) -> float:
-    """Compute std(log(detJ)) with safe clamping."""
-    det = torch.clamp(jacobian_det(flow.float()), min=float(eps), max=1e9)
+    """Compute std(log(detJ+3)), matching UTSRMorph convention."""
+    det = torch.clamp(jacobian_det(flow.float()) + 3.0, min=float(eps), max=1e9)
     return float(torch.std(torch.log(det)).item())
 
 
