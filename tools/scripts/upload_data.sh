@@ -3,7 +3,7 @@
 # Run this on your LOCAL PC (Git Bash / WSL).
 #
 # Usage:
-#   bash tools/upload_data.sh user@remote-ip [--key ~/.ssh/id_rsa] [--datasets oasis,ixi]
+#   bash tools/scripts/upload_data.sh user@remote-ip [--key ~/.ssh/id_rsa] [--datasets oasis,ixi]
 #
 # Prerequisites:
 #   Create archives first (in the same folder as the dataset dirs):
@@ -17,7 +17,7 @@ REMOTE_DATA_DIR="/data"
 
 # --- Parse args ---
 if [ $# -lt 1 ]; then
-  echo "Usage: bash tools/upload_data.sh user@remote-ip [--key path] [--datasets oasis,ixi]"
+  echo "Usage: bash tools/scripts/upload_data.sh user@remote-ip [--key path] [--datasets oasis,ixi]"
   exit 1
 fi
 
@@ -77,5 +77,5 @@ echo ""
 echo "============================================"
 echo "  Upload complete!"
 echo "  Remote data dir: ${REMOTE_DATA_DIR}"
-echo "  Next: bash tools/remote_setup.sh --data-dir ${REMOTE_DATA_DIR}"
+echo "  Next: bash tools/scripts/remote_setup.sh --data-dir ${REMOTE_DATA_DIR}"
 echo "============================================"

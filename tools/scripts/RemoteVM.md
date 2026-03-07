@@ -24,7 +24,7 @@ tar -czf OASIS_L2R_2021_task03.tar.gz OASIS_L2R_2021_task03\
 ## Шаг 3. Загрузка датасета на ВМ (ПК, Git Bash)
 
 ```bash
-bash tools/upload_data.sh user@<IP> --key ~/.ssh/id_ed25519
+bash tools/scripts/upload_data.sh user@<IP> --key ~/.ssh/id_ed25519
 ```
 
 После распаковки директории данных:
@@ -34,7 +34,7 @@ bash tools/upload_data.sh user@<IP> --key ~/.ssh/id_ed25519
 ## Шаг 4. Передача setup-скрипта на ВМ (ПК, Git Bash)
 
 ```bash
-scp -i ~/.ssh/id_ed25519 tools/remote_setup.sh user@<IP>:~/remote_setup.sh
+scp -i ~/.ssh/id_ed25519 tools/scripts/remote_setup.sh user@<IP>:~/remote_setup.sh
 ```
 
 ## Шаг 5. Подключение к ВМ и настройка окружения
@@ -55,7 +55,7 @@ bash ~/remote_setup.sh --data-dir /data
 
 ```bash
 cd ~/CTCF
-bash tools/run_experiments.sh \
+bash tools/scripts/run_experiments.sh \
   --save-ckpt 0 \
   --use-tb 0 \
   --tmux-session ctcf_abl
@@ -76,7 +76,7 @@ tail -f ~/CTCF/logs/ABL_01_BASELINE/logfile.log
 ## Шаг 8. Скачивание результатов на ПК после завершения
 
 ```bash
-bash tools/sync_results.sh user@<IP> --key ~/.ssh/id_ed25519
+bash tools/scripts/sync_results.sh user@<IP> --key ~/.ssh/id_ed25519
 ```
 
 Содержимое выгрузки в `./remote_results/<timestamp>/`:

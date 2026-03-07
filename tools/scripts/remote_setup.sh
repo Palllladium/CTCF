@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remote GPU machine setup script for CTCF experiments.
-# Usage: bash tools/remote_setup.sh [--data-dir /path/to/data]
+# Usage: bash tools/scripts/remote_setup.sh [--data-dir /path/to/data]
 #
 # This script:
 #   1. Installs system packages
@@ -9,7 +9,7 @@
 #   4. Creates/updates conda env from environment.yml
 #   5. Reinstalls pinned CUDA PyTorch wheels (deterministic stack)
 #   6. Verifies GPU + torch
-#   7. Saves dataset root for tools/run_experiments.sh
+#   7. Saves dataset root for tools/scripts/run_experiments.sh
 set -euo pipefail
 
 REPO_URL="https://github.com/Palllladium/CTCF.git"
@@ -109,5 +109,5 @@ echo "  Setup complete!"
 echo "  Repo:  $WORK_DIR"
 echo "  Env:   conda activate $ENV_NAME"
 echo "  Torch: torch==$TORCH_VER torchvision==$TORCHVISION_VER torchaudio==$TORCHAUDIO_VER (cu128)"
-echo "  Next:  bash tools/run_experiments.sh --data-dir /path/to/data"
+echo "  Next:  bash tools/scripts/run_experiments.sh --data-dir /path/to/data"
 echo "============================================"

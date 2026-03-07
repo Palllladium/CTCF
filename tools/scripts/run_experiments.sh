@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Experiment runner for CTCF ablation study on a remote GPU machine.
 # Usage:
-#   bash tools/run_experiments.sh [--data-dir /data] [--skip-to N]
-#                                 [--save-ckpt 0|1] [--use-tb 0|1]
-#                                 [--tmux-session NAME]
+#   bash tools/scripts/run_experiments.sh [--work-dir ~/CTCF] [--data-dir /data] [--skip-to N]
+#                                         [--save-ckpt 0|1] [--use-tb 0|1]
+#                                         [--tmux-session NAME] [--auto-pack 0|1]
 set -euo pipefail
 
-WORK_DIR="$HOME/CTCF"
+WORK_DIR="${CTCF_WORK_DIR:-}"
 ENV_NAME="oasis-ctcf"
 PATHS_PROFILE=3
 DATA_DIR=""
@@ -18,10 +18,12 @@ GPU=0
 NUM_WORKERS=8
 TIME_STEPS=8
 TMUX_SESSION=""
+AUTO_PACK=1
 ORIG_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --work-dir) WORK_DIR="$2"; shift 2 ;;
     --data-dir) DATA_DIR="$2"; shift 2 ;;
     --skip-to) SKIP_TO="$2"; shift 2 ;;
     --save-ckpt) SAVE_CKPT="$2"; shift 2 ;;
@@ -31,9 +33,23 @@ while [[ $# -gt 0 ]]; do
     --num-workers) NUM_WORKERS="$2"; shift 2 ;;
     --time-steps) TIME_STEPS="$2"; shift 2 ;;
     --tmux-session) TMUX_SESSION="$2"; shift 2 ;;
+    --auto-pack) AUTO_PACK="$2"; shift 2 ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
+
+if [ -z "$WORK_DIR" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  WORK_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+if [ ! -d "$WORK_DIR" ]; then
+  echo "Work dir not found: $WORK_DIR"
+  exit 1
+fi
+if [ ! -f "$WORK_DIR/experiments/train_CTCF.py" ]; then
+  echo "Not a CTCF repo root (missing experiments/train_CTCF.py): $WORK_DIR"
+  exit 1
+fi
 
 if [[ "$SAVE_CKPT" != "0" && "$SAVE_CKPT" != "1" ]]; then
   echo "--save-ckpt must be 0 or 1"
@@ -47,13 +63,17 @@ if [[ "$USE_CHECKPOINT" != "0" && "$USE_CHECKPOINT" != "1" ]]; then
   echo "--use-checkpoint must be 0 or 1"
   exit 1
 fi
+if [[ "$AUTO_PACK" != "0" && "$AUTO_PACK" != "1" ]]; then
+  echo "--auto-pack must be 0 or 1"
+  exit 1
+fi
 
 if [ -n "$TMUX_SESSION" ] && [ -z "${TMUX:-}" ] && [ "${RUN_EXPERIMENTS_IN_TMUX:-0}" != "1" ]; then
   if ! command -v tmux >/dev/null 2>&1; then
     echo "tmux is not installed, cannot start detached session '$TMUX_SESSION'"
     exit 1
   fi
-  CMD="cd \"$WORK_DIR\" && RUN_EXPERIMENTS_IN_TMUX=1 bash tools/run_experiments.sh"
+  CMD="cd \"$WORK_DIR\" && RUN_EXPERIMENTS_IN_TMUX=1 bash tools/scripts/run_experiments.sh"
   for a in "${ORIG_ARGS[@]}"; do
     CMD+=" $(printf "%q" "$a")"
   done
@@ -92,6 +112,7 @@ echo "  Skip to:        $SKIP_TO"
 echo "  save_ckpt:      $SAVE_CKPT"
 echo "  use_tb:         $USE_TB"
 echo "  use_checkpoint: $USE_CHECKPOINT"
+echo "  auto_pack:      $AUTO_PACK"
 echo "============================================"
 echo ""
 
@@ -157,3 +178,15 @@ echo "  All experiments finished!"
 echo "  Results summary: $RESULTS_FILE"
 echo "============================================"
 cat "$RESULTS_FILE"
+
+if [ "$AUTO_PACK" = "1" ]; then
+  echo ""
+  echo "Packing logs into archive..."
+  ARCHIVE_NAME="ctcf_abl_$(date +%Y%m%d).tar.gz"
+  if bash "$WORK_DIR/tools/scripts/package_results.sh" --work-dir "$WORK_DIR" --archive-name "$ARCHIVE_NAME" --exp-glob "ABL_*"; then
+    echo "Archive ready: $WORK_DIR/$ARCHIVE_NAME"
+  else
+    echo "WARNING: auto packaging failed. You can retry manually:"
+    echo "  bash tools/scripts/package_results.sh --work-dir $WORK_DIR --exp-glob 'ABL_*'"
+  fi
+fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download experiment artifacts from a remote GPU machine.
 # Usage (run on local machine):
-#   bash tools/sync_results.sh user@remote-ip [--key ~/.ssh/id_rsa] [--with-ckpt]
+#   bash tools/scripts/sync_results.sh user@remote-ip [--key ~/.ssh/id_rsa] [--with-ckpt]
 set -euo pipefail
 
 LOCAL_DIR="./remote_results/$(date +%Y%m%d_%H%M%S)"
@@ -9,7 +9,7 @@ REMOTE_DIR="~/CTCF"
 WITH_CKPT=0
 
 if [ $# -lt 1 ]; then
-  echo "Usage: bash tools/sync_results.sh user@remote-ip [--key path/to/key] [--with-ckpt]"
+  echo "Usage: bash tools/scripts/sync_results.sh user@remote-ip [--key path/to/key] [--with-ckpt]"
   exit 1
 fi
 
