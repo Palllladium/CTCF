@@ -40,7 +40,7 @@ if [ -z "$OUT_DIR" ]; then
   OUT_DIR="$WORK_DIR"
 fi
 if [ -z "$ARCHIVE_NAME" ]; then
-  ARCHIVE_NAME="ctcf_results_$(date +%Y%m%d_%H%M%S).tar.gz"
+  ARCHIVE_NAME="ctcf_abl_$(date +%Y%m%d).tar.gz"
 fi
 
 if [ ! -d "$WORK_DIR" ]; then

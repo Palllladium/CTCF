@@ -3,6 +3,7 @@
 # Usage:
 #   bash tools/scripts/run_experiments.sh [--work-dir ~/CTCF] [--data-dir /data] [--skip-to N]
 #                                         [--save-ckpt 0|1] [--use-tb 0|1]
+#                                         [--schedule-epochs 500] [--paths-profile 1|2|3]
 #                                         [--tmux-session NAME] [--auto-pack 0|1]
 set -euo pipefail
 
@@ -17,6 +18,7 @@ USE_CHECKPOINT=0
 GPU=0
 NUM_WORKERS=8
 TIME_STEPS=8
+SCHEDULE_EPOCHS=500
 TMUX_SESSION=""
 AUTO_PACK=1
 ORIG_ARGS=("$@")
@@ -32,6 +34,8 @@ while [[ $# -gt 0 ]]; do
     --gpu) GPU="$2"; shift 2 ;;
     --num-workers) NUM_WORKERS="$2"; shift 2 ;;
     --time-steps) TIME_STEPS="$2"; shift 2 ;;
+    --schedule-epochs) SCHEDULE_EPOCHS="$2"; shift 2 ;;
+    --paths-profile) PATHS_PROFILE="$2"; shift 2 ;;
     --tmux-session) TMUX_SESSION="$2"; shift 2 ;;
     --auto-pack) AUTO_PACK="$2"; shift 2 ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
@@ -65,6 +69,10 @@ if [[ "$USE_CHECKPOINT" != "0" && "$USE_CHECKPOINT" != "1" ]]; then
 fi
 if [[ "$AUTO_PACK" != "0" && "$AUTO_PACK" != "1" ]]; then
   echo "--auto-pack must be 0 or 1"
+  exit 1
+fi
+if [[ "$PATHS_PROFILE" != "1" && "$PATHS_PROFILE" != "2" && "$PATHS_PROFILE" != "3" ]]; then
+  echo "--paths-profile must be 1, 2, or 3"
   exit 1
 fi
 
@@ -112,6 +120,8 @@ echo "  Skip to:        $SKIP_TO"
 echo "  save_ckpt:      $SAVE_CKPT"
 echo "  use_tb:         $USE_TB"
 echo "  use_checkpoint: $USE_CHECKPOINT"
+echo "  schedule_epoch: $SCHEDULE_EPOCHS"
+echo "  paths_profile:  $PATHS_PROFILE"
 echo "  auto_pack:      $AUTO_PACK"
 echo "============================================"
 echo ""
@@ -148,6 +158,7 @@ for i in "${!EXPERIMENTS[@]}"; do
       --$PATHS_PROFILE \
       --exp "$EXP_NAME" \
       --time_steps "$TIME_STEPS" \
+      --schedule_max_epoch "$SCHEDULE_EPOCHS" \
       --save_ckpt "$SAVE_CKPT" \
       --use_checkpoint "$USE_CHECKPOINT" \
       --use_tb "$USE_TB" \

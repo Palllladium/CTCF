@@ -74,7 +74,8 @@ class Runner:
 
         x, y = x.to(self.device).float(), y.to(self.device).float()
 
-        alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=args.max_epoch)
+        schedule_max_epoch = int(args.schedule_max_epoch) if int(getattr(args, "schedule_max_epoch", 0)) > 0 else int(args.max_epoch)
+        alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=schedule_max_epoch)
         if args.l1_from_start:
             alpha_l1 = 1.0
         W_icon = float(args.w_icon) * warm
@@ -120,6 +121,7 @@ def parse_args():
 
     p.add_argument("--config", type=str, default="CTCF-CascadeA", help="Model config key.")
     p.add_argument("--time_steps", type=int, default=8, help="Number of velocity integration steps.")
+    p.add_argument("--schedule_max_epoch", type=int, default=0, help="If >0, uses this epoch horizon for CTCF stage schedule (alpha/warm), independent of --max_epoch.")
     p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1, help="Enable gradient checkpointing in Swin blocks.")
 
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
