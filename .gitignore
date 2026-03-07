@@ -10,9 +10,13 @@ env/
 
 # IDE/OS
 .vscode/
+.claude/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local project docs
+CLAUDE.md
 
 # Build/test caches
 .mypy_cache/
@@ -24,7 +28,6 @@ htmlcov/
 # Runtime outputs
 logs/
 results/
-tools/
 
 # Checkpoints and large artifacts
 *.pth

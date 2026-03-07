@@ -37,6 +37,8 @@ def get_CTCF_config():
     c.use_level2 = True
     c.use_level3 = True
     c.level3_base_ch = 16
+    c.level3_error_mode = "absdiff"
+    c.prealign_encoder = False
 
     return c
 
