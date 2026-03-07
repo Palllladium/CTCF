@@ -27,7 +27,7 @@ class CTCF_CascadeA(nn.Module):
 
         self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch) if self.use_level1 else None
         self.level2 = CTCF_DCA_CoreHalf(config, time_steps=config.time_steps) if self.use_level2 else None
-        self.level3 = FlowRefiner3D(base_ch=config.level3_base_ch) if self.use_level3 else None
+        self.level3 = FlowRefiner3D(base_ch=config.level3_base_ch, error_mode=config.level3_error_mode) if self.use_level3 else None
 
         self.st_full = SpatialTransformer(self.img_size_full)
 

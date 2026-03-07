@@ -31,6 +31,9 @@ class Runner:
             use_checkpoint=bool(int(args.use_checkpoint)),
             synth_img_size=synth_img_size,
             synth_dwin=synth_dwin,
+            l3_base_ch=getattr(args, 'l3_base_ch', None),
+            l3_error_mode=getattr(args, 'l3_error_mode', None),
+            prealign_encoder=True if int(getattr(args, 'prealign_encoder', 0)) else None,
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -72,6 +75,8 @@ class Runner:
         x, y = x.to(self.device).float(), y.to(self.device).float()
 
         alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=args.max_epoch)
+        if args.l1_from_start:
+            alpha_l1 = 1.0
         W_icon = float(args.w_icon) * warm
         W_cyc = float(args.w_cyc) * warm
         W_jac = float(args.w_jac) * warm
@@ -82,7 +87,7 @@ class Runner:
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
-        L_icon = icon_loss(flow_xy, flow_yx) * W_icon
+        L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
         L_cyc = ((ctx.reg_model((def_xy, flow_yx)) - x).abs().mean() + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()) * W_cyc
@@ -122,6 +127,11 @@ def parse_args():
     p.add_argument("--w_icon", type=float, default=0.05, help="ICON loss base weight.")
     p.add_argument("--w_cyc", type=float, default=0.02, help="Cycle consistency loss base weight.")
     p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight.")
+    p.add_argument("--icon_mode", type=str, choices=["l1", "l2"], default="l1", help="ICON loss norm: l1 (default) or l2.")
+    p.add_argument("--l1_from_start", type=int, choices=[0, 1], default=0, help="If 1, alpha_l1=1.0 from epoch 0 (skip schedule).")
+    p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
+    p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
+    p.add_argument("--prealign_encoder", type=int, choices=[0, 1], default=0, help="If 1, L2 encoder sees L1-warped mov instead of raw mov.")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")

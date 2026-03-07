@@ -160,9 +160,29 @@ def load_checkpoint_if_exists(
         return None
     ckpt = torch.load(ckpt_path, map_location=map_location)
     state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
-    model.load_state_dict(state_dict, strict=True)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as e:
+        raise RuntimeError(
+            "[resume] Incompatible checkpoint for current model.\n"
+            f"  ckpt: {ckpt_path}\n"
+            "  likely cause: changed architecture/config (e.g. time_steps, levels, channels).\n"
+            "  action: use a matching checkpoint or start without --resume.\n"
+            f"  details: {e}"
+        ) from e
+
     if optimizer is not None and isinstance(ckpt, dict) and "optimizer" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
+        try:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        except (ValueError, RuntimeError) as e:
+            raise RuntimeError(
+                "[resume] Optimizer state is incompatible with current optimizer.\n"
+                f"  ckpt: {ckpt_path}\n"
+                "  likely cause: changed model params or optimizer setup.\n"
+                "  action: use matching checkpoint or remove --resume.\n"
+                f"  details: {e}"
+            ) from e
+
     return ckpt if isinstance(ckpt, dict) else {"state_dict": state_dict}
 
 

@@ -57,7 +57,9 @@ class NCCVxm(nn.Module):
         return -torch.mean((cross * cross) / (i_var * j_var))
 
 
-def icon_loss(flow_ab: torch.Tensor, flow_ba: torch.Tensor) -> torch.Tensor:
+def icon_loss(flow_ab: torch.Tensor, flow_ba: torch.Tensor, mode: str = "l1") -> torch.Tensor:
     phi_ab_ba = field.compose_flows(flow_ab, flow_ba, mode="bilinear")
     phi_ba_ab = field.compose_flows(flow_ba, flow_ab, mode="bilinear")
+    if mode == "l2":
+        return (phi_ab_ba ** 2).mean() + (phi_ba_ab ** 2).mean()
     return phi_ab_ba.abs().mean() + phi_ba_ab.abs().mean()

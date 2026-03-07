@@ -73,6 +73,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
         super().__init__()
         self.if_convskip = bool(config.if_convskip)
         self.if_transskip = bool(config.if_transskip)
+        self.prealign_encoder = bool(getattr(config, 'prealign_encoder', False))
         self.time_steps = int(time_steps)
         self.img_size_full = tuple(config.img_size)
         self.img_size = tuple(s // 2 for s in self.img_size_full)
@@ -134,9 +135,10 @@ class CTCF_DCA_CoreHalf(nn.Module):
             flow_prev = init_flow_half
             def_x = self.spatial_trans(mov_half, flow_prev)
 
-        x_cat = torch.cat((mov_half, fix_half), dim=1)
+        enc_mov = def_x if self.prealign_encoder and init_flow_half is not None else mov_half
+        x_cat = torch.cat((enc_mov, fix_half), dim=1)
         f3 = self.c1(self.avg_pool(x_cat)).to(mov_half.dtype) if self.if_convskip else None
-        out_feats = self.transformer((mov_half, fix_half))
+        out_feats = self.transformer((enc_mov, fix_half))
 
         if self.if_transskip:
             mov_f1, fix_f1 = out_feats[-2]
@@ -204,11 +206,33 @@ class FlowRefiner3D(nn.Module):
         dx = F.pad(dx, (0, 1, 0, 0, 0, 0))
         return torch.sqrt(dx * dx + dy * dy + dz * dz + 1e-6)
 
+    @staticmethod
+    def _local_ncc_map(a: torch.Tensor, b: torch.Tensor, win: int = 9) -> torch.Tensor:
+        """Return per-voxel 1 - NCC² map (0 = perfect match, 1 = no correlation)."""
+        pad = win // 2
+        filt = torch.ones((1, 1, win, win, win), device=a.device, dtype=a.dtype)
+        kw = dict(stride=(1, 1, 1), padding=(pad, pad, pad))
+        a_sum = F.conv3d(a, filt, **kw)
+        b_sum = F.conv3d(b, filt, **kw)
+        a2_sum = F.conv3d(a * a, filt, **kw)
+        b2_sum = F.conv3d(b * b, filt, **kw)
+        ab_sum = F.conv3d(a * b, filt, **kw)
+        n = float(win ** 3)
+        ua, ub = a_sum / n, b_sum / n
+        cross = ab_sum - ub * a_sum - ua * b_sum + ua * ub * n
+        a_var = (a2_sum - 2 * ua * a_sum + ua * ua * n).clamp(min=1e-5)
+        b_var = (b2_sum - 2 * ub * b_sum + ub * ub * n).clamp(min=1e-5)
+        ncc2 = (cross * cross) / (a_var * b_var)
+        return 1.0 - ncc2
+
     def _error_map(self, mov_w: torch.Tensor, fix: torch.Tensor) -> torch.Tensor:
         if self.error_mode == "absdiff":
             return (mov_w - fix).abs()
         if self.error_mode == "gradmag":
             return (self._grad_mag(mov_w) - self._grad_mag(fix)).abs()
+        if self.error_mode == "ncc":
+            with torch.no_grad():
+                return self._local_ncc_map(mov_w, fix)
         raise ValueError(f"Unsupported error_mode: {self.error_mode}")
 
     def forward(self, mov_warp: torch.Tensor, fix: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:

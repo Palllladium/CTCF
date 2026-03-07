@@ -13,8 +13,8 @@ from torchvision import transforms
 
 from datasets import OASIS, IXI
 from utils import (
-    adjust_learning_rate_poly, adjust_lr_ctcf_schedule, make_exp_dirs, attach_stdout_logger, load_checkpoint_if_exists,
-    perf_epoch_start, perf_epoch_end, mk_grid_img, compute_fig, validate,
+    adjust_learning_rate_poly, adjust_lr_ctcf_schedule, make_exp_dirs, attach_stdout_logger, 
+    load_checkpoint_if_exists, perf_epoch_start, perf_epoch_end, mk_grid_img, compute_fig, validate,
     AverageMeter, RegisterModel, NCCVxm, Grad3d, NumpyType, RandomFlip, SegNorm,
     dice_val, dice_val_subset, OASIS_VOI_LABELS, IXI_VOI_LABELS
 )
@@ -43,6 +43,17 @@ PATHS = {
             "atlas_path": "/home/roman/P/IXI_data/atlas.pkl",
         },
     },
+    3: {
+        "OASIS": {
+            "train_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/OASIS_L2R_2021_task03/All",
+            "val_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/OASIS_L2R_2021_task03/Test",
+        },
+        "IXI": {
+            "train_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Train",
+            "val_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Val",
+            "atlas_path": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/atlas.pkl",
+        },
+    },
 }
 
 
@@ -63,6 +74,7 @@ def add_common_args(p: argparse.ArgumentParser, *, include_synth: bool = False, 
     p.add_argument("--ds", choices=ds_choices, default="OASIS", help="Dataset key to run.")
     p.add_argument("--1", dest="paths", action="store_const", const=1, help="Use path profile #1")
     p.add_argument("--2", dest="paths", action="store_const", const=2, help="Use path profile #2")
+    p.add_argument("--3", dest="paths", action="store_const", const=3, help="Use path profile #3 (remote, uses CTCF_DATA_DIR env var)")
     p.add_argument("--paths", type=int, help="Path profile id (1/2/...)")
     p.add_argument("--gpu", type=int, default=0, help="CUDA device index.")
     p.add_argument("--num_workers", type=int, default=8, help="DataLoader worker processes.")

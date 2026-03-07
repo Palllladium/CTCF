@@ -25,7 +25,6 @@ htmlcov/
 # Runtime outputs
 logs/
 results/
-tools/
 
 # Checkpoints and large artifacts
 *.pth
