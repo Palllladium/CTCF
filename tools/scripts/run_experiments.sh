@@ -4,11 +4,11 @@
 #   bash tools/scripts/run_experiments.sh [--work-dir ~/CTCF] [--data-dir /data] [--skip-to N]
 #                                         [--save-ckpt 0|1] [--use-tb 0|1]
 #                                         [--schedule-epochs 500] [--paths-profile 1|2|3]
-#                                         [--tmux-session NAME] [--auto-pack 0|1]
+#                                         [--env-name NAME] [--tmux-session NAME] [--auto-pack 0|1]
 set -euo pipefail
 
 WORK_DIR="${CTCF_WORK_DIR:-}"
-ENV_NAME="oasis-ctcf"
+ENV_NAME="${CTCF_ENV_NAME:-${CONDA_DEFAULT_ENV:-oasis-ctcf}}"
 PATHS_PROFILE=3
 DATA_DIR=""
 SKIP_TO=0
@@ -36,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --time-steps) TIME_STEPS="$2"; shift 2 ;;
     --schedule-epochs) SCHEDULE_EPOCHS="$2"; shift 2 ;;
     --paths-profile) PATHS_PROFILE="$2"; shift 2 ;;
+    --env-name) ENV_NAME="$2"; shift 2 ;;
     --tmux-session) TMUX_SESSION="$2"; shift 2 ;;
     --auto-pack) AUTO_PACK="$2"; shift 2 ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
@@ -103,6 +104,14 @@ fi
 cd "$WORK_DIR"
 export CTCF_DATA_DIR="$DATA_DIR"
 
+if ! conda run -n "$ENV_NAME" --no-capture-output python -V >/dev/null 2>&1; then
+  echo "Conda environment '$ENV_NAME' not found or not runnable."
+  echo "Pass valid env with --env-name <name>."
+  echo "Available envs:"
+  conda env list || true
+  exit 1
+fi
+
 # Format: EXP_NAME|EXTRA_ARGS
 EXPERIMENTS=(
   "ABL_01_BASELINE|--max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005"
@@ -122,6 +131,7 @@ echo "  use_tb:         $USE_TB"
 echo "  use_checkpoint: $USE_CHECKPOINT"
 echo "  schedule_epoch: $SCHEDULE_EPOCHS"
 echo "  paths_profile:  $PATHS_PROFILE"
+echo "  env_name:       $ENV_NAME"
 echo "  auto_pack:      $AUTO_PACK"
 echo "============================================"
 echo ""
