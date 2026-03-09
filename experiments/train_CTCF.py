@@ -34,6 +34,8 @@ class Runner:
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
             prealign_encoder=True if int(getattr(args, 'prealign_encoder', 0)) else None,
+            drop_path_rate=getattr(args, 'drop_path_rate', None),
+            qkv_bias=True if getattr(args, 'qkv_bias', None) == 1 else (False if getattr(args, 'qkv_bias', None) == 0 else None),
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -42,6 +44,8 @@ class Runner:
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
+        self._val_alpha_l1 = 1.0
+        self._val_alpha_l3 = 1.0
 
 
     @staticmethod
@@ -58,7 +62,9 @@ class Runner:
     def _forward_flow(self, x, y):
         use_amp = torch.cuda.is_available()
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = self.model(x, y, return_all=False, alpha_l1=1.0, alpha_l3=1.0)
+            _, flow = self.model(x, y, return_all=False,
+                                alpha_l1=self._val_alpha_l1,
+                                alpha_l3=self._val_alpha_l3)
         return flow.float()
 
 
@@ -78,6 +84,8 @@ class Runner:
         alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=schedule_max_epoch)
         if args.l1_from_start:
             alpha_l1 = 1.0
+        self._val_alpha_l1 = alpha_l1
+        self._val_alpha_l3 = alpha_l3
         W_icon = float(args.w_icon) * warm
         W_cyc = float(args.w_cyc) * warm
         W_jac = float(args.w_jac) * warm
@@ -134,6 +142,8 @@ def parse_args():
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
     p.add_argument("--prealign_encoder", type=int, choices=[0, 1], default=0, help="If 1, L2 encoder sees L1-warped mov instead of raw mov.")
+    p.add_argument("--drop_path_rate", type=float, default=None, help="Stochastic depth rate for Swin blocks (default: config value, 0.3).")
+    p.add_argument("--qkv_bias", type=int, choices=[0, 1], default=None, help="If set, override QKV bias in Swin attention (default: config value, False).")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")

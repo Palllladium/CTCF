@@ -66,6 +66,8 @@ class CtcfAdapter(ModelAdapter):
         l3_base_ch: Optional[int] = None,
         l3_error_mode: Optional[str] = None,
         prealign_encoder: Optional[bool] = None,
+        drop_path_rate: Optional[float] = None,
+        qkv_bias: Optional[bool] = None,
     ) -> torch.nn.Module:
         from models.CTCF.model import CONFIGS, CTCF_CascadeA
 
@@ -82,6 +84,8 @@ class CtcfAdapter(ModelAdapter):
         if l3_base_ch is not None: cfg.level3_base_ch = int(l3_base_ch)
         if l3_error_mode is not None: cfg.level3_error_mode = str(l3_error_mode)
         if prealign_encoder is not None: cfg.prealign_encoder = bool(prealign_encoder)
+        if drop_path_rate is not None: cfg.drop_path_rate = float(drop_path_rate)
+        if qkv_bias is not None: cfg.qkv_bias = bool(qkv_bias)
 
         model = CTCF_CascadeA(cfg)
         model.cfg = cfg

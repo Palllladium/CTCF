@@ -22,6 +22,7 @@ class ConvBlock(nn.Module):
             nn.LeakyReLU(0.1, inplace=True),
         )
 
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
@@ -49,6 +50,7 @@ class CoarseFlowNetQuarter(nn.Module):
         self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
+
 
     def forward(self, mov: torch.Tensor, fix: torch.Tensor) -> torch.Tensor:
         x = torch.cat([mov, fix], dim=1)
@@ -120,6 +122,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
             self.up3s.append(SRUpBlock3D(in_channels=self.c_mid, out_channels=reg_ch, skip_channels=(self.c_mid if self.if_convskip else 0)))
             self.reg_heads.append(RegistrationHead(in_channels=reg_ch, out_channels=3, kernel_size=3))
         self.spatial_trans = SpatialTransformer(self.img_size)
+
 
     def forward(
         self,
@@ -196,6 +199,7 @@ class FlowRefiner3D(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
+
     @staticmethod
     def _grad_mag(x: torch.Tensor) -> torch.Tensor:
         dz = x[:, :, 1:, :, :] - x[:, :, :-1, :, :]
@@ -206,11 +210,17 @@ class FlowRefiner3D(nn.Module):
         dx = F.pad(dx, (0, 1, 0, 0, 0, 0))
         return torch.sqrt(dx * dx + dy * dy + dz * dz + 1e-6)
 
+
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def _local_ncc_map(a: torch.Tensor, b: torch.Tensor, win: int = 9) -> torch.Tensor:
-        """Return per-voxel 1 - NCC² map (0 = perfect match, 1 = no correlation)."""
+        """Return per-voxel 1 - NCC² map (0 = perfect match, 1 = no correlation).
+
+        Forces float32 to avoid catastrophic cancellation in cross-correlation
+        sums when running under float16 autocast (9³=729 taps).
+        """
         pad = win // 2
-        filt = torch.ones((1, 1, win, win, win), device=a.device, dtype=a.dtype)
+        filt = torch.ones((1, 1, win, win, win), device=a.device, dtype=torch.float32)
         kw = dict(stride=(1, 1, 1), padding=(pad, pad, pad))
         a_sum = F.conv3d(a, filt, **kw)
         b_sum = F.conv3d(b, filt, **kw)
@@ -222,8 +232,9 @@ class FlowRefiner3D(nn.Module):
         cross = ab_sum - ub * a_sum - ua * b_sum + ua * ub * n
         a_var = (a2_sum - 2 * ua * a_sum + ua * ua * n).clamp(min=1e-5)
         b_var = (b2_sum - 2 * ub * b_sum + ub * ub * n).clamp(min=1e-5)
-        ncc2 = (cross * cross) / (a_var * b_var)
+        ncc2 = ((cross * cross) / (a_var * b_var)).clamp(0.0, 1.0)
         return 1.0 - ncc2
+
 
     def _error_map(self, mov_w: torch.Tensor, fix: torch.Tensor) -> torch.Tensor:
         if self.error_mode == "absdiff":
@@ -234,6 +245,7 @@ class FlowRefiner3D(nn.Module):
             with torch.no_grad():
                 return self._local_ncc_map(mov_w, fix)
         raise ValueError(f"Unsupported error_mode: {self.error_mode}")
+
 
     def forward(self, mov_warp: torch.Tensor, fix: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
         err = self._error_map(mov_warp, fix)
