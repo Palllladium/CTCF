@@ -63,6 +63,7 @@ class CtcfAdapter(ModelAdapter):
         use_checkpoint: Optional[bool] = None,
         synth_img_size: Optional[Tuple[int, int, int]] = None,
         synth_dwin: Optional[Tuple[int, int, int]] = None,
+        l1_base_ch: Optional[int] = None,
         l3_base_ch: Optional[int] = None,
         l3_error_mode: Optional[str] = None,
         prealign_encoder: Optional[bool] = None,
@@ -81,6 +82,7 @@ class CtcfAdapter(ModelAdapter):
 
         if synth_dwin is not None: cfg.dwin_size = tuple(int(v) for v in synth_dwin)
         if use_checkpoint is not None: cfg.use_checkpoint = bool(use_checkpoint)
+        if l1_base_ch is not None: cfg.level1_base_ch = int(l1_base_ch)
         if l3_base_ch is not None: cfg.level3_base_ch = int(l3_base_ch)
         if l3_error_mode is not None: cfg.level3_error_mode = str(l3_error_mode)
         if prealign_encoder is not None: cfg.prealign_encoder = bool(prealign_encoder)

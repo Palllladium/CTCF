@@ -31,6 +31,7 @@ class Runner:
             use_checkpoint=bool(int(args.use_checkpoint)),
             synth_img_size=synth_img_size,
             synth_dwin=synth_dwin,
+            l1_base_ch=getattr(args, 'l1_base_ch', None),
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
             prealign_encoder=True if int(getattr(args, 'prealign_encoder', 0)) else None,
@@ -139,6 +140,7 @@ def parse_args():
     p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight.")
     p.add_argument("--icon_mode", type=str, choices=["l1", "l2"], default="l1", help="ICON loss norm: l1 (default) or l2.")
     p.add_argument("--l1_from_start", type=int, choices=[0, 1], default=0, help="If 1, alpha_l1=1.0 from epoch 0 (skip schedule).")
+    p.add_argument("--l1_base_ch", type=int, default=None, help="L1 coarse net base channels (default: config value, typically 16).")
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
     p.add_argument("--prealign_encoder", type=int, choices=[0, 1], default=0, help="If 1, L2 encoder sees L1-warped mov instead of raw mov.")

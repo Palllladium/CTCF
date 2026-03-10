@@ -113,13 +113,14 @@ if ! conda run -n "$ENV_NAME" --no-capture-output python -V >/dev/null 2>&1; the
 fi
 
 # Format: EXP_NAME|EXTRA_ARGS
-# Round 2: cascade strengthening + Swin config ablations (bug fixes applied)
+# Round 3: L1 strengthening + TS4 + IXI baseline (final round before longruns)
+# Base: L3_CH64 + NCC + TS6 (winner of Round 2)
 EXPERIMENTS=(
-  "ABL2_01_L3_NCC_CH64|--max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l3_base_ch 64 --l3_error_mode ncc"
-  "ABL2_02_L3_NCC_CH64_TS6|--max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
-  "ABL2_03_L3_NCC_CH64_TS6_DROP01|--max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6 --drop_path_rate 0.1"
-  "ABL2_04_DROP01_QKVT|--max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --drop_path_rate 0.1 --qkv_bias 1"
-  "ABL2_05_FULL_COMBO|--max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6 --drop_path_rate 0.1 --qkv_bias 1"
+  "ABL3_01_L1CH32_L3CH64_TS6|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 32 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_02_L1CH64_L3CH64_TS6|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_03_L1CH64_L3CH64_TS4|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 4"
+  "ABL3_04_L1CH64_L3CH64_TS6_WREG05|--ds OASIS --max_epoch 100 --w_reg 0.5 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_05_CTCF_IXI_BEST|--ds IXI --max_epoch 100 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
 )
 
 echo "============================================"
@@ -205,10 +206,10 @@ if [ "$AUTO_PACK" = "1" ]; then
   echo ""
   echo "Packing logs into archive..."
   ARCHIVE_NAME="ctcf_abl_$(date +%Y%m%d).tar.gz"
-  if bash "$WORK_DIR/tools/scripts/package_results.sh" --work-dir "$WORK_DIR" --archive-name "$ARCHIVE_NAME" --exp-glob "ABL*"; then
+  if bash "$WORK_DIR/tools/scripts/package_results.sh" --work-dir "$WORK_DIR" --archive-name "$ARCHIVE_NAME" --exp-glob "ABL3_*"; then
     echo "Archive ready: $WORK_DIR/$ARCHIVE_NAME"
   else
     echo "WARNING: auto packaging failed. You can retry manually:"
-    echo "  bash tools/scripts/package_results.sh --work-dir $WORK_DIR --exp-glob 'ABL_*'"
+    echo "  bash tools/scripts/package_results.sh --work-dir $WORK_DIR --exp-glob 'ABL3_*'"
   fi
 fi
