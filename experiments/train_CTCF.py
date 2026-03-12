@@ -35,8 +35,6 @@ class Runner:
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
             prealign_encoder=True if int(getattr(args, 'prealign_encoder', 0)) else None,
-            drop_path_rate=getattr(args, 'drop_path_rate', None),
-            qkv_bias=True if getattr(args, 'qkv_bias', None) == 1 else (False if getattr(args, 'qkv_bias', None) == 0 else None),
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -88,7 +86,6 @@ class Runner:
         self._val_alpha_l1 = alpha_l1
         self._val_alpha_l3 = alpha_l3
         W_icon = float(args.w_icon) * warm
-        W_cyc = float(args.w_cyc) * warm
         W_jac = float(args.w_jac) * warm
 
         def_xy, flow_xy = self.model(x, y, return_all=False, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
@@ -100,15 +97,13 @@ class Runner:
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
-        L_cyc = ((ctx.reg_model((def_xy, flow_yx)) - x).abs().mean() + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()) * W_cyc
-        loss = L_ncc + L_icon + L_reg + L_jac + L_cyc
+        loss = L_ncc + L_icon + L_reg + L_jac
 
         logs = {
             "all": loss.item(),
             "ncc": L_ncc.item(),
             "reg": L_reg.item(),
             "icon": L_icon.item(),
-            "cyc": L_cyc.item(),
             "jac": L_jac.item(),
             "alpha_l1": alpha_l1,
             "alpha_l3": alpha_l3,
@@ -129,14 +124,13 @@ def parse_args():
     p.set_defaults(exp="CTCF")
 
     p.add_argument("--config", type=str, default="CTCF-CascadeA", help="Model config key.")
-    p.add_argument("--time_steps", type=int, default=8, help="Number of velocity integration steps.")
+    p.add_argument("--time_steps", type=int, default=6, help="Number of velocity integration steps.")
     p.add_argument("--schedule_max_epoch", type=int, default=0, help="If >0, uses this epoch horizon for CTCF stage schedule (alpha/warm), independent of --max_epoch.")
     p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1, help="Enable gradient checkpointing in Swin blocks.")
 
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
     p.add_argument("--w_reg", type=float, default=None, help="Flow regularization loss weight (auto: IXI=4.0, others=1.0).")
     p.add_argument("--w_icon", type=float, default=0.05, help="ICON loss base weight.")
-    p.add_argument("--w_cyc", type=float, default=0.02, help="Cycle consistency loss base weight.")
     p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight.")
     p.add_argument("--icon_mode", type=str, choices=["l1", "l2"], default="l1", help="ICON loss norm: l1 (default) or l2.")
     p.add_argument("--l1_from_start", type=int, choices=[0, 1], default=0, help="If 1, alpha_l1=1.0 from epoch 0 (skip schedule).")
@@ -144,8 +138,6 @@ def parse_args():
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
     p.add_argument("--prealign_encoder", type=int, choices=[0, 1], default=0, help="If 1, L2 encoder sees L1-warped mov instead of raw mov.")
-    p.add_argument("--drop_path_rate", type=float, default=None, help="Stochastic depth rate for Swin blocks (default: config value, 0.3).")
-    p.add_argument("--qkv_bias", type=int, choices=[0, 1], default=None, help="If set, override QKV bias in Swin attention (default: config value, False).")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")

@@ -116,11 +116,11 @@ fi
 # Round 3: L1 strengthening + TS4 + IXI baseline (final round before longruns)
 # Base: L3_CH64 + NCC + TS6 (winner of Round 2)
 EXPERIMENTS=(
-  "ABL3_01_L1CH32_L3CH64_TS6|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 32 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
-  "ABL3_02_L1CH64_L3CH64_TS6|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
-  "ABL3_03_L1CH64_L3CH64_TS4|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 4"
-  "ABL3_04_L1CH64_L3CH64_TS6_WREG05|--ds OASIS --max_epoch 100 --w_reg 0.5 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
-  "ABL3_05_CTCF_IXI_BEST|--ds IXI --max_epoch 100 --w_cyc 0.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_01_L1CH32_L3CH64_TS6|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 32 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_02_L1CH64_L3CH64_TS6|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_03_L1CH64_L3CH64_TS4|--ds OASIS --max_epoch 100 --w_reg 1.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 4"
+  "ABL3_04_L1CH64_L3CH64_TS6_WREG05|--ds OASIS --max_epoch 100 --w_reg 0.5 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
+  "ABL3_05_CTCF_IXI_BEST|--ds IXI --max_epoch 100 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 64 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6"
 )
 
 echo "============================================"

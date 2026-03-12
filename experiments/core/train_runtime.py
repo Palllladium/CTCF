@@ -276,7 +276,6 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 if "ncc" in meters:  msg += f" | ncc={meters['ncc'].val:.4f}"
                 if "reg" in meters:  msg += f" reg={meters['reg'].val:.4f}"
                 if "icon" in meters: msg += f" icon={meters['icon'].val:.4f}"
-                if "cyc" in meters:  msg += f" cyc={meters['cyc'].val:.4f}"
                 if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
                 if "aux" in meters:  msg += f" aux={meters['aux'].val:.4f}"
                 if "dice_tr" in meters: msg += f" dice_tr={meters['dice_tr'].val:.4f}"
