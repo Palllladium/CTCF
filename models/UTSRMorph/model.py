@@ -1219,5 +1219,6 @@ class UTSRMorph(nn.Module):
 CONFIGS = {
     'UTSRMorph': configs.get_UTSRMorph_config(),
     'UTSRMorph-Large': configs.get_UTSRMorphLarge_config(),
+    'UTSRMorph-IXI-Large': configs.get_UTSRMorphIXILarge_config(),
     'UTSRMorph-Debug': configs.get_UTSRMorph_debug_config(),
 }

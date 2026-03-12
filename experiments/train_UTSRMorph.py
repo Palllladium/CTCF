@@ -1,4 +1,5 @@
 import argparse
+from functools import partial
 
 import torch
 from torch import optim
@@ -52,7 +53,10 @@ def main():
     args = parse_args()
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
-    run_train(args=args, runner=runner, build_loaders=loaders_baseline)
+    # Original UTSRMorph IXI uses RandomFlip(0) only; OASIS uses no flip
+    ixi_flip = (0,) if args.ds == "IXI" else (1, 2, 3)
+    build_loaders = partial(loaders_baseline, ixi_flip_axes=ixi_flip)
+    run_train(args=args, runner=runner, build_loaders=build_loaders)
 
 
 if __name__ == "__main__":

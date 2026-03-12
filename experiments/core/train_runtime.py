@@ -115,10 +115,10 @@ def oasis_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=False, 
     return train_loader, val_loader
 
 
-def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, drop_last_val=True):
+def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, drop_last_val=True, flip_axes=(1, 2, 3)):
     """Build IXI train/val loaders for a pair of dataset classes."""
     paths = PATHS[int(args.paths)][args.ds.upper()]
-    
+
     train_dir = paths.get("train_dir", "")
     val_dir = paths.get("val_dir", "")
     atlas_path = str(paths.get("atlas_path", "")).rstrip("/\\")
@@ -131,7 +131,7 @@ def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, dro
     if not tr_files: raise RuntimeError(f"IXI: no *.pkl in Train dir = {train_dir}")
     if not va_files: raise RuntimeError(f"IXI: no *.pkl in Validation dir = {val_dir}")
 
-    train_tfm = transforms.Compose([RandomFlip((1, 2, 3)), NumpyType((np.float32, np.float32))])
+    train_tfm = transforms.Compose([RandomFlip(flip_axes), NumpyType((np.float32, np.float32))])
     val_tfm = transforms.Compose([SegNorm(), NumpyType((np.float32, np.int16))])
     tr = train_cls(tr_files, atlas_path, transforms=train_tfm)
     va = val_cls(va_files, atlas_path, transforms=val_tfm)
@@ -140,10 +140,10 @@ def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, dro
     return train_loader, val_loader
 
 
-def loaders_baseline(args):
+def loaders_baseline(args, *, ixi_flip_axes=(1, 2, 3)):
     """Dispatch baseline data loader factory by dataset name."""
     match args.ds:
-        case "OASIS": 
+        case "OASIS":
             return oasis_loaders(
                 args,
                 train_cls=OASIS.OASISBrainDataset,
@@ -158,7 +158,8 @@ def loaders_baseline(args):
                 val_cls=IXI.IXIBrainInferDataset,
                 val_bs=1,
                 drop_last_train=True,
-                drop_last_val=True)
+                drop_last_val=True,
+                flip_axes=ixi_flip_axes)
         case _:
             raise ValueError(f"Unsupported dataset = '{args.ds}' for baseline loaders.")
 
