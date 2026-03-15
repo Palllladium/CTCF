@@ -17,6 +17,8 @@ Thumbs.db
 
 # Local project docs
 CLAUDE.md
+figures/
+paper/
 
 # Build/test caches
 .mypy_cache/

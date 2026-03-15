@@ -1,4 +1,5 @@
 import argparse
+from functools import partial
 
 import torch
 from torch import optim
@@ -152,7 +153,10 @@ def main():
     args = parse_args()
     apply_ctcf_dataset_defaults(args)
 
-    build_loaders = build_synth_loaders if args.ds == "SYNTH" else loaders_baseline
+    # IXI: flip axis 0 only (depth), matching UTSRMorph original protocol.
+    # OASIS / other: flip all 3 axes.
+    ixi_flip = (0,) if args.ds == "IXI" else (1, 2, 3)
+    build_loaders = build_synth_loaders if args.ds == "SYNTH" else partial(loaders_baseline, ixi_flip_axes=ixi_flip)
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
     run_train(args=args, runner=runner, build_loaders=build_loaders)
