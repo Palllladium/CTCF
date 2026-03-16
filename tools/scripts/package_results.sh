@@ -62,6 +62,10 @@ TMP_LIST="$(mktemp)"
 cleanup() { rm -f "$TMP_LIST"; }
 trap cleanup EXIT
 
+if [ -f "$WORK_DIR/ablation_4_results.txt" ]; then
+  echo "ablation_4_results.txt" >> "$TMP_LIST"
+fi
+
 if [ -f "$WORK_DIR/ablation_results.txt" ]; then
   echo "ablation_results.txt" >> "$TMP_LIST"
 fi

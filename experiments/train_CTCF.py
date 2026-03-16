@@ -44,8 +44,8 @@ class Runner:
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
-        self._val_alpha_l1 = 1.0
-        self._val_alpha_l3 = 1.0
+        self._val_alpha_l1 = 0.0 if int(getattr(args, 'disable_l1', 0)) else 1.0
+        self._val_alpha_l3 = 0.0 if int(getattr(args, 'disable_l3', 0)) else 1.0
 
 
     @staticmethod
@@ -84,6 +84,10 @@ class Runner:
         alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=schedule_max_epoch)
         if args.l1_from_start:
             alpha_l1 = 1.0
+        if args.disable_l1:
+            alpha_l1 = 0.0
+        if args.disable_l3:
+            alpha_l3 = 0.0
         self._val_alpha_l1 = alpha_l1
         self._val_alpha_l3 = alpha_l3
         W_icon = float(args.w_icon) * warm
@@ -135,6 +139,8 @@ def parse_args():
     p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight.")
     p.add_argument("--icon_mode", type=str, choices=["l1", "l2"], default="l1", help="ICON loss norm: l1 (default) or l2.")
     p.add_argument("--l1_from_start", type=int, choices=[0, 1], default=0, help="If 1, alpha_l1=1.0 from epoch 0 (skip schedule).")
+    p.add_argument("--disable_l1", type=int, choices=[0, 1], default=0, help="If 1, force alpha_l1=0 (disable Level 1 coarse flow).")
+    p.add_argument("--disable_l3", type=int, choices=[0, 1], default=0, help="If 1, force alpha_l3=0 (disable Level 3 refiner).")
     p.add_argument("--l1_base_ch", type=int, default=None, help="L1 coarse net base channels (default: config value, typically 16).")
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")

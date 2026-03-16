@@ -32,8 +32,10 @@ echo "=== Syncing results from $REMOTE_HOST ==="
 echo "Local destination: $LOCAL_DIR"
 mkdir -p "$LOCAL_DIR"
 
-echo "[1/4] Downloading ablation_results.txt..."
-scp $SCP_OPTS "${REMOTE_HOST}:${REMOTE_DIR}/ablation_results.txt" "$LOCAL_DIR/" 2>/dev/null || echo "  (not found)"
+echo "[1/4] Downloading ablation summary..."
+scp $SCP_OPTS "${REMOTE_HOST}:${REMOTE_DIR}/ablation_4_results.txt" "$LOCAL_DIR/" 2>/dev/null || \
+scp $SCP_OPTS "${REMOTE_HOST}:${REMOTE_DIR}/ablation_results.txt" "$LOCAL_DIR/" 2>/dev/null || \
+echo "  (not found)"
 
 echo "[2/4] Downloading log files..."
 $SSH_CMD "find ${REMOTE_DIR}/logs -name 'logfile.log'" 2>/dev/null | while read -r f; do
@@ -67,7 +69,10 @@ echo ""
 echo "View TensorBoard locally:"
 echo "  tensorboard --logdir $LOCAL_DIR/logs"
 echo ""
-if [ -f "$LOCAL_DIR/ablation_results.txt" ]; then
+if [ -f "$LOCAL_DIR/ablation_4_results.txt" ]; then
+  echo "Quick summary:"
+  cat "$LOCAL_DIR/ablation_4_results.txt"
+elif [ -f "$LOCAL_DIR/ablation_results.txt" ]; then
   echo "Quick summary:"
   cat "$LOCAL_DIR/ablation_results.txt"
 fi

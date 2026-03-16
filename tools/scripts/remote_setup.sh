@@ -12,20 +12,26 @@
 #   7. Saves dataset root for tools/scripts/run_experiments.sh
 set -euo pipefail
 
-REPO_URL="https://github.com/Palllladium/CTCF.git"
-BRANCH="ctcf_legacy"
-WORK_DIR="$HOME/CTCF"
-CONDA_DIR="$HOME/miniconda3"
-ENV_NAME="oasis-ctcf"
+REPO_URL="${CTCF_REPO_URL:-https://github.com/Palllladium/CTCF.git}"
+BRANCH="${CTCF_REMOTE_BRANCH:-ctcf_dice_boost}"
+WORK_DIR="${CTCF_WORK_DIR:-$HOME/CTCF}"
+CONDA_DIR="${CTCF_CONDA_DIR:-$HOME/miniconda3}"
+ENV_NAME="${CTCF_ENV_NAME:-oasis-ctcf}"
 TORCH_VER="2.9.0"
 TORCHVISION_VER="0.24.0"
 TORCHAUDIO_VER="2.9.0"
 TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 
 DATA_DIR=""
+SKIP_REPO_SYNC=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data-dir) DATA_DIR="$2"; shift 2 ;;
+    --repo-url) REPO_URL="$2"; shift 2 ;;
+    --branch) BRANCH="$2"; shift 2 ;;
+    --work-dir) WORK_DIR="$2"; shift 2 ;;
+    --env-name) ENV_NAME="$2"; shift 2 ;;
+    --skip-repo-sync) SKIP_REPO_SYNC=1; shift ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -52,9 +58,19 @@ export PATH="$CONDA_DIR/bin:$PATH"
 eval "$($CONDA_DIR/bin/conda shell.bash hook)"
 
 echo "=== [3/7] Clone repo ==="
-if [ -d "$WORK_DIR" ]; then
-  echo "Repo already exists at $WORK_DIR, pulling latest..."
+if [ "$SKIP_REPO_SYNC" = "1" ]; then
+  if [ ! -f "$WORK_DIR/experiments/train_CTCF.py" ]; then
+    echo "ERROR: --skip-repo-sync was set, but repo root not found at $WORK_DIR"
+    exit 1
+  fi
+  echo "Skipping repo sync, using existing tree at $WORK_DIR"
+elif [ -d "$WORK_DIR/.git" ]; then
+  echo "Repo already exists at $WORK_DIR, pulling latest branch '$BRANCH'..."
   cd "$WORK_DIR" && git fetch origin && git checkout "$BRANCH" && git pull origin "$BRANCH"
+elif [ -d "$WORK_DIR" ]; then
+  echo "ERROR: $WORK_DIR exists, but is not a git repo."
+  echo "Either remove it, or rerun with --skip-repo-sync after copying the project there."
+  exit 1
 else
   git clone --branch "$BRANCH" "$REPO_URL" "$WORK_DIR"
 fi
@@ -109,5 +125,5 @@ echo "  Setup complete!"
 echo "  Repo:  $WORK_DIR"
 echo "  Env:   conda activate $ENV_NAME"
 echo "  Torch: torch==$TORCH_VER torchvision==$TORCHVISION_VER torchaudio==$TORCHAUDIO_VER (cu128)"
-echo "  Next:  bash tools/scripts/run_experiments.sh --data-dir /path/to/data"
+echo "  Next:  bash tools/scripts/run_cascade_ablation.sh --data-dir /path/to/data"
 echo "============================================"
