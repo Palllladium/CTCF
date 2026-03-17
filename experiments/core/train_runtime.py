@@ -115,10 +115,10 @@ def oasis_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=False, 
     return train_loader, val_loader
 
 
-def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, drop_last_val=True):
+def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, drop_last_val=True, flip_axes=(1, 2, 3)):
     """Build IXI train/val loaders for a pair of dataset classes."""
     paths = PATHS[int(args.paths)][args.ds.upper()]
-    
+
     train_dir = paths.get("train_dir", "")
     val_dir = paths.get("val_dir", "")
     atlas_path = str(paths.get("atlas_path", "")).rstrip("/\\")
@@ -131,7 +131,7 @@ def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, dro
     if not tr_files: raise RuntimeError(f"IXI: no *.pkl in Train dir = {train_dir}")
     if not va_files: raise RuntimeError(f"IXI: no *.pkl in Validation dir = {val_dir}")
 
-    train_tfm = transforms.Compose([RandomFlip((1, 2, 3)), NumpyType((np.float32, np.float32))])
+    train_tfm = transforms.Compose([RandomFlip(flip_axes), NumpyType((np.float32, np.float32))])
     val_tfm = transforms.Compose([SegNorm(), NumpyType((np.float32, np.int16))])
     tr = train_cls(tr_files, atlas_path, transforms=train_tfm)
     va = val_cls(va_files, atlas_path, transforms=val_tfm)
@@ -140,10 +140,10 @@ def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, dro
     return train_loader, val_loader
 
 
-def loaders_baseline(args):
+def loaders_baseline(args, *, ixi_flip_axes=(1, 2, 3)):
     """Dispatch baseline data loader factory by dataset name."""
     match args.ds:
-        case "OASIS": 
+        case "OASIS":
             return oasis_loaders(
                 args,
                 train_cls=OASIS.OASISBrainDataset,
@@ -158,7 +158,8 @@ def loaders_baseline(args):
                 val_cls=IXI.IXIBrainInferDataset,
                 val_bs=1,
                 drop_last_train=True,
-                drop_last_val=True)
+                drop_last_val=True,
+                flip_axes=ixi_flip_axes)
         case _:
             raise ValueError(f"Unsupported dataset = '{args.ds}' for baseline loaders.")
 
@@ -224,6 +225,11 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             atlas_path = str(p["atlas_path"]).rstrip("/\\")
             print(f"    Atlas     = {atlas_path}")
 
+    nan_streak = 0
+    nan_streak_limit = 3
+    zero_dice_streak = 0
+    zero_dice_limit = 3
+
     for epoch in range(epoch_start, int(args.max_epoch)):
         runner.model.train()
         t0 = perf_epoch_start()
@@ -243,6 +249,16 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             runner.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
                 loss, logs = runner.train_step(batch, epoch)
+
+            if not torch.isfinite(loss):
+                nan_streak += 1
+                print(f"WARNING: non-finite loss at epoch {epoch} iter {it} (streak {nan_streak}/{nan_streak_limit})")
+                if nan_streak >= nan_streak_limit:
+                    raise RuntimeError(f"ABORT: {nan_streak_limit} consecutive non-finite losses. Check model/hyperparams.")
+                runner.optimizer.zero_grad(set_to_none=True)
+                continue
+            nan_streak = 0
+
             scaler.scale(loss).backward()
             scaler.step(runner.optimizer)
             scaler.update()
@@ -261,7 +277,6 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 if "ncc" in meters:  msg += f" | ncc={meters['ncc'].val:.4f}"
                 if "reg" in meters:  msg += f" reg={meters['reg'].val:.4f}"
                 if "icon" in meters: msg += f" icon={meters['icon'].val:.4f}"
-                if "cyc" in meters:  msg += f" cyc={meters['cyc'].val:.4f}"
                 if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
                 if "aux" in meters:  msg += f" aux={meters['aux'].val:.4f}"
                 if "dice_tr" in meters: msg += f" dice_tr={meters['dice_tr'].val:.4f}"
@@ -299,6 +314,15 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         dsc, jacp = float(val_res.dsc), float(val_res.jac_nonpos_percent)
         ndvp = None if val_res.ndv_percent is None else float(val_res.ndv_percent)
         sdlogj = None if val_res.sdlogj is None else float(val_res.sdlogj)
+
+        if dsc < 1e-6:
+            zero_dice_streak += 1
+            print(f"WARNING: val_dice~0 at epoch {epoch} (streak {zero_dice_streak}/{zero_dice_limit})")
+            if zero_dice_streak >= zero_dice_limit:
+                raise RuntimeError(f"ABORT: val_dice~0 for {zero_dice_limit} consecutive epochs. Model is not learning.")
+        else:
+            zero_dice_streak = 0
+
         if writer is not None:
             writer.add_scalar("val/Dice", dsc, epoch)
             writer.add_scalar(jac_tb_tag, jacp, epoch)

@@ -29,15 +29,15 @@ def get_CTCF_config():
     c.out_indices = (0, 1, 2)
 
     c.reg_head_chan = 16
-    c.time_steps = 12
+    c.time_steps = 6
 
     # Cascade switches
     c.use_level1 = True
-    c.level1_base_ch = 16
+    c.level1_base_ch = 32
     c.use_level2 = True
     c.use_level3 = True
-    c.level3_base_ch = 16
-    c.level3_error_mode = "absdiff"
+    c.level3_base_ch = 64
+    c.level3_error_mode = "ncc"
     c.prealign_encoder = False
 
     return c

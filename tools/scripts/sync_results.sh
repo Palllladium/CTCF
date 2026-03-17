@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download experiment artifacts from a remote GPU machine.
 # Usage (run on local machine):
-#   bash tools/sync_results.sh user@remote-ip [--key ~/.ssh/id_rsa] [--with-ckpt]
+#   bash tools/scripts/sync_results.sh user@remote-ip [--key ~/.ssh/id_rsa] [--with-ckpt]
 set -euo pipefail
 
 LOCAL_DIR="./remote_results/$(date +%Y%m%d_%H%M%S)"
@@ -9,7 +9,7 @@ REMOTE_DIR="~/CTCF"
 WITH_CKPT=0
 
 if [ $# -lt 1 ]; then
-  echo "Usage: bash tools/sync_results.sh user@remote-ip [--key path/to/key] [--with-ckpt]"
+  echo "Usage: bash tools/scripts/sync_results.sh user@remote-ip [--key path/to/key] [--with-ckpt]"
   exit 1
 fi
 
@@ -32,8 +32,10 @@ echo "=== Syncing results from $REMOTE_HOST ==="
 echo "Local destination: $LOCAL_DIR"
 mkdir -p "$LOCAL_DIR"
 
-echo "[1/4] Downloading ablation_results.txt..."
-scp $SCP_OPTS "${REMOTE_HOST}:${REMOTE_DIR}/ablation_results.txt" "$LOCAL_DIR/" 2>/dev/null || echo "  (not found)"
+echo "[1/4] Downloading ablation summary..."
+scp $SCP_OPTS "${REMOTE_HOST}:${REMOTE_DIR}/ablation_4_results.txt" "$LOCAL_DIR/" 2>/dev/null || \
+scp $SCP_OPTS "${REMOTE_HOST}:${REMOTE_DIR}/ablation_results.txt" "$LOCAL_DIR/" 2>/dev/null || \
+echo "  (not found)"
 
 echo "[2/4] Downloading log files..."
 $SSH_CMD "find ${REMOTE_DIR}/logs -name 'logfile.log'" 2>/dev/null | while read -r f; do
@@ -67,7 +69,10 @@ echo ""
 echo "View TensorBoard locally:"
 echo "  tensorboard --logdir $LOCAL_DIR/logs"
 echo ""
-if [ -f "$LOCAL_DIR/ablation_results.txt" ]; then
+if [ -f "$LOCAL_DIR/ablation_4_results.txt" ]; then
+  echo "Quick summary:"
+  cat "$LOCAL_DIR/ablation_4_results.txt"
+elif [ -f "$LOCAL_DIR/ablation_results.txt" ]; then
   echo "Quick summary:"
   cat "$LOCAL_DIR/ablation_results.txt"
 fi

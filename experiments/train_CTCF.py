@@ -1,4 +1,5 @@
 import argparse
+from functools import partial
 
 import torch
 from torch import optim
@@ -31,6 +32,7 @@ class Runner:
             use_checkpoint=bool(int(args.use_checkpoint)),
             synth_img_size=synth_img_size,
             synth_dwin=synth_dwin,
+            l1_base_ch=getattr(args, 'l1_base_ch', None),
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
             prealign_encoder=True if int(getattr(args, 'prealign_encoder', 0)) else None,
@@ -42,6 +44,8 @@ class Runner:
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
+        self._val_alpha_l1 = 0.0 if int(getattr(args, 'disable_l1', 0)) else 1.0
+        self._val_alpha_l3 = 0.0 if int(getattr(args, 'disable_l3', 0)) else 1.0
 
 
     @staticmethod
@@ -58,7 +62,9 @@ class Runner:
     def _forward_flow(self, x, y):
         use_amp = torch.cuda.is_available()
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = self.model(x, y, return_all=False, alpha_l1=1.0, alpha_l3=1.0)
+            _, flow = self.model(x, y, return_all=False,
+                                alpha_l1=self._val_alpha_l1,
+                                alpha_l3=self._val_alpha_l3)
         return flow.float()
 
 
@@ -74,11 +80,17 @@ class Runner:
 
         x, y = x.to(self.device).float(), y.to(self.device).float()
 
-        alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=args.max_epoch)
+        schedule_max_epoch = int(args.schedule_max_epoch) if int(getattr(args, "schedule_max_epoch", 0)) > 0 else int(args.max_epoch)
+        alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=schedule_max_epoch)
         if args.l1_from_start:
             alpha_l1 = 1.0
+        if args.disable_l1:
+            alpha_l1 = 0.0
+        if args.disable_l3:
+            alpha_l3 = 0.0
+        self._val_alpha_l1 = alpha_l1
+        self._val_alpha_l3 = alpha_l3
         W_icon = float(args.w_icon) * warm
-        W_cyc = float(args.w_cyc) * warm
         W_jac = float(args.w_jac) * warm
 
         def_xy, flow_xy = self.model(x, y, return_all=False, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
@@ -90,15 +102,13 @@ class Runner:
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
-        L_cyc = ((ctx.reg_model((def_xy, flow_yx)) - x).abs().mean() + (ctx.reg_model((def_yx, flow_xy)) - y).abs().mean()) * W_cyc
-        loss = L_ncc + L_icon + L_reg + L_jac + L_cyc
+        loss = L_ncc + L_icon + L_reg + L_jac
 
         logs = {
             "all": loss.item(),
             "ncc": L_ncc.item(),
             "reg": L_reg.item(),
             "icon": L_icon.item(),
-            "cyc": L_cyc.item(),
             "jac": L_jac.item(),
             "alpha_l1": alpha_l1,
             "alpha_l3": alpha_l3,
@@ -119,16 +129,19 @@ def parse_args():
     p.set_defaults(exp="CTCF")
 
     p.add_argument("--config", type=str, default="CTCF-CascadeA", help="Model config key.")
-    p.add_argument("--time_steps", type=int, default=8, help="Number of velocity integration steps.")
+    p.add_argument("--time_steps", type=int, default=6, help="Number of velocity integration steps.")
+    p.add_argument("--schedule_max_epoch", type=int, default=0, help="If >0, uses this epoch horizon for CTCF stage schedule (alpha/warm), independent of --max_epoch.")
     p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1, help="Enable gradient checkpointing in Swin blocks.")
 
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
     p.add_argument("--w_reg", type=float, default=None, help="Flow regularization loss weight (auto: IXI=4.0, others=1.0).")
     p.add_argument("--w_icon", type=float, default=0.05, help="ICON loss base weight.")
-    p.add_argument("--w_cyc", type=float, default=0.02, help="Cycle consistency loss base weight.")
     p.add_argument("--w_jac", type=float, default=0.005, help="Negative Jacobian penalty base weight.")
     p.add_argument("--icon_mode", type=str, choices=["l1", "l2"], default="l1", help="ICON loss norm: l1 (default) or l2.")
     p.add_argument("--l1_from_start", type=int, choices=[0, 1], default=0, help="If 1, alpha_l1=1.0 from epoch 0 (skip schedule).")
+    p.add_argument("--disable_l1", type=int, choices=[0, 1], default=0, help="If 1, force alpha_l1=0 (disable Level 1 coarse flow).")
+    p.add_argument("--disable_l3", type=int, choices=[0, 1], default=0, help="If 1, force alpha_l3=0 (disable Level 3 refiner).")
+    p.add_argument("--l1_base_ch", type=int, default=None, help="L1 coarse net base channels (default: config value, typically 16).")
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
     p.add_argument("--prealign_encoder", type=int, choices=[0, 1], default=0, help="If 1, L2 encoder sees L1-warped mov instead of raw mov.")
@@ -146,7 +159,10 @@ def main():
     args = parse_args()
     apply_ctcf_dataset_defaults(args)
 
-    build_loaders = build_synth_loaders if args.ds == "SYNTH" else loaders_baseline
+    # IXI: flip axis 0 only (depth), matching UTSRMorph original protocol.
+    # OASIS / other: flip all 3 axes.
+    ixi_flip = (0,) if args.ds == "IXI" else (1, 2, 3)
+    build_loaders = build_synth_loaders if args.ds == "SYNTH" else partial(loaders_baseline, ixi_flip_axes=ixi_flip)
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
     run_train(args=args, runner=runner, build_loaders=build_loaders)
