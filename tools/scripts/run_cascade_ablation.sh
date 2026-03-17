@@ -6,7 +6,8 @@
 #   ABL4_01_L2_ONLY     = L2 only (no L1, no L3) — baseline backbone
 #   ABL4_02_L1_L2       = L1 + L2 (coarse init, no refiner)
 #   ABL4_03_L2_L3       = L2 + L3 (no coarse init, refiner only)
-#   ABL4_04_L1_L2_L3    = Full CTCF (L1 + L2 + L3) — reference
+#
+# Reference (full CTCF = L1+L2+L3) is ABL3_01 from Round 3 (Dice=0.8162, 100ep).
 #
 # Usage:
 #   bash tools/scripts/run_cascade_ablation.sh [--work-dir ~/CTCF] [--data-dir /data]
@@ -56,13 +57,13 @@ cd "$WORK_DIR"
 export CTCF_DATA_DIR="$DATA_DIR"
 
 # Common flags: 100 epochs, OASIS, optimal config (L1=32, L3=64, NCC, TS6)
-COMMON="--ds OASIS --max_epoch 100 --w_reg 1.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 32 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6 --save_ckpt 0 --use_checkpoint 0 --use_tb 0"
+# schedule_max_epoch=500 to match R1-R3 ablations (ramp epochs 25-75, not 5-15)
+COMMON="--ds OASIS --max_epoch 100 --schedule_max_epoch 500 --w_reg 1.0 --w_icon 0.05 --w_jac 0.005 --l1_base_ch 32 --l3_base_ch 64 --l3_error_mode ncc --time_steps 6 --save_ckpt 0 --use_checkpoint 0 --use_tb 0"
 
 EXPERIMENTS=(
   "ABL4_01_L2_ONLY|$COMMON --disable_l1 1 --disable_l3 1"
   "ABL4_02_L1_L2|$COMMON --disable_l3 1"
   "ABL4_03_L2_L3|$COMMON --disable_l1 1"
-  "ABL4_04_L1_L2_L3|$COMMON"
 )
 
 echo "============================================"
