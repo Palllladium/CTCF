@@ -11,7 +11,7 @@
 # Usage:
 #   bash tools/scripts/run_cascade_ablation.sh [--work-dir ~/CTCF] [--data-dir /data]
 #                                               [--paths-profile 3] [--env-name oasis-ctcf]
-#                                               [--skip-to N] [--gpu 0]
+#                                               [--skip-to N] [--gpu 0] [--auto-pack 0|1]
 set -euo pipefail
 
 WORK_DIR="${CTCF_WORK_DIR:-}"
@@ -21,6 +21,7 @@ DATA_DIR=""
 SKIP_TO=0
 GPU=0
 NUM_WORKERS=8
+AUTO_PACK=0
 ORIG_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     --num-workers) NUM_WORKERS="$2"; shift 2 ;;
     --paths-profile) PATHS_PROFILE="$2"; shift 2 ;;
     --env-name) ENV_NAME="$2"; shift 2 ;;
+    --auto-pack) AUTO_PACK="$2"; shift 2 ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -69,6 +71,7 @@ echo "  Data:        $DATA_DIR"
 echo "  Experiments: ${#EXPERIMENTS[@]}"
 echo "  Env:         $ENV_NAME"
 echo "  GPU:         $GPU"
+echo "  Auto-pack:   $AUTO_PACK"
 echo "============================================"
 echo ""
 
@@ -126,3 +129,15 @@ echo "============================================"
 echo "  Cascade Decomposition Ablation Complete!"
 echo "============================================"
 cat "$RESULTS_FILE"
+
+if [ "$AUTO_PACK" = "1" ]; then
+  echo ""
+  echo "Packing logs into archive..."
+  ARCHIVE_NAME="ctcf_abl4_$(date +%Y%m%d).tar.gz"
+  if bash "$WORK_DIR/tools/scripts/package_results.sh" --work-dir "$WORK_DIR" --archive-name "$ARCHIVE_NAME" --exp-glob "ABL4_*"; then
+    echo "Archive ready: $WORK_DIR/$ARCHIVE_NAME"
+  else
+    echo "WARNING: auto packaging failed. You can retry manually:"
+    echo "  bash tools/scripts/package_results.sh --work-dir $WORK_DIR --exp-glob 'ABL4_*'"
+  fi
+fi
