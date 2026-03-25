@@ -120,6 +120,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
 
         # Conv-skip path: 2ch (mov+fix) + optional L1 features
         l1_skip_ch = int(getattr(config, 'level1_base_ch', 32)) if self.l1_l2_skip else 0
+        self._l1_skip_ch = l1_skip_ch
         self.c1 = Conv3dReLU(2 + l1_skip_ch, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False)
         self.up2 = SRUpBlock3D(in_channels=c0, out_channels=self.c_mid, skip_channels=(self.c_mid if self.if_convskip else 0))
 
@@ -155,9 +156,14 @@ class CTCF_DCA_CoreHalf(nn.Module):
 
         if self.if_convskip:
             pooled = self.avg_pool(x_cat)
-            if self.l1_l2_skip and l1_feat is not None:
-                # L1 features are at L1 output res; resize to match pooled (quarter of half = 1/4 full)
-                l1_feat_resized = F.interpolate(l1_feat, size=pooled.shape[2:], mode="trilinear", align_corners=False)
+            if self.l1_l2_skip:
+                if l1_feat is not None:
+                    l1_feat_resized = F.interpolate(l1_feat, size=pooled.shape[2:], mode="trilinear", align_corners=False)
+                else:
+                    # During warmup (alpha_l1=0) L1 is skipped; zero-pad to match expected channels
+                    l1_skip_ch = int(getattr(self, '_l1_skip_ch', 32))
+                    l1_feat_resized = torch.zeros(pooled.shape[0], l1_skip_ch, *pooled.shape[2:],
+                                                  device=pooled.device, dtype=pooled.dtype)
                 pooled = torch.cat([pooled, l1_feat_resized], dim=1)
             f3 = self.c1(pooled).to(mov_half.dtype)
         else:
