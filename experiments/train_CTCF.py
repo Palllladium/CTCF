@@ -36,6 +36,19 @@ class Runner:
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
             prealign_encoder=True if int(getattr(args, 'prealign_encoder', 0)) else None,
+            # GEN2 (architectural)
+            l3_iters=getattr(args, 'l3_iters', None),
+            l3_full_res=True if int(getattr(args, 'l3_full_res', 0)) else None,
+            learned_upsample=True if int(getattr(args, 'learned_upsample', 0)) else None,
+            l2_l3_skip=True if int(getattr(args, 'l2_l3_skip', 0)) else None,
+            l1_half_res=True if int(getattr(args, 'l1_half_res', 0)) else None,
+            l1_l2_skip=True if int(getattr(args, 'l1_l2_skip', 0)) else None,
+            # GEN2.5 (capacity)
+            l3_cab=True if int(getattr(args, 'l3_cab', 0)) else None,
+            l3_context_blocks=int(args.l3_context) if int(getattr(args, 'l3_context', 0)) > 0 else None,
+            l3_gate=True if int(getattr(args, 'l3_gate', 0)) else None,
+            l3_unshared=True if int(getattr(args, 'l3_unshared', 0)) else None,
+            l1_cab=True if int(getattr(args, 'l1_cab', 0)) else None,
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -145,6 +158,21 @@ def parse_args():
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
     p.add_argument("--prealign_encoder", type=int, choices=[0, 1], default=0, help="If 1, L2 encoder sees L1-warped mov instead of raw mov.")
+
+    # GEN2 enhancements (architectural)
+    p.add_argument("--l3_iters", type=int, default=None, help="Number of L3 refinement iterations (default: 1).")
+    p.add_argument("--l3_full_res", type=int, choices=[0, 1], default=0, help="If 1, run L3 at full-res instead of half-res.")
+    p.add_argument("--learned_upsample", type=int, choices=[0, 1], default=0, help="If 1, use learned flow upsampling instead of trilinear.")
+    p.add_argument("--l2_l3_skip", type=int, choices=[0, 1], default=0, help="If 1, pass L2 decoder features to L3.")
+    p.add_argument("--l1_half_res", type=int, choices=[0, 1], default=0, help="If 1, run L1 at half-res instead of quarter-res.")
+    p.add_argument("--l1_l2_skip", type=int, choices=[0, 1], default=0, help="If 1, pass L1 features to L2 conv-skip path.")
+
+    # GEN2.5 enhancements (capacity)
+    p.add_argument("--l3_cab", type=int, choices=[0, 1], default=0, help="If 1, add channel attention (CAB) to L3 decoder.")
+    p.add_argument("--l3_context", type=int, default=0, help="Number of ResidualContext3D blocks in L3 bottleneck (0=none).")
+    p.add_argument("--l3_gate", type=int, choices=[0, 1], default=0, help="If 1, spatial RefineGate3D on L3 delta output.")
+    p.add_argument("--l3_unshared", type=int, choices=[0, 1], default=0, help="If 1, use separate L3 weights per iteration (requires l3_iters>1).")
+    p.add_argument("--l1_cab", type=int, choices=[0, 1], default=0, help="If 1, add channel attention (CAB) to L1 decoder.")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")

@@ -33,7 +33,7 @@ class CoarseFlowNetQuarter(nn.Module):
     Input: mov_q, fix_q -> concat (B,2,D,H,W)
     Output: flow_q (B,3,D,H,W)
     """
-    def __init__(self, base_ch: int = 16):
+    def __init__(self, base_ch: int = 16, use_cab: bool = False):
         super().__init__()
         c = int(base_ch)
         self.enc1 = ConvBlock(2, c)
@@ -47,12 +47,13 @@ class CoarseFlowNetQuarter(nn.Module):
         self.dec2 = ConvBlock(c * 4 + c * 2, c * 2)
         self.up1 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec1 = ConvBlock(c * 2 + c, c)
+        self.cab = CAB(c, compress_ratio=3, squeeze_factor=30) if use_cab else None
         self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
 
-    def forward(self, mov: torch.Tensor, fix: torch.Tensor) -> torch.Tensor:
+    def forward(self, mov: torch.Tensor, fix: torch.Tensor, *, return_features: bool = False):
         x = torch.cat([mov, fix], dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
@@ -63,7 +64,12 @@ class CoarseFlowNetQuarter(nn.Module):
         d2 = self.dec2(torch.cat([d2, e2], dim=1))
         d1 = self.up1(d2)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
-        return self.out(d1)
+        if self.cab is not None:
+            d1 = d1 + self.cab(d1)
+        flow = self.out(d1)
+        if return_features:
+            return flow, d1  # d1: (B, base_ch, D, H, W) at L1 output resolution
+        return flow
 
 
 class CTCF_DCA_CoreHalf(nn.Module):
@@ -76,6 +82,7 @@ class CTCF_DCA_CoreHalf(nn.Module):
         self.if_convskip = bool(config.if_convskip)
         self.if_transskip = bool(config.if_transskip)
         self.prealign_encoder = bool(getattr(config, 'prealign_encoder', False))
+        self.l1_l2_skip = bool(getattr(config, 'l1_l2_skip', False))
         self.time_steps = int(time_steps)
         self.img_size_full = tuple(config.img_size)
         self.img_size = tuple(s // 2 for s in self.img_size_full)
@@ -110,7 +117,11 @@ class CTCF_DCA_CoreHalf(nn.Module):
         self.up0 = SRUpBlock3D(in_channels=c2, out_channels=c1, skip_channels=(c1 if self.if_transskip else 0))
         self.up1 = SRUpBlock3D(in_channels=c1, out_channels=c0, skip_channels=(c0 if self.if_transskip else 0))
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-        self.c1 = Conv3dReLU(2, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False)
+
+        # Conv-skip path: 2ch (mov+fix) + optional L1 features
+        l1_skip_ch = int(getattr(config, 'level1_base_ch', 32)) if self.l1_l2_skip else 0
+        self._l1_skip_ch = l1_skip_ch
+        self.c1 = Conv3dReLU(2 + l1_skip_ch, self.c_mid, kernel_size=3, stride=1, use_batchnorm=False)
         self.up2 = SRUpBlock3D(in_channels=c0, out_channels=self.c_mid, skip_channels=(self.c_mid if self.if_convskip else 0))
 
         reg_ch = int(config.reg_head_chan)
@@ -130,6 +141,8 @@ class CTCF_DCA_CoreHalf(nn.Module):
         fix_half: torch.Tensor,
         init_flow_half: Optional[torch.Tensor] = None,
         return_all_flows: bool = False,
+        l1_feat: Optional[torch.Tensor] = None,
+        return_features: bool = False,
     ):
         if init_flow_half is None:
             flow_prev = torch.zeros((mov_half.shape[0], 3, *self.img_size), device=mov_half.device, dtype=mov_half.dtype)
@@ -140,7 +153,22 @@ class CTCF_DCA_CoreHalf(nn.Module):
 
         enc_mov = def_x if self.prealign_encoder and init_flow_half is not None else mov_half
         x_cat = torch.cat((enc_mov, fix_half), dim=1)
-        f3 = self.c1(self.avg_pool(x_cat)).to(mov_half.dtype) if self.if_convskip else None
+
+        if self.if_convskip:
+            pooled = self.avg_pool(x_cat)
+            if self.l1_l2_skip:
+                if l1_feat is not None:
+                    l1_feat_resized = F.interpolate(l1_feat, size=pooled.shape[2:], mode="trilinear", align_corners=False)
+                else:
+                    # During warmup (alpha_l1=0) L1 is skipped; zero-pad to match expected channels
+                    l1_skip_ch = int(getattr(self, '_l1_skip_ch', 32))
+                    l1_feat_resized = torch.zeros(pooled.shape[0], l1_skip_ch, *pooled.shape[2:],
+                                                  device=pooled.device, dtype=pooled.dtype)
+                pooled = torch.cat([pooled, l1_feat_resized], dim=1)
+            f3 = self.c1(pooled).to(mov_half.dtype)
+        else:
+            f3 = None
+
         out_feats = self.transformer((enc_mov, fix_half))
 
         if self.if_transskip:
@@ -167,34 +195,51 @@ class CTCF_DCA_CoreHalf(nn.Module):
             flow_prev = flow_prev + self.spatial_trans(flow_step, flow_prev)
             def_x = self.spatial_trans(mov_half, flow_prev)
 
+        out = (def_x, flow_prev)
         if return_all_flows:
-            return def_x, flow_prev, flows
-        return def_x, flow_prev
+            out = (def_x, flow_prev, flows)
+        if return_features:
+            # xx: (B, c_mid, D_half, H_half, W_half) — decoder features for L2→L3 skip
+            return out + (xx,)
+        return out
 
 
 class FlowRefiner3D(nn.Module):
     """
-    Level-3: half-res refinement using error-map.
+    Level-3: refinement using error-map.
     Inputs:
-      - mov_warp_half: (B,1,D,H,W)
-      - fix_half:      (B,1,D,H,W)
-      - flow_half:     (B,3,D,H,W) current flow (context)
+      - mov_warp: (B,1,D,H,W) warped moving image
+      - fix:      (B,1,D,H,W) fixed image
+      - flow:     (B,3,D,H,W) current flow (context)
+      - l2_feat:  (B,C,D,H,W) optional L2 decoder features (skip connection)
     Output:
-      - delta_flow_half: (B,3,D,H,W)
+      - delta_flow: (B,3,D,H,W)
     """
-    def __init__(self, base_ch: int = 16, error_mode: str = "absdiff"):
+    def __init__(self, base_ch: int = 16, error_mode: str = "absdiff", l2_skip_ch: int = 0,
+                 use_cab: bool = False, num_context_blocks: int = 0):
         super().__init__()
         self.error_mode = str(error_mode)
+        self.l2_skip_ch = int(l2_skip_ch)
         c = int(base_ch)
-        self.enc1 = ConvBlock(6, c)
+        in_ch = 6 + self.l2_skip_ch  # mov_warp(1) + fix(1) + err(1) + flow(3) + optional l2_feat
+        self.enc1 = ConvBlock(in_ch, c)
         self.pool1 = nn.AvgPool3d(2)
         self.enc2 = ConvBlock(c, c * 2)
         self.pool2 = nn.AvgPool3d(2)
         self.bot = ConvBlock(c * 2, c * 4)
+        # Optional context blocks in bottleneck (like L1)
+        if num_context_blocks > 0:
+            self.context = nn.Sequential(*[
+                ResidualContext3D(c * 4, dilation=1 + (i % 2), scale=0.1)
+                for i in range(int(num_context_blocks))
+            ])
+        else:
+            self.context = None
         self.up2 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec2 = ConvBlock(c * 4 + c * 2, c * 2)
         self.up1 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec1 = ConvBlock(c * 2 + c, c)
+        self.cab = CAB(c, compress_ratio=3, squeeze_factor=30) if use_cab else None
         self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
@@ -247,14 +292,25 @@ class FlowRefiner3D(nn.Module):
         raise ValueError(f"Unsupported error_mode: {self.error_mode}")
 
 
-    def forward(self, mov_warp: torch.Tensor, fix: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
+    def forward(self, mov_warp: torch.Tensor, fix: torch.Tensor, flow: torch.Tensor,
+                l2_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
         err = self._error_map(mov_warp, fix)
-        x = torch.cat([mov_warp, fix, err, flow], dim=1)
+        parts = [mov_warp, fix, err, flow]
+        if self.l2_skip_ch > 0 and l2_feat is not None:
+            # Resize l2_feat to match spatial dims if needed
+            if l2_feat.shape[2:] != mov_warp.shape[2:]:
+                l2_feat = F.interpolate(l2_feat, size=mov_warp.shape[2:], mode="trilinear", align_corners=False)
+            parts.append(l2_feat)
+        x = torch.cat(parts, dim=1)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         b = self.bot(self.pool2(e2))
+        if self.context is not None:
+            b = self.context(b)
         d2 = self.up2(b)
         d2 = self.dec2(torch.cat([d2, e2], dim=1))
         d1 = self.up1(d2)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
+        if self.cab is not None:
+            d1 = d1 + self.cab(d1)
         return self.out(d1)

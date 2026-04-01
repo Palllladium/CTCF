@@ -40,6 +40,21 @@ def get_CTCF_config():
     c.level3_error_mode = "ncc"
     c.prealign_encoder = False
 
+    # GEN2 enhancements (architectural)
+    c.l3_iters = 1              # Iterative L3: number of refinement passes (1 = default)
+    c.l3_full_res = False       # Run L3 at full-res (160x192x224) instead of half-res
+    c.learned_upsample = False  # Learned flow upsampling instead of trilinear
+    c.l2_l3_skip = False        # Pass L2 decoder features to L3 as skip connection
+    c.l1_half_res = False       # Run L1 at half-res instead of quarter-res
+    c.l1_l2_skip = False        # Pass L1 encoder features to L2 conv-skip path
+
+    # GEN2.5 enhancements (capacity)
+    c.l3_cab = False            # Channel attention (CAB) in L3 decoder
+    c.l3_context_blocks = 0     # ResidualContext3D blocks in L3 bottleneck
+    c.l3_gate = False           # RefineGate3D spatial gating on L3 delta
+    c.l3_unshared = False       # Separate L3 weights per iteration (requires l3_iters>1)
+    c.l1_cab = False            # Channel attention (CAB) in L1 decoder
+
     return c
 
 

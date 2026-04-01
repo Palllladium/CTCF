@@ -29,6 +29,7 @@ PATHS = {
         "IXI": {
             "train_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/Train",
             "val_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/Val",
+            "test_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/Test",
             "atlas_path": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/atlas.pkl",
         },
     },
@@ -40,6 +41,7 @@ PATHS = {
         "IXI": {
             "train_dir": "/home/roman/P/IXI_data/Train",
             "val_dir": "/home/roman/P/IXI_data/Val",
+            "test_dir": "/home/roman/P/IXI_data/Test",
             "atlas_path": "/home/roman/P/IXI_data/atlas.pkl",
         },
     },
@@ -51,6 +53,7 @@ PATHS = {
         "IXI": {
             "train_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Train",
             "val_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Val",
+            "test_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Test",
             "atlas_path": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/atlas.pkl",
         },
     },

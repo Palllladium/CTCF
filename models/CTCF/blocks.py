@@ -144,3 +144,59 @@ def upsample_flow(flow: torch.Tensor, scale_factor: float = 2.0) -> torch.Tensor
         return flow
     flow_up = F.interpolate(flow, scale_factor=scale_factor, mode="trilinear", align_corners=False)
     return flow_up * float(scale_factor)
+
+
+class LearnedFlowUpsample3D(nn.Module):
+    """Convex upsampling for 3D flow fields (RAFT-style).
+
+    For each low-res voxel, predicts convex combination weights over a
+    3x3x3 neighborhood for each of its 2x2x2 = 8 high-res sub-voxels.
+    This learns sub-voxel interpolation kernels sharper than trilinear.
+    """
+    def __init__(self, scale: int = 2, hidden_ch: int = 64):
+        super().__init__()
+        self.scale = int(scale)
+        self.k = 3
+        self.k3 = self.k ** 3   # 27 neighbors
+        s3 = self.scale ** 3    # 8 sub-voxels
+        self.mask_net = nn.Sequential(
+            nn.Conv3d(3, hidden_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(hidden_ch, affine=True),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv3d(hidden_ch, s3 * self.k3, 1, bias=True),
+        )
+
+    def forward(self, flow: torch.Tensor) -> torch.Tensor:
+        B, C, D, H, W = flow.shape
+        s = self.scale
+        k = self.k
+
+        # Predict per-sub-voxel weights: (B, s^3*k^3, D, H, W)
+        mask = self.mask_net(flow)
+        mask = mask.view(B, s ** 3, self.k3, D, H, W)
+        mask = torch.softmax(mask, dim=2)  # convex combination over neighbors
+
+        # Extract 3x3x3 neighborhoods: (B, C, k^3, D, H, W)
+        p = k // 2
+        flow_pad = F.pad(flow, (p, p, p, p, p, p), mode="replicate")
+        neighbors = []
+        for dz in range(k):
+            for dy in range(k):
+                for dx in range(k):
+                    neighbors.append(flow_pad[:, :, dz:dz + D, dy:dy + H, dx:dx + W])
+        neighbors = torch.stack(neighbors, dim=2)
+        neighbors = neighbors * float(s)  # scale flow values for upsampling
+
+        # Weighted sum per sub-voxel (loop over 8 for memory efficiency)
+        parts = []
+        for i in range(s ** 3):
+            w = mask[:, i: i + 1]           # (B, 1, k^3, D, H, W)
+            parts.append((w * neighbors).sum(dim=2))  # (B, C, D, H, W)
+        flow_up = torch.stack(parts, dim=2)  # (B, C, s^3, D, H, W)
+
+        # Reshape s^3 sub-voxels back to spatial: (B, C, s*D, s*H, s*W)
+        flow_up = flow_up.view(B, C, s, s, s, D, H, W)
+        flow_up = flow_up.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
+        flow_up = flow_up.view(B, C, s * D, s * H, s * W)
+
+        return flow_up

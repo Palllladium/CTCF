@@ -12,20 +12,13 @@ env/
 .vscode/
 .claude/
 .idea/
-.DS_Store
 Thumbs.db
 
 # Local project docs
 CLAUDE.md
-figures/
-paper/
-
-# Build/test caches
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+tools/paper/
+/main.tex
+Comments.txt
 
 # Runtime outputs
 logs/

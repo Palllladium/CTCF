@@ -2,7 +2,7 @@
 
 A three-level coarse-to-fine cascade framework for unsupervised deformable 3D medical image registration.
 
-**Paper:** *CTCF: A Three-Level Coarse-to-Fine Cascade for Unsupervised Deformable Medical Image Registration* (submitted to MDPI Algorithms, 2026)
+**Paper:** *CTCF: A Three-Level Coarse-to-Fine Cascade for Unsupervised Deformable Medical Image Registration* (MDPI Computers, 2026)
 
 **Preliminary work:** [CTCF: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration](https://doi.org/10.1109/ElCon-CN69892.2026.11414003) — ElCon-CN 2026, pp. 120-127.
 
@@ -18,15 +18,107 @@ Total: **295.96M** parameters. Levels 1 and 3 add only **3.0%** overhead over th
 
 A smoothstep warmup schedule gradually activates the outer cascade levels during training.
 
-## Results (Unsupervised, OASIS)
+![CTCF Architecture](figures/architecture_ctcf_pipeline.png)
 
-| Method | Dice | HD95 | SDlogJ | Params |
-|--------|------|------|--------|--------|
-| TransMorph-DCA | 0.8145 | 1.848 | 0.0805 | 283.93M |
-| UTSRMorph (Large) | 0.8172 | 1.890 | 0.1015 | 421.50M |
-| **CTCF (ours)** | **0.8208** | **1.790** | **0.0797** | 295.96M |
+<details>
+<summary>Building blocks</summary>
+
+![Building blocks](figures/architecture_ctcf_blocks.png)
+</details>
+
+## Results
+
+All models trained **unsupervised** (NCC + regularization, no segmentation labels during training).
+
+### OASIS (19 test pairs)
+
+| Method | Dice | HD95 | SDlogJ | Fold% | Params |
+|--------|------|------|--------|-------|--------|
+| TransMorph-DCA | 0.8145 | 1.848 | 0.0805 | 0.264 | 283.93M |
+| UTSRMorph (Large) | 0.8172 | 1.890 | 0.1015 | 0.890 | 421.50M |
+| **CTCF (ours)** | **0.8208** | **1.790** | **0.0797** | 0.523 | 295.96M |
+
+### IXI (115 test subjects)
+
+| Method | Dice | HD95 | SDlogJ | Fold% | Params |
+|--------|------|------|--------|-------|--------|
+| TransMorph-DCA | 0.7456 | 3.504 | 0.0874 | 1.153 | 283.93M |
+| UTSRMorph (IXI-Large) | 0.7602 | 3.012 | 0.0627 | 0.677 | 152.23M |
+| **CTCF (ours)** | **0.7624** | **2.843** | **0.0594** | **0.561** | 295.96M |
 
 All Dice improvements are statistically significant (p < 0.001, Wilcoxon signed-rank test).
+
+### Visual Comparison
+
+| OASIS | IXI |
+|:-----:|:---:|
+| ![OASIS boxplot](figures/boxplot_oasis.png) | ![IXI boxplot](figures/boxplot_ixi.png) |
+
+### Qualitative Examples
+
+| OASIS | IXI |
+|:-----:|:---:|
+| ![Qualitative OASIS](figures/qualitative_oasis_v2.png) | ![Qualitative IXI](figures/qualitative_ixi_v2.png) |
+
+## Installation
+
+```bash
+conda env create -f environment.yml
+conda activate ctcf
+```
+
+## Quick Start
+
+### Training
+
+```bash
+# CTCF on OASIS (local paths profile --1)
+python -m experiments.train_CTCF --ds OASIS --1
+
+# CTCF on IXI
+python -m experiments.train_CTCF --ds IXI --1
+
+# Baselines
+python -m experiments.train_TransMorphDCA --ds OASIS --1
+python -m experiments.train_UTSRMorph --ds OASIS --1
+```
+
+### Inference
+
+```bash
+python -m experiments.inference \
+  --model ctcf \
+  --ckpt results/CTCF/ckpt/best.pth \
+  --ds OASIS --1
+```
+
+### Ablation Experiments
+
+All ablation rounds from the paper can be reproduced with a single script:
+
+```bash
+# Run a specific round
+bash tools/run_ablation.sh R1 --data-dir /data --gpu 0
+
+# Run all rounds sequentially
+bash tools/run_ablation.sh all --paths-profile 3
+```
+
+Rounds: R1 (loss/strategy), R2 (L3 tuning), R3 (L1 capacity), R4 (cascade decomposition), R5 (resolution scaling), R6 (capacity ablation).
+
+### Key Training Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max_epoch` | 500 | Training epochs |
+| `--w_reg` | auto | Diffusion regularization weight (IXI=4.0, others=1.0) |
+| `--w_icon` | 0.05 | ICON loss weight |
+| `--w_jac` | 0.005 | Jacobian penalty weight |
+| `--l1_base_ch` | 32 | Level 1 base channels |
+| `--l3_base_ch` | 64 | Level 3 base channels |
+| `--l3_error_mode` | ncc | Error map: `absdiff`, `gradmag`, or `ncc` |
+| `--time_steps` | 6 | L2 integration steps |
+| `--1` / `--2` / `--3` | - | Path profile (local/alt/remote) |
 
 ## Project Structure
 
@@ -47,7 +139,7 @@ experiments/
   inference.py          # Unified inference and evaluation
   core/
     train_runtime.py    # Path profiles, run_train() entry point
-    train_rules.py      # Cascade schedule (smoothstep warmup)
+    train_rules.py      # Dataset defaults (cascade schedule, hyperparams)
     model_adapters.py   # CLI args -> CtcfConfig bridge
 
 utils/
@@ -61,56 +153,11 @@ datasets/
   IXI.py            # IXI dataloader (576 volumes, 30 regions)
 
 tools/
-  scripts/          # Training scripts (ablation runners, VM setup)
+  run_ablation.sh   # Unified ablation runner (R1-R6)
+  count_params.py   # Parameter counting utility
+  stats.py          # Statistical tests (Wilcoxon, Hodges-Lehmann)
   paper/            # Figure generation scripts
 ```
-
-## Quick Start
-
-### Training
-
-```bash
-# CTCF on OASIS (local paths profile --1)
-python -m experiments.train_CTCF --ds OASIS --1
-
-# CTCF on IXI
-python -m experiments.train_CTCF --ds IXI --2
-
-# Baselines
-python -m experiments.train_TransMorphDCA --ds OASIS --1
-python -m experiments.train_UTSRMorph --ds OASIS --1
-```
-
-### Inference
-
-```bash
-python -m experiments.inference \
-  --model ctcf \
-  --ckpt results/CTCF/ckpt/best.pth \
-  --ds OASIS --1
-```
-
-### Key Training Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--max_epoch` | 500 | Training epochs |
-| `--w_reg` | auto | Diffusion regularization weight (IXI=4.0, others=1.0) |
-| `--w_icon` | 0.05 | ICON loss weight |
-| `--w_jac` | 0.005 | Jacobian penalty weight |
-| `--l1_base_ch` | 32 | Level 1 base channels |
-| `--l3_base_ch` | 64 | Level 3 base channels |
-| `--l3_error_mode` | ncc | Error map: `absdiff`, `gradmag`, or `ncc` |
-| `--time_steps` | 6 | L2 integration steps |
-| `--1` / `--2` / `--3` | - | Path profile (local/alt/remote) |
-
-## Requirements
-
-- Python 3.10+
-- PyTorch with CUDA
-- torchvision
-- nibabel, scipy, numpy, matplotlib
-- `surface-distance` (for HD95 metric)
 
 ## Notes
 

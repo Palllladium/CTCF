@@ -67,6 +67,19 @@ class CtcfAdapter(ModelAdapter):
         l3_base_ch: Optional[int] = None,
         l3_error_mode: Optional[str] = None,
         prealign_encoder: Optional[bool] = None,
+        # GEN2 enhancements (architectural)
+        l3_iters: Optional[int] = None,
+        l3_full_res: Optional[bool] = None,
+        learned_upsample: Optional[bool] = None,
+        l2_l3_skip: Optional[bool] = None,
+        l1_half_res: Optional[bool] = None,
+        l1_l2_skip: Optional[bool] = None,
+        # GEN2.5 enhancements (capacity)
+        l3_cab: Optional[bool] = None,
+        l3_context_blocks: Optional[int] = None,
+        l3_gate: Optional[bool] = None,
+        l3_unshared: Optional[bool] = None,
+        l1_cab: Optional[bool] = None,
     ) -> torch.nn.Module:
         from models.CTCF.model import CONFIGS, CTCF_CascadeA
 
@@ -84,6 +97,21 @@ class CtcfAdapter(ModelAdapter):
         if l3_base_ch is not None: cfg.level3_base_ch = int(l3_base_ch)
         if l3_error_mode is not None: cfg.level3_error_mode = str(l3_error_mode)
         if prealign_encoder is not None: cfg.prealign_encoder = bool(prealign_encoder)
+
+        # GEN2 (architectural)
+        if l3_iters is not None: cfg.l3_iters = int(l3_iters)
+        if l3_full_res is not None: cfg.l3_full_res = bool(l3_full_res)
+        if learned_upsample is not None: cfg.learned_upsample = bool(learned_upsample)
+        if l2_l3_skip is not None: cfg.l2_l3_skip = bool(l2_l3_skip)
+        if l1_half_res is not None: cfg.l1_half_res = bool(l1_half_res)
+        if l1_l2_skip is not None: cfg.l1_l2_skip = bool(l1_l2_skip)
+
+        # GEN2.5 (capacity)
+        if l3_cab is not None: cfg.l3_cab = bool(l3_cab)
+        if l3_context_blocks is not None: cfg.l3_context_blocks = int(l3_context_blocks)
+        if l3_gate is not None: cfg.l3_gate = bool(l3_gate)
+        if l3_unshared is not None: cfg.l3_unshared = bool(l3_unshared)
+        if l1_cab is not None: cfg.l1_cab = bool(l1_cab)
 
         model = CTCF_CascadeA(cfg)
         model.cfg = cfg

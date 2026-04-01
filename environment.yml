@@ -1,4 +1,4 @@
-name: oasis-ctcf
+name: ctcf
 channels:
   - conda-forge
   - defaults

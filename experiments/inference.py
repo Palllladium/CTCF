@@ -84,7 +84,11 @@ class InferRunner:
     def __init__(self, args):
         self.args = args
         self.device = setup_device(args.gpu, seed=args.seed, deterministic=args.deterministic)
-        self.test_dir = PATHS[int(args.paths)][args.ds.upper()]["val_dir"]
+        ds_paths = PATHS[int(args.paths)][args.ds.upper()]
+        if getattr(args, "use_test", False) and "test_dir" in ds_paths:
+            self.test_dir = ds_paths["test_dir"]
+        else:
+            self.test_dir = ds_paths["val_dir"]
         self.test_files = sorted(glob.glob(os.path.join(self.test_dir, "*.pkl")))
         if not self.test_files:
             raise RuntimeError(f"No .pkl files found in test_dir: {self.test_dir}")
@@ -257,6 +261,7 @@ def parse_args():
     p.add_argument("--save_pngs", action="store_true", help="Save per-case preview PNGs.")
     p.add_argument("--png_limit", type=int, default=5, help="Max PNG count (-1 for all cases).")
     
+    p.add_argument("--use_test", action="store_true", help="Use test_dir instead of val_dir (for IXI final evaluation).")
     p.add_argument("--hd95", action="store_true", help="Compute HD95 in addition to core protocol metrics.")
     p.add_argument("--time_steps", type=int, default=12, help="Integration steps for velocity-based models.")
     p.add_argument("--tm_config", type=str, default="TransMorph-3-LVL", help="TransMorph-DCA config key.")
