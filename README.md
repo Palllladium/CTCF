@@ -1,8 +1,6 @@
-# CTCF: Cascade Transformer for Coarse-to-Fine Registration
+# CTCF: Cascade Transformer for Coarse-to-Fine Unsupervised Medical Image Registration
 
 A three-level coarse-to-fine cascade framework for unsupervised deformable 3D medical image registration.
-
-**Paper:** *CTCF: A Three-Level Coarse-to-Fine Cascade for Unsupervised Deformable Medical Image Registration* (MDPI Computers, 2026)
 
 **Preliminary work:** [CTCF: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration](https://doi.org/10.1109/ElCon-CN69892.2026.11414003) — ElCon-CN 2026, pp. 120-127.
 
@@ -10,9 +8,9 @@ A three-level coarse-to-fine cascade framework for unsupervised deformable 3D me
 
 CTCF wraps a lightweight coarse-and-refine envelope around an existing single-pass registration backbone (TransMorph-DCA):
 
-- **Level 1** — CoarseFlowNet (3.19M params): convolutional U-Net at 1/4 resolution for global alignment
-- **Level 2** — Swin-DCA + SR decoder (287.11M params): dual-stream Swin Transformer with deformable cross-attention at 1/2 resolution
-- **Level 3** — FlowRefiner (5.66M params): error-driven convolutional U-Net at 1/2 resolution using NCC error maps
+- **Level 1** — CoarseFlowNet (3.19M params): convolutional U-Net at 1/4 resolution for global alignment.
+- **Level 2** — Swin-DCA + SR decoder (287.11M params): dual-stream Swin Transformer with DCA at 1/2 resolution.
+- **Level 3** — FlowRefiner (5.66M params): error-driven convolutional U-Net at 1/2 resolution using NCC error maps.
 
 Total: **295.96M** parameters. Levels 1 and 3 add only **3.0%** overhead over the TransMorph-DCA backbone.
 
@@ -72,10 +70,8 @@ conda activate ctcf
 ### Training
 
 ```bash
-# CTCF on OASIS (local paths profile --1)
+# CTCF (local paths profile --1)
 python -m experiments.train_CTCF --ds OASIS --1
-
-# CTCF on IXI
 python -m experiments.train_CTCF --ds IXI --1
 
 # Baselines
@@ -104,7 +100,13 @@ bash tools/run_ablation.sh R1 --data-dir /data --gpu 0
 bash tools/run_ablation.sh all --paths-profile 3
 ```
 
-Rounds: R1 (loss/strategy), R2 (L3 tuning), R3 (L1 capacity), R4 (cascade decomposition), R5 (resolution scaling), R6 (capacity ablation).
+Rounds: 
+- R1 (loss/strategy),
+- R2 (L3 tuning),
+- R3 (L1 capacity),
+- R4 (cascade decomposition),
+- R5 (resolution scaling),
+- R6 (capacity ablation).
 
 ### Key Training Flags
 
@@ -153,9 +155,9 @@ datasets/
   IXI.py            # IXI dataloader (576 volumes, 30 regions)
 
 tools/
-  run_ablation.sh   # Unified ablation runner (R1-R6)
+  ablation.sh   # Unified ablation runner (R1-R6)
   count_params.py   # Parameter counting utility
-  stats.py          # Statistical tests (Wilcoxon, Hodges-Lehmann)
+  compute_stats.py          # Statistical tests (Wilcoxon, Hodges-Lehmann)
   paper/            # Figure generation scripts
 ```
 
