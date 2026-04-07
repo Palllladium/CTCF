@@ -10,6 +10,24 @@ from models.CTCF.stages import CTCF_DCA_CoreHalf, CoarseFlowNetQuarter, FlowRefi
 from models.CTCF.configs import CONFIGS
 
 
+def _build_level2(config, backbone: str):
+    """Build L2 backbone module based on config.backbone."""
+    if backbone == "swin-dca":
+        return CTCF_DCA_CoreHalf(config, time_steps=config.time_steps)
+    elif backbone == "vxm":
+        from models.VoxelMorph.wrapper import VxmDenseHalf
+        vxm = getattr(config, "vxm", None)
+        img_half = tuple(s // 2 for s in config.img_size)
+        return VxmDenseHalf(
+            vol_size=img_half,
+            enc_nf=list(vxm.enc_nf) if vxm else [16, 32, 32, 32],
+            dec_nf=list(vxm.dec_nf) if vxm else [32, 32, 32, 32, 32, 16, 16],
+            int_steps=int(vxm.int_steps) if vxm else 7,
+        )
+    else:
+        raise ValueError(f"Unknown backbone: {backbone}")
+
+
 class CTCF_CascadeA(nn.Module):
     """
     Variant A:
@@ -25,6 +43,7 @@ class CTCF_CascadeA(nn.Module):
         self.use_level1 = bool(config.use_level1)
         self.use_level2 = bool(config.use_level2)
         self.use_level3 = bool(config.use_level3)
+        self.backbone = str(getattr(config, 'backbone', 'swin-dca'))
 
         # GEN2 flags (architectural)
         self.l3_iters = int(getattr(config, 'l3_iters', 1))
@@ -41,7 +60,9 @@ class CTCF_CascadeA(nn.Module):
         # L2 decoder feature channels (for L2→L3 skip)
         l2_skip_ch = 0
         if self.l2_l3_skip and self.use_level3:
-            l2_skip_ch = int(config.embed_dim) // 2
+            if self.backbone == 'swin-dca':
+                l2_skip_ch = int(config.embed_dim) // 2
+            # VxmDense has no decoder features; l2_l3_skip is a no-op
 
         # L3 kwargs (shared between main and extra instances)
         l3_kwargs = dict(
@@ -56,7 +77,7 @@ class CTCF_CascadeA(nn.Module):
             base_ch=config.level1_base_ch,
             use_cab=bool(getattr(config, 'l1_cab', False)),
         ) if self.use_level1 else None
-        self.level2 = CTCF_DCA_CoreHalf(config, time_steps=config.time_steps) if self.use_level2 else None
+        self.level2 = _build_level2(config, self.backbone) if self.use_level2 else None
         self.level3 = FlowRefiner3D(**l3_kwargs) if self.use_level3 else None
 
         # Unshared L3: separate weights for iterations 1..n-1

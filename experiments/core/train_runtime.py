@@ -93,6 +93,7 @@ def add_common_args(p: argparse.ArgumentParser, *, include_synth: bool = False, 
         p.add_argument("--save_ckpt", type=int, choices=[0, 1], default=1, help="Enable/disable checkpoint saving to disk.")
         p.add_argument("--use_tb", type=int, choices=[0, 1], default=1, help="Enable/disable TensorBoard logging.")
         p.add_argument("--tb_images_every", type=int, default=5, help="TensorBoard image logging period in epochs.")
+        p.add_argument("--quiet", type=int, choices=[0, 1], default=0, help="If 1, suppress per-iter logs from console (file only). Epoch summaries still shown.")
     return p
 
 
@@ -186,7 +187,7 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
     assert torch.cuda.is_available(), "CUDA required"
     device = runner.device
     paths = make_exp_dirs(args.exp or "EXP")
-    attach_stdout_logger(paths.log_dir)
+    attach_stdout_logger(paths.log_dir, quiet=bool(int(getattr(args, 'quiet', 0))))
     ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
     save_ckpt = bool(int(args.save_ckpt))
     use_tb = bool(int(args.use_tb))

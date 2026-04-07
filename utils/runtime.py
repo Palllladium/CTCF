@@ -14,15 +14,28 @@ from torch import optim
 
 
 class Logger:
-    def __init__(self, log_dir: str, filename: str = "logfile.log"):
+    """Tee stdout to a log file. In quiet mode only epoch summaries go to terminal."""
+
+    # Lines matching these prefixes are always printed to terminal even in quiet mode
+    _ECHO_PREFIXES = ("[epoch", "[perf", ">>> ", "WARNING", "ABORT", "Traceback", "Error")
+
+    def __init__(self, log_dir: str, filename: str = "logfile.log", quiet: bool = False):
         self.terminal = sys.stdout
+        self.quiet = quiet
         os.makedirs(log_dir, exist_ok=True)
         self.log = open(os.path.join(log_dir, filename), "a", encoding="utf-8", buffering=1)
 
 
     def write(self, message: str):
-        self.terminal.write(message)
         self.log.write(message)
+        if not self.quiet:
+            self.terminal.write(message)
+        else:
+            # In quiet mode: only echo important lines
+            for line in message.splitlines(keepends=True):
+                stripped = line.lstrip()
+                if any(stripped.startswith(p) for p in self._ECHO_PREFIXES):
+                    self.terminal.write(line)
 
 
     def flush(self):
@@ -30,8 +43,9 @@ class Logger:
         self.log.flush()
 
 
-def attach_stdout_logger(log_dir: str, filename: str = "logfile.log", mirror_stderr: bool = True) -> Logger:
-    logger = Logger(log_dir, filename=filename)
+def attach_stdout_logger(log_dir: str, filename: str = "logfile.log",
+                         mirror_stderr: bool = True, quiet: bool = False) -> Logger:
+    logger = Logger(log_dir, filename=filename, quiet=quiet)
     sys.stdout = logger
     if mirror_stderr:
         sys.stderr = logger
