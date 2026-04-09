@@ -369,5 +369,8 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
         peak_mem = "n/a" if perf.peak_gpu_mem_gib is None else f"{perf.peak_gpu_mem_gib:.2f}GB"
         print(f"[perf  {epoch:03d}] epoch={perf.epoch_time_sec:.2f}s iter={perf.mean_iter_time_ms:.1f}ms peak={peak_mem}")
 
+    # Final summary (always visible, even in quiet mode)
+    print(f">>> Training complete: {int(args.max_epoch)} epochs, best_dice={best_dsc:.4f}")
+
     if writer is not None:
         writer.close()

@@ -73,7 +73,10 @@ class CtcfAdapter(ModelAdapter):
         learned_upsample: Optional[bool] = None,
         l2_l3_skip: Optional[bool] = None,
         l1_half_res: Optional[bool] = None,
+        l2_full_res: Optional[bool] = None,
         l1_l2_skip: Optional[bool] = None,
+        l3_compose: Optional[bool] = None,
+        l3_svf: Optional[bool] = None,
         # GEN2.5 enhancements (capacity)
         l3_cab: Optional[bool] = None,
         l3_context_blocks: Optional[int] = None,
@@ -104,7 +107,10 @@ class CtcfAdapter(ModelAdapter):
         if learned_upsample is not None: cfg.learned_upsample = bool(learned_upsample)
         if l2_l3_skip is not None: cfg.l2_l3_skip = bool(l2_l3_skip)
         if l1_half_res is not None: cfg.l1_half_res = bool(l1_half_res)
+        if l2_full_res is not None: cfg.l2_full_res = bool(l2_full_res)
         if l1_l2_skip is not None: cfg.l1_l2_skip = bool(l1_l2_skip)
+        if l3_compose is not None: cfg.l3_compose = bool(l3_compose)
+        if l3_svf is not None: cfg.l3_svf = bool(l3_svf)
 
         # GEN2.5 (capacity)
         if l3_cab is not None: cfg.l3_cab = bool(l3_cab)

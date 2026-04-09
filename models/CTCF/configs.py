@@ -46,7 +46,10 @@ def get_CTCF_config():
     c.learned_upsample = False  # Learned flow upsampling instead of trilinear
     c.l2_l3_skip = False        # Pass L2 decoder features to L3 as skip connection
     c.l1_half_res = False       # Run L1 at half-res instead of quarter-res
+    c.l2_full_res = False       # Run L2 at full-res (for lightweight backbones like VxM)
     c.l1_l2_skip = False        # Pass L1 encoder features to L2 conv-skip path
+    c.l3_compose = False        # Use proper flow composition in L3 instead of addition
+    c.l3_svf = False            # Integrate L3 delta as SVF (scaling-and-squaring) → diffeomorphic
 
     # GEN2.5 enhancements (capacity)
     c.l3_cab = False            # Channel attention (CAB) in L3 decoder
@@ -85,7 +88,10 @@ def get_CTCF_VM_config(*, use_cascade=True):
     c.learned_upsample = False
     c.l2_l3_skip = False
     c.l1_half_res = False
+    c.l2_full_res = False
     c.l1_l2_skip = False
+    c.l3_compose = False
+    c.l3_svf = False
 
     # GEN2.5 enhancements (capacity)
     c.l3_cab = False

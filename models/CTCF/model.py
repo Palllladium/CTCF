@@ -8,18 +8,19 @@ from models.TransMorph_DCA.model import SpatialTransformer
 from models.CTCF.blocks import upsample_flow, LearnedFlowUpsample3D, RefineGate3D
 from models.CTCF.stages import CTCF_DCA_CoreHalf, CoarseFlowNetQuarter, FlowRefiner3D
 from models.CTCF.configs import CONFIGS
+from utils.field import compose_flows
 
 
-def _build_level2(config, backbone: str):
+def _build_level2(config, backbone: str, l2_full_res: bool = False):
     """Build L2 backbone module based on config.backbone."""
     if backbone == "swin-dca":
         return CTCF_DCA_CoreHalf(config, time_steps=config.time_steps)
     elif backbone == "vxm":
         from models.VoxelMorph.wrapper import VxmDenseHalf
         vxm = getattr(config, "vxm", None)
-        img_half = tuple(s // 2 for s in config.img_size)
+        vol = tuple(config.img_size) if l2_full_res else tuple(s // 2 for s in config.img_size)
         return VxmDenseHalf(
-            vol_size=img_half,
+            vol_size=vol,
             enc_nf=list(vxm.enc_nf) if vxm else [16, 32, 32, 32],
             dec_nf=list(vxm.dec_nf) if vxm else [32, 32, 32, 32, 32, 16, 16],
             int_steps=int(vxm.int_steps) if vxm else 7,
@@ -49,8 +50,11 @@ class CTCF_CascadeA(nn.Module):
         self.l3_iters = int(getattr(config, 'l3_iters', 1))
         self.l3_full_res = bool(getattr(config, 'l3_full_res', False))
         self.use_learned_upsample = bool(getattr(config, 'learned_upsample', False))
+        self.l3_compose = bool(getattr(config, 'l3_compose', False))
+        self.l3_svf = bool(getattr(config, 'l3_svf', False))
         self.l2_l3_skip = bool(getattr(config, 'l2_l3_skip', False))
         self.l1_half_res = bool(getattr(config, 'l1_half_res', False))
+        self.l2_full_res = bool(getattr(config, 'l2_full_res', False))
         self.l1_l2_skip = bool(getattr(config, 'l1_l2_skip', False))
 
         # GEN2.5 flags (capacity)
@@ -77,7 +81,7 @@ class CTCF_CascadeA(nn.Module):
             base_ch=config.level1_base_ch,
             use_cab=bool(getattr(config, 'l1_cab', False)),
         ) if self.use_level1 else None
-        self.level2 = _build_level2(config, self.backbone) if self.use_level2 else None
+        self.level2 = _build_level2(config, self.backbone, self.l2_full_res) if self.use_level2 else None
         self.level3 = FlowRefiner3D(**l3_kwargs) if self.use_level3 else None
 
         # Unshared L3: separate weights for iterations 1..n-1
@@ -103,17 +107,39 @@ class CTCF_CascadeA(nn.Module):
         else:
             self.flow_upsample = None
 
+
     def _get_l3(self, it: int) -> FlowRefiner3D:
         """Return L3 module for iteration `it` (unshared: separate weights per iter)."""
         if it == 0 or self.level3_extra is None:
             return self.level3
         return self.level3_extra[it - 1]
 
+
     def _upsample_to_full(self, flow_half: torch.Tensor) -> torch.Tensor:
         """Upsample half-res flow to full-res."""
         if self.flow_upsample is not None:
             return self.flow_upsample(flow_half)
         return upsample_flow(flow_half, scale_factor=2)
+
+
+    def _integrate_svf(self, vel: torch.Tensor, st: SpatialTransformer, steps: int = 7) -> torch.Tensor:
+        """Integrate stationary velocity field via scaling and squaring."""
+        disp = vel * (1.0 / (2 ** steps))
+        for _ in range(steps):
+            disp = disp + st(disp, disp)
+        return disp
+
+
+    def _apply_l3_delta(self, delta: torch.Tensor, flow_cur: torch.Tensor,
+                        st: SpatialTransformer) -> torch.Tensor:
+        """Apply L3 delta to current flow (SVF integration + composition, or simple add)."""
+        if self.l3_svf:
+            delta = self._integrate_svf(delta, st)
+            return compose_flows(delta, flow_cur)
+        if self.l3_compose:
+            return compose_flows(delta, flow_cur)
+        return flow_cur + delta
+
 
     def forward(
         self,
@@ -155,14 +181,22 @@ class CTCF_CascadeA(nn.Module):
             if aux is not None:
                 aux["flow_half_init"] = flow_half_init
 
+        # ── Route L2 inputs ──
+        if self.l2_full_res:
+            flow_l2_init = self._upsample_to_full(flow_half_init) if flow_half_init is not None else None
+            l2_mov, l2_fix = mov_full, fix_full
+        else:
+            flow_l2_init = flow_half_init
+            l2_mov, l2_fix = mov_half, fix_half
+
         # ── Level 2 ──
         if self.level2 is None:
             raise RuntimeError("CTCF_CascadeA requires level2 enabled (use_level2=True).")
 
         need_l2_feat = self.l2_l3_skip and self.level3 is not None and alpha_l3 > 0.0
         l2_result = self.level2(
-            mov_half, fix_half,
-            init_flow_half=flow_half_init,
+            l2_mov, l2_fix,
+            init_flow_half=flow_l2_init,
             return_all_flows=False,
             l1_feat=l1_feat if self.l1_l2_skip else None,
             return_features=need_l2_feat,
@@ -181,10 +215,14 @@ class CTCF_CascadeA(nn.Module):
         # ── Level 3 ──
         flow_half = flow_half_l2
         if self.level3 is not None and alpha_l3 > 0.0:
-            if self.l3_full_res:
+            if self.l3_full_res or self.l2_full_res:
                 # L3 at full-res
-                flow_full_cur = self._upsample_to_full(flow_half_l2)
-                def_full_cur = self.st_full(mov_full, flow_full_cur)
+                if self.l2_full_res:
+                    flow_full_cur = flow_half_l2   # already full-res
+                    def_full_cur = def_half_l2
+                else:
+                    flow_full_cur = self._upsample_to_full(flow_half_l2)
+                    def_full_cur = self.st_full(mov_full, flow_full_cur)
 
                 for it in range(self.l3_iters):
                     l3_mod = self._get_l3(it)
@@ -197,7 +235,7 @@ class CTCF_CascadeA(nn.Module):
                         gate = self.refine_gate(torch.cat([err, delta_full], dim=1))
                         delta_full = delta_full * gate
                     delta_full = delta_full * float(alpha_l3)
-                    flow_full_cur = flow_full_cur + delta_full
+                    flow_full_cur = self._apply_l3_delta(delta_full, flow_full_cur, self.st_full)
                     if it < self.l3_iters - 1:
                         def_full_cur = self.st_full(mov_full, flow_full_cur)
 
@@ -227,7 +265,7 @@ class CTCF_CascadeA(nn.Module):
                         gate = self.refine_gate(torch.cat([err, delta], dim=1))
                         delta = delta * gate
                     delta = delta * float(alpha_l3)
-                    flow_cur = flow_cur + delta
+                    flow_cur = self._apply_l3_delta(delta, flow_cur, self.st_half)
                     if it < self.l3_iters - 1:
                         def_cur = self.st_half(mov_half, flow_cur)
 
@@ -236,7 +274,10 @@ class CTCF_CascadeA(nn.Module):
                     aux["flow_half_ref"] = flow_half - flow_half_l2
 
         # ── Final upsample ──
-        flow_full = self._upsample_to_full(flow_half)
+        if self.l2_full_res:
+            flow_full = flow_half  # L2 output already full-res
+        else:
+            flow_full = self._upsample_to_full(flow_half)
         def_full = self.st_full(mov_full, flow_full)
 
         if aux is not None:

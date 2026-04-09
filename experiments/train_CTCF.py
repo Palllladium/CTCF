@@ -8,7 +8,7 @@ from datasets.synthetic import build_synth_loaders
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.train_rules import apply_ctcf_dataset_defaults
 from experiments.core.train_runtime import Ctx, add_common_args, loaders_baseline, run_train
-from utils import RegisterModel, ctcf_schedule, dice_val, icon_loss, neg_jacobian_penalty, setup_device
+from utils import RegisterModel, ctcf_schedule, dice_val, icon_loss, neg_jacobian_penalty, setup_device, DareDiffusion, elastic_loss
 
 
 class Runner:
@@ -42,7 +42,10 @@ class Runner:
             learned_upsample=True if int(getattr(args, 'learned_upsample', 0)) else None,
             l2_l3_skip=True if int(getattr(args, 'l2_l3_skip', 0)) else None,
             l1_half_res=True if int(getattr(args, 'l1_half_res', 0)) else None,
+            l2_full_res=True if int(getattr(args, 'l2_full_res', 0)) else None,
             l1_l2_skip=True if int(getattr(args, 'l1_l2_skip', 0)) else None,
+            l3_compose=True if int(getattr(args, 'l3_compose', 0)) else None,
+            l3_svf=True if int(getattr(args, 'l3_svf', 0)) else None,
             # GEN2.5 (capacity)
             l3_cab=True if int(getattr(args, 'l3_cab', 0)) else None,
             l3_context_blocks=int(args.l3_context) if int(getattr(args, 'l3_context', 0)) > 0 else None,
@@ -59,6 +62,19 @@ class Runner:
         self.lr_policy = "ctcf"
         self._val_alpha_l1 = 0.0 if int(getattr(args, 'disable_l1', 0)) else 1.0
         self._val_alpha_l3 = 0.0 if int(getattr(args, 'disable_l3', 0)) else 1.0
+
+        # Phase 2 losses
+        self.l2_full_res = bool(int(getattr(args, 'l2_full_res', 0)))
+        self.reg_mode = str(getattr(args, 'reg_mode', 'diffusion'))
+        if self.reg_mode == 'dare':
+            self.dare_reg = DareDiffusion(beta=float(getattr(args, 'dare_beta', 1.0)))
+        elif self.reg_mode == 'elastic':
+            self._elastic_mu = float(getattr(args, 'elastic_mu', 1.0))
+            self._elastic_lam = float(getattr(args, 'elastic_lam', 1.0))
+        self.w_aux = float(getattr(args, 'w_aux', 0.0))
+        self.w_reg_l1 = float(getattr(args, 'w_reg_l1', 0.0))
+        self.w_reg_l3 = float(getattr(args, 'w_reg_l3', 0.0))
+        self._need_aux = self.w_aux > 0 or self.w_reg_l1 > 0 or self.w_reg_l3 > 0
 
 
     @staticmethod
@@ -106,16 +122,56 @@ class Runner:
         W_icon = float(args.w_icon) * warm
         W_jac = float(args.w_jac) * warm
 
-        def_xy, flow_xy = self.model(x, y, return_all=False, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
-        def_yx, flow_yx = self.model(y, x, return_all=False, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+        need_all = self._need_aux
+        out_xy = self.model(x, y, return_all=need_all, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+        out_yx = self.model(y, x, return_all=need_all, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+
+        if need_all:
+            def_xy, flow_xy, aux_xy = out_xy
+            def_yx, flow_yx, aux_yx = out_yx
+        else:
+            def_xy, flow_xy = out_xy
+            def_yx, flow_yx = out_yx
+            aux_xy = aux_yx = {}
 
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
-        L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
+
+        # Regularization (switchable)
+        if self.reg_mode == 'dare':
+            L_reg = 0.5 * (self.dare_reg(flow_xy) + self.dare_reg(flow_yx)) * args.w_reg
+        elif self.reg_mode == 'elastic':
+            L_reg = 0.5 * (elastic_loss(flow_xy, self._elastic_mu, self._elastic_lam) +
+                           elastic_loss(flow_yx, self._elastic_mu, self._elastic_lam)) * args.w_reg
+        else:
+            L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
+
         loss = L_ncc + L_icon + L_reg + L_jac
+
+        # Cascade-aware per-level regularization
+        L_reg_l1 = L_reg_l3 = torch.tensor(0.0)
+        if self.w_reg_l1 > 0 and "flow_half_init" in aux_xy:
+            L_reg_l1 = 0.5 * (ctx.reg(aux_xy["flow_half_init"]) + ctx.reg(aux_yx["flow_half_init"])) * self.w_reg_l1
+            loss = loss + L_reg_l1
+        if self.w_reg_l3 > 0 and "flow_half_ref" in aux_xy:
+            L_reg_l3 = 0.5 * (ctx.reg(aux_xy["flow_half_ref"]) + ctx.reg(aux_yx["flow_half_ref"])) * self.w_reg_l3
+            loss = loss + L_reg_l3
+
+        # Aux loss: NCC on L2 intermediate output
+        L_aux = torch.tensor(0.0)
+        if self.w_aux > 0 and "def_half_l2" in aux_xy:
+            if self.l2_full_res:
+                aux_tgt_xy, aux_tgt_yx = y, x  # L2 output already full-res
+            else:
+                aux_tgt_xy = torch.nn.functional.interpolate(y, scale_factor=0.5, mode="trilinear", align_corners=False)
+                aux_tgt_yx = torch.nn.functional.interpolate(x, scale_factor=0.5, mode="trilinear", align_corners=False)
+            with torch.autocast(device_type="cuda", enabled=False):
+                L_aux = 0.5 * (ctx.ncc(aux_xy["def_half_l2"].float(), aux_tgt_xy.float()) +
+                               ctx.ncc(aux_yx["def_half_l2"].float(), aux_tgt_yx.float())) * self.w_aux
+            loss = loss + L_aux
 
         logs = {
             "all": loss.item(),
@@ -127,6 +183,9 @@ class Runner:
             "alpha_l3": alpha_l3,
             "warm": warm,
         }
+        if self.w_aux > 0: logs["aux"] = L_aux.item()
+        if self.w_reg_l1 > 0: logs["reg_l1"] = L_reg_l1.item()
+        if self.w_reg_l3 > 0: logs["reg_l3"] = L_reg_l3.item()
 
         if self.is_synth:
             with torch.no_grad():
@@ -165,7 +224,10 @@ def parse_args():
     p.add_argument("--learned_upsample", type=int, choices=[0, 1], default=0, help="If 1, use learned flow upsampling instead of trilinear.")
     p.add_argument("--l2_l3_skip", type=int, choices=[0, 1], default=0, help="If 1, pass L2 decoder features to L3.")
     p.add_argument("--l1_half_res", type=int, choices=[0, 1], default=0, help="If 1, run L1 at half-res instead of quarter-res.")
+    p.add_argument("--l2_full_res", type=int, choices=[0, 1], default=0, help="If 1, run L2 at full-res (for lightweight backbones like VxM).")
     p.add_argument("--l1_l2_skip", type=int, choices=[0, 1], default=0, help="If 1, pass L1 features to L2 conv-skip path.")
+    p.add_argument("--l3_compose", type=int, choices=[0, 1], default=0, help="If 1, use flow composition in L3 instead of addition.")
+    p.add_argument("--l3_svf", type=int, choices=[0, 1], default=0, help="If 1, integrate L3 delta as SVF via scaling-and-squaring (diffeomorphic L3).")
 
     # GEN2.5 enhancements (capacity)
     p.add_argument("--l3_cab", type=int, choices=[0, 1], default=0, help="If 1, add channel attention (CAB) to L3 decoder.")
@@ -173,6 +235,16 @@ def parse_args():
     p.add_argument("--l3_gate", type=int, choices=[0, 1], default=0, help="If 1, spatial RefineGate3D on L3 delta output.")
     p.add_argument("--l3_unshared", type=int, choices=[0, 1], default=0, help="If 1, use separate L3 weights per iteration (requires l3_iters>1).")
     p.add_argument("--l1_cab", type=int, choices=[0, 1], default=0, help="If 1, add channel attention (CAB) to L1 decoder.")
+
+    # Phase 2: loss innovations
+    p.add_argument("--reg_mode", type=str, choices=["diffusion", "dare", "elastic"], default="diffusion",
+                    help="Regularization mode: diffusion (default Grad3d), dare (DARE-minimal), elastic (Navier-Cauchy).")
+    p.add_argument("--dare_beta", type=float, default=1.0, help="DARE beta: controls adaptive weighting strength.")
+    p.add_argument("--elastic_mu", type=float, default=1.0, help="ElasticMorph mu (shear modulus).")
+    p.add_argument("--elastic_lam", type=float, default=1.0, help="ElasticMorph lambda (Lame first parameter).")
+    p.add_argument("--w_aux", type=float, default=0.0, help="Auxiliary NCC loss on L2 intermediate output (0=disabled).")
+    p.add_argument("--w_reg_l1", type=float, default=0.0, help="Extra diffusion reg on L1 flow (cascade-aware, 0=disabled).")
+    p.add_argument("--w_reg_l3", type=float, default=0.0, help="Extra diffusion reg on L3 delta (cascade-aware, 0=disabled).")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")
