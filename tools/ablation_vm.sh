@@ -3,10 +3,11 @@
 #
 # Usage:
 #   bash tools/ablation_vm.sh --phase 2 --paths-profile 3 --gpu 0 --max-epoch 100
+#   bash tools/ablation_vm.sh --phase 2.5 --paths-profile 3 --gpu 0 --max-epoch 100
 #   bash tools/ablation_vm.sh --phase 2d --paths-profile 3 --gpu 0 --max-epoch 100
 #
 # Options:
-#   --phase N           Phase to run: 1, 2, 2d (decomposition), or "all" (1+2)
+#   --phase N           Phase to run: 1, 2, 2.5, 2d (decomposition), or "all" (1+2)
 #   --paths-profile N   Path profile 1/2/3 (default: 1)
 #   --gpu N             GPU index (default: 0)
 #   --max-epoch N       Training epochs (default: 100)
@@ -59,6 +60,9 @@ SOLO="--config CTCF-VM-solo"
 
 # Phase 2 baseline = cascade + iters=2 + unshared (best from Phase 1)
 P2BASE="$CASCADE --l3_iters 2 --l3_unshared 1"
+
+# Phase 2.5 baseline = full-res L2 cascade (P2_13 winner: +1.13pp Dice, resource-efficient vs P2_14)
+P25BASE="$CASCADE --l2_full_res 1"
 
 # ══════════════════════════════════════════════════════════════════════
 # Phase 1: Cascade mechanics (16 experiments) — COMPLETE
@@ -118,6 +122,22 @@ PHASE2=(
 )
 
 # ══════════════════════════════════════════════════════════════════════
+# Phase 2.5: Full-res-first ablations (8 experiments)
+# Baseline: P25BASE = cascade + l2_full_res (Dice 0.8282, 384s/ep, 45.5GB)
+# Dropped iter2 unshared — marginal +0.05pp does not justify 2× resources.
+# ══════════════════════════════════════════════════════════════════════
+PHASE25=(
+  "P25_01_SVF|ctcf|$P25BASE --exp P25_01_SVF $COMMON_CTCF --l3_svf 1"
+  "P25_02_DARE|ctcf|$P25BASE --exp P25_02_DARE $COMMON_CTCF --reg_mode dare --dare_beta 1.0"
+  "P25_03_AUX_L2|ctcf|$P25BASE --exp P25_03_AUX_L2 $COMMON_CTCF --w_aux 0.5"
+  "P25_04_COMPOSE|ctcf|$P25BASE --exp P25_04_COMPOSE $COMMON_CTCF --l3_compose 1"
+  "P25_05_ELASTIC_LOW|ctcf|$P25BASE --exp P25_05_ELASTIC_LOW $COMMON_CTCF --reg_mode elastic --elastic_mu 0.1 --elastic_lam 0.1"
+  "P25_06_L3_CH32|ctcf|$P25BASE --exp P25_06_L3_CH32 $COMMON_CTCF --l3_base_ch 32"
+  "P25_07_NO_L3|ctcf|$P25BASE --exp P25_07_NO_L3 $COMMON_CTCF --disable_l3 1"
+  "P25_08_SVF_ITER2|ctcf|$P25BASE --exp P25_08_SVF_ITER2 $COMMON_CTCF --l3_svf 1 --l3_iters 2 --l3_unshared 1"
+)
+
+# ══════════════════════════════════════════════════════════════════════
 # Phase 2D: Decomposition (run AFTER Phase 2 to validate winner)
 # Uses DARE + compose as expected best. Adjust after Phase 2 if needed.
 # ══════════════════════════════════════════════════════════════════════
@@ -145,12 +165,16 @@ case "$PHASE" in
     EXPERIMENTS=("${PHASE2D[@]}")
     PHASE_LABEL="Phase 2D (decomposition)"
     ;;
+  2.5|25)
+    EXPERIMENTS=("${PHASE25[@]}")
+    PHASE_LABEL="Phase 2.5 (full-res first)"
+    ;;
   all)
     EXPERIMENTS=("${PHASE1[@]}" "${PHASE2[@]}")
     PHASE_LABEL="Phase 1+2"
     ;;
   *)
-    echo "Invalid --phase: $PHASE (use 1, 2, 2d, or all)"
+    echo "Invalid --phase: $PHASE (use 1, 2, 2.5, 2d, or all)"
     exit 1
     ;;
 esac
