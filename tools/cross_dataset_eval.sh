@@ -132,28 +132,40 @@ echo "  experiments   : $TOTAL"
 echo "  dry-run       : $DRY_RUN"
 echo "=========================================================="
 
-# Validate that all required ckpt files exist (unless dry-run)
+# Validate that all required ckpt files exist (unless dry-run).
+# Report each of the 6 unique (model, dataset) pairs once, even if resolution failed.
 echo ""
 echo "Checking checkpoints:"
 MISSING=0
-declare -A SEEN
+SEEN_LIST=""
 for spec in "${EXPERIMENTS[@]}"; do
-  IFS='|' read -r _ CKPT_PATH _ _ _ _ <<< "$spec"
-  if [[ -z "${SEEN[$CKPT_PATH]:-}" ]]; then
-    SEEN[$CKPT_PATH]=1
-    if [ -n "$CKPT_PATH" ] && [ -f "$CKPT_PATH" ]; then
-      echo "  [OK]   $CKPT_PATH"
-    else
-      echo "  [MISS] ${CKPT_PATH:-<not resolved>}"
-      MISSING=$((MISSING + 1))
-    fi
+  IFS='|' read -r MODEL CKPT_PATH CKPT_DS EVAL_DS _ _ <<< "$spec"
+  KEY="${MODEL}:${CKPT_DS}"
+  case " $SEEN_LIST " in
+    *" $KEY "*) continue ;;
+  esac
+  SEEN_LIST="$SEEN_LIST $KEY"
+
+  if [ -n "$CKPT_PATH" ] && [ -f "$CKPT_PATH" ]; then
+    printf "  [OK]   %-18s -> %s\n" "$KEY" "$CKPT_PATH"
+  else
+    printf "  [MISS] %-18s -> %s\n" "$KEY" "${CKPT_PATH:-<folder not found under $RESULTS_ROOT>}"
+    MISSING=$((MISSING + 1))
   fi
 done
 if [ "$MISSING" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   echo ""
   echo "ERROR: $MISSING checkpoint(s) missing."
-  echo "       Either set RESULTS_ROOT / EXP_* env vars to point at experiment folders,"
-  echo "       or override CKPT_* env vars with full paths. Abort."
+  echo "       Expected experiment folders under $RESULTS_ROOT:"
+  echo "         CTCF OASIS  -> \$EXP_CTCF_OASIS   (default: $EXP_CTCF_OASIS)"
+  echo "         CTCF IXI    -> \$EXP_CTCF_IXI     (default: $EXP_CTCF_IXI)"
+  echo "         TM-DCA OASIS-> \$EXP_TMDCA_OASIS  (default: $EXP_TMDCA_OASIS)"
+  echo "         TM-DCA IXI  -> \$EXP_TMDCA_IXI    (default: $EXP_TMDCA_IXI)"
+  echo "         UTSR OASIS  -> \$EXP_UTSR_OASIS   (default: $EXP_UTSR_OASIS)"
+  echo "         UTSR IXI    -> \$EXP_UTSR_IXI     (default: $EXP_UTSR_IXI)"
+  echo "       Override any of them via env vars, e.g.:"
+  echo "         EXP_TMDCA_OASIS=TM_DCA_OASIS_actual_name bash tools/cross_dataset_eval.sh ..."
+  echo "       Or pass a full path via CKPT_TMDCA_OASIS=/abs/path/best.pth"
   exit 1
 fi
 
@@ -202,6 +214,7 @@ for i in "${!EXPERIMENTS[@]}"; do
     --strict_ckpt 0 \
     --hd95 \
     --print_every 5 \
+    --out_dir $OUT_DIR \
     $CFG_FLAG \
     $EXTRA"
 

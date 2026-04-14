@@ -143,8 +143,11 @@ class InferRunner:
     def run(self):
         """Execute inference over dataset and save per-case metrics."""
         args = self.args
-        ckpt_name = Path(self.ckpt_path).stem
-        out_dir = os.path.join("results", "infer", args.ds.upper(), self.name, ckpt_name)
+        if getattr(args, "out_dir", None):
+            out_dir = args.out_dir
+        else:
+            ckpt_name = Path(self.ckpt_path).stem
+            out_dir = os.path.join("results", "infer", args.ds.upper(), self.name, ckpt_name)
         os.makedirs(out_dir, exist_ok=True)
         png_dir = os.path.join(out_dir, "png") if args.save_pngs else None
         flow_dir = os.path.join(out_dir, "flows") if args.save_flow else None
@@ -261,6 +264,7 @@ def parse_args():
     p.add_argument("--save_pngs", action="store_true", help="Save per-case preview PNGs.")
     p.add_argument("--png_limit", type=int, default=5, help="Max PNG count (-1 for all cases).")
     
+    p.add_argument("--out_dir", type=str, default=None, help="Override output directory (default: results/infer/<DS>/<model>/<ckpt_stem>).")
     p.add_argument("--use_test", action="store_true", help="Use test_dir instead of val_dir (for IXI final evaluation).")
     p.add_argument("--hd95", action="store_true", help="Compute HD95 in addition to core protocol metrics.")
     p.add_argument("--time_steps", type=int, default=12, help="Integration steps for velocity-based models.")
