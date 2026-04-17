@@ -251,7 +251,7 @@ echo "=========================================================="
 if [ "$DRY_RUN" -eq 0 ] && [ "$PASSED" -gt 0 ]; then
   echo ""
   echo "Aggregating results..."
-  python tools/aggregate_cross_eval.py \
+  python -m tools.aggregate_cross_eval \
     --out results/infer/cross_dataset_summary.csv \
     --manifest <(for spec in "${EXPERIMENTS[@]}"; do echo "$spec"; done)
 fi
