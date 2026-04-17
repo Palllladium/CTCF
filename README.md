@@ -4,6 +4,8 @@ A three-level coarse-to-fine cascade framework for unsupervised deformable 3D me
 
 **Preliminary work:** [CTCF: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration](https://doi.org/10.1109/ElCon-CN69892.2026.11414003) — ElCon-CN 2026, pp. 120-127.
 
+Pretrained checkpoints will be soon!
+
 ## Architecture
 
 CTCF wraps a lightweight coarse-and-refine envelope around an existing single-pass registration backbone (TransMorph-DCA):
