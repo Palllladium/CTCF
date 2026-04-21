@@ -4,7 +4,7 @@ A three-level coarse-to-fine cascade framework for unsupervised deformable 3D me
 
 **Preliminary work:** [CTCF: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration](https://doi.org/10.1109/ElCon-CN69892.2026.11414003) — ElCon-CN 2026, pp. 120-127.
 
-Pretrained checkpoints will be soon!
+**Pretrained checkpoints:** [10.5281/zenodo.19665292](https://doi.org/10.5281/zenodo.19665292) — CTCF and both baselines on OASIS + IXI.
 
 ## Architecture
 
@@ -67,12 +67,75 @@ conda env create -f environment.yml
 conda activate ctcf
 ```
 
+## Datasets
+
+Both datasets are used in their `.pkl`-format preprocessed versions
+redistributed by the [TransMorph project][transmorph-repo]:
+
+- **OASIS** — Learn2Reg 2021 Task 3 preprocessing (skull stripping, bias-field
+  correction, affine alignment to MNI 152, FreeSurfer segmentation of 35
+  labels). Download via TransMorph's [OASIS page][transmorph-oasis] (~1.3 GB).
+- **IXI** — FreeSurfer-segmented T1 volumes (30 anatomical labels) with a
+  template atlas from CycleMorph. Redistributed under CC BY-SA 3.0 Unported.
+  Download via TransMorph's [IXI page][transmorph-ixi].
+
+Both datasets come preprocessed to 160×192×224.
+
+If you use these data, please cite:
+
+- **OASIS:** Marcus et al., *J. Cogn. Neurosci.* 19:1498–1507 (2007);
+  Hoopes et al., *IPMI 2021* (preprocessing / HyperMorph release).
+- **IXI:** the IXI consortium at <https://brain-development.org/ixi-dataset/>.
+- **TransMorph** (for both `.pkl` distributions): Chen et al., *Med. Image
+  Anal.* 82:102615 (2022).
+- **CycleMorph** (IXI atlas): Kim et al., *Med. Image Anal.* 71:102036 (2021).
+
+[transmorph-repo]: https://github.com/junyuchen245/TransMorph_Transformer_for_Medical_Image_Registration
+[transmorph-oasis]: https://github.com/junyuchen245/TransMorph_Transformer_for_Medical_Image_Registration/blob/main/OASIS/TransMorph_on_OASIS.md
+[transmorph-ixi]: https://github.com/junyuchen245/TransMorph_Transformer_for_Medical_Image_Registration/blob/main/IXI/TransMorph_on_IXI.md
+
+## Path Configuration
+
+All training and inference scripts read dataset locations from the `PATHS` dict
+in [experiments/core/train_runtime.py](experiments/core/train_runtime.py).
+Before running anything, open that file and edit profile `1` so that the
+`train_dir`, `val_dir`, `test_dir` (IXI only), and `atlas_path` (IXI only) keys
+point to your local OASIS / IXI data roots. Every command below uses the `--1`
+flag to select this profile.
+
+## Pretrained Checkpoints
+
+Pretrained weights for CTCF and both baselines on both datasets are hosted on
+Zenodo: **[10.5281/zenodo.19665292](https://doi.org/10.5281/zenodo.19665292)**
+(record page: <https://zenodo.org/records/19665292>).
+
+The bundle is split into three archives — one per model family (`CTCF`,
+`TM-DCA`, `UTSRMorph`). Download all three and extract them into a common
+parent directory; each archive contributes one model subtree to a shared
+`Checkpoints/` root, yielding:
+
+```
+Checkpoints/
+├── CTCF/
+│   ├── OASIS/best.pth
+│   └── IXI/best.pth
+├── TM-DCA/
+│   ├── OASIS/best.pth
+│   └── IXI/best.pth
+└── UTSRMorph/
+    ├── OASIS/best.pth
+    └── IXI/best.pth
+```
+
+All inference commands below assume this layout; if you place `Checkpoints/`
+elsewhere, just pass the appropriate path via `--ckpt`.
+
 ## Quick Start
 
 ### Training
 
 ```bash
-# CTCF (local paths profile --1)
+# CTCF
 python -m experiments.train_CTCF --ds OASIS --1
 python -m experiments.train_CTCF --ds IXI --1
 
@@ -81,14 +144,66 @@ python -m experiments.train_TransMorphDCA --ds OASIS --1
 python -m experiments.train_UTSRMorph --ds OASIS --1
 ```
 
-### Inference
+### Inference — Reproducing the Paper Metrics
+
+**CTCF (ours):**
 
 ```bash
-python -m experiments.inference \
-  --model ctcf \
-  --ckpt results/CTCF/ckpt/best.pth \
-  --ds OASIS --1
+# OASIS — 19 test pairs
+python -m experiments.inference --model ctcf \
+  --ckpt Checkpoints/CTCF/OASIS/best.pth \
+  --ds OASIS --1 --hd95
+
+# IXI — 115 test subjects
+python -m experiments.inference --model ctcf \
+  --ckpt Checkpoints/CTCF/IXI/best.pth \
+  --ds IXI --1 --use_test --hd95
 ```
+
+**TransMorph-DCA:**
+
+```bash
+python -m experiments.inference --model tm-dca \
+  --ckpt Checkpoints/TM-DCA/OASIS/best.pth \
+  --ds OASIS --1 --hd95
+
+python -m experiments.inference --model tm-dca \
+  --ckpt Checkpoints/TM-DCA/IXI/best.pth \
+  --ds IXI --1 --use_test --hd95
+```
+
+**UTSRMorph** (the config key differs between OASIS and IXI):
+
+```bash
+python -m experiments.inference --model utsrmorph \
+  --ckpt Checkpoints/UTSRMorph/OASIS/best.pth \
+  --ds OASIS --1 --hd95 --utsr_config UTSRMorph-Large
+
+python -m experiments.inference --model utsrmorph \
+  --ckpt Checkpoints/UTSRMorph/IXI/best.pth \
+  --ds IXI --1 --use_test --hd95 --utsr_config UTSRMorph-IXI-Large
+```
+
+Per-case metrics are written to
+`results/infer/<DS>/<model>/best/per_case.csv`, and aggregate mean±std to
+`summary.json` alongside it.
+
+### Cross-Dataset Zero-Shot (Table 6 in paper)
+
+```bash
+bash tools/run_cross_inference.sh --paths-profile 1 --gpu 0
+```
+
+### Common Inference Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--ds OASIS` / `--ds IXI` | Dataset selector |
+| `--use_test` | IXI only — evaluate on the 115-subject test split instead of the 58-subject val split |
+| `--hd95` | Add HD95 to the reported metrics (Dice and SDlogJ / Fold% are always computed) |
+| `--utsr_config` | `UTSRMorph-Large` for OASIS, `UTSRMorph-IXI-Large` for IXI |
+| `--save_pngs` | Save qualitative preview PNGs |
+| `--save_flow` | Save the predicted flow fields as compressed `.npz` |
 
 ### Ablation Experiments
 
@@ -96,13 +211,13 @@ All ablation rounds from the paper can be reproduced with a single script:
 
 ```bash
 # Run a specific round
-bash tools/run_ablation.sh R1 --data-dir /data --gpu 0
+bash tools/ablation.sh R1 --gpu 0
 
 # Run all rounds sequentially
-bash tools/run_ablation.sh all --paths-profile 3
+bash tools/ablation.sh all
 ```
 
-Rounds: 
+Rounds:
 - R1 (loss/strategy),
 - R2 (L3 tuning),
 - R3 (L1 capacity),
@@ -122,7 +237,6 @@ Rounds:
 | `--l3_base_ch` | 64 | Level 3 base channels |
 | `--l3_error_mode` | ncc | Error map: `absdiff`, `gradmag`, or `ncc` |
 | `--time_steps` | 6 | L2 integration steps |
-| `--1` / `--2` / `--3` | - | Path profile (local/alt/remote) |
 
 ## Project Structure
 

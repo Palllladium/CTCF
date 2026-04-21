@@ -17,8 +17,8 @@ Thumbs.db
 # Local project docs
 CLAUDE.md
 tools/paper/
+paper/
 /main.tex
-/Comments.txt
 
 # Runtime outputs
 logs/

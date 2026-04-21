@@ -24,13 +24,17 @@ from utils import (
 
 
 def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, *, strict: bool) -> None:
-    """Load checkpoint weights into model with strict/non-strict key matching."""
+    """Load checkpoint weights with strict matching; on mismatch, auto-fall back to tolerant load with a warning."""
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt.get("state_dict", ckpt.get("model", ckpt)) if isinstance(ckpt, dict) else ckpt
 
     if strict:
-        model.load_state_dict(sd, strict=True)
-        return
+        try:
+            model.load_state_dict(sd, strict=True)
+            return
+        except RuntimeError as e:
+            print(f"[WARN] Strict checkpoint load failed: {e}")
+            print("[WARN] Falling back to tolerant load. Pass --strict_ckpt 0 to silence this warning.")
 
     missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing: print(f"[WARN] Missing keys: {len(missing)} (first 10): {missing[:10]}")
