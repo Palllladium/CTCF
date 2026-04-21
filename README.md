@@ -2,7 +2,7 @@
 
 A three-level coarse-to-fine cascade framework for unsupervised deformable 3D medical image registration.
 
-**Preliminary work:** [CTCF: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration](https://doi.org/10.1109/ElCon-CN69892.2026.11414003) — ElCon-CN 2026, pp. 120-127.
+**Paper (preprint):** [CTCF: A Three-Level Coarse-to-Fine Cascade for Unsupervised Deformable Medical Image Registration](https://doi.org/10.20944/preprints202604.0580.v1) — Preprints.org, 2026.
 
 **Pretrained checkpoints:** [10.5281/zenodo.19665292](https://doi.org/10.5281/zenodo.19665292) — CTCF and both baselines on OASIS + IXI.
 
@@ -285,10 +285,24 @@ tools/
 
 ## Citation
 
+Main paper (preprint):
+
 ```bibtex
-@inproceedings{pasenko2026ctcf,
+@article{pasenko2026ctcf,
+  author  = {Pasenko, Daniil V. and Davydov, Roman},
+  title   = {{CTCF}: A Three-Level Coarse-to-Fine Cascade for Unsupervised Deformable Medical Image Registration},
+  journal = {Preprints},
+  year    = {2026},
+  doi     = {10.20944/preprints202604.0580.v1}
+}
+```
+
+Earlier conference version (ElCon-CN 2026):
+
+```bibtex
+@inproceedings{pasenko2026ctcf_elcon,
   author    = {Pasenko, Daniil V.},
-  title     = {CTCF: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration},
+  title     = {{CTCF}: Cascaded Transformer with Cross-Attention and Super-Resolution for Unsupervised Medical Image Registration},
   booktitle = {2026 ElCon Conference of Young Researchers (ElCon-CN)},
   pages     = {120--127},
   year      = {2026},
