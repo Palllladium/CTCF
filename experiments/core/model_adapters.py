@@ -130,6 +130,98 @@ class CtcfAdapter(ModelAdapter):
         return flow.float()
 
 
+class LkuNetAdapter(ModelAdapter):
+    key = "lkunet"
+
+    def build(self, *, config_key: str = "LKU-8", img_size: Tuple[int, int, int] = (160, 192, 224)) -> torch.nn.Module:
+        from models.LKUNet.configs import CONFIGS
+        from models.LKUNet.wrapper import LkuNetSolo
+
+        cfg = deepcopy(CONFIGS[config_key])
+        model = LkuNetSolo(
+            vol_size=img_size,
+            in_channel=cfg["in_channel"],
+            n_classes=cfg["n_classes"],
+            start_channel=cfg["start_channel"],
+        )
+        model.cfg = cfg
+        return model
+
+    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
+        """Inference forward: returns flow in VOXEL units, channel-first (B, 3, D, H, W).
+
+        LKU-Net's UNet emits Softsign-bounded normalized flow ([-1, 1]); we scale
+        per axis to convert to the voxel-unit convention used by downstream
+        Dice/Jacobian/HD95 metrics in this repo.
+        """
+        use_amp = bool(amp and torch.cuda.is_available())
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            flow_normalized = model.unet(x, y)
+        flow_normalized = flow_normalized.float()
+        d, h, w = flow_normalized.shape[-3:]
+        scale = torch.tensor(
+            [(d - 1) / 2.0, (h - 1) / 2.0, (w - 1) / 2.0],
+            device=flow_normalized.device,
+            dtype=flow_normalized.dtype,
+        ).view(1, 3, 1, 1, 1)
+        return flow_normalized * scale
+
+
+class EfficientMorphAdapter(ModelAdapter):
+    key = "efficientmorph"
+
+    def build(self, *, config_key: str = "EfficientMorph_2x3_2") -> torch.nn.Module:
+        from models.EfficientMorph.wrapper import EfficientMorphSolo
+
+        model = EfficientMorphSolo(config_key=config_key)
+        model.cfg = model.cfg
+        return model
+
+    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
+        use_amp = bool(amp and torch.cuda.is_available())
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            _, flow = model(x, y)
+        return flow.float()
+
+
+class MambaMorphAdapter(ModelAdapter):
+    key = "mambamorph"
+
+    def build(self, *, config_key: str = "MambaMorph", diffeomorphic: bool = True) -> torch.nn.Module:
+        from models.MambaMorph.wrapper import MambaMorphSolo
+
+        model = MambaMorphSolo(config_key=config_key, diffeomorphic=diffeomorphic)
+        model.cfg = model.cfg
+        return model
+
+    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
+        # MambaMorph's mamba_ssm CUDA kernel often fails under autocast fp16,
+        # and the upstream code force-casts to fp32 inside the SSM block. So
+        # we run inference in fp32 by default for stability.
+        _ = amp  # unused
+        with torch.autocast(device_type="cuda", enabled=False):
+            _, flow = model(x, y)
+        return flow.float()
+
+
+class VMambaMorphAdapter(ModelAdapter):
+    key = "vmambamorph"
+
+    def build(self, *, config_key: str = "VMambaMorph") -> torch.nn.Module:
+        from models.VMambaMorph.wrapper import VMambaMorphSolo
+
+        model = VMambaMorphSolo(config_key=config_key)
+        model.cfg = model.cfg
+        return model
+
+    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
+        # selective_scan_fn requires fp32 inputs.
+        _ = amp
+        with torch.autocast(device_type="cuda", enabled=False):
+            _, flow = model(x, y)
+        return flow.float()
+
+
 def get_model_adapter(name: str) -> ModelAdapter:
     """Resolve adapter by model name."""
     key = name.strip().lower()
@@ -137,4 +229,8 @@ def get_model_adapter(name: str) -> ModelAdapter:
         case "tm-dca": return TmDcaAdapter()
         case "utsrmorph": return UtsrMorphAdapter()
         case "ctcf": return CtcfAdapter()
+        case "lkunet": return LkuNetAdapter()
+        case "efficientmorph": return EfficientMorphAdapter()
+        case "mambamorph": return MambaMorphAdapter()
+        case "vmambamorph": return VMambaMorphAdapter()
         case _: raise ValueError(f"Unknown model: {name}")
