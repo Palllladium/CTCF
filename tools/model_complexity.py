@@ -1,7 +1,7 @@
 """
 Model complexity report for the paper: params, FLOPs, peak VRAM, inference throughput.
 
-Reports one line per (model, config_key) pair at the OASIS/IXI input shape (160,192,224).
+Reports one line per (model, config_key) pair at the OASIS/IXI input shape (160, 192, 224).
 
 Usage:
   python tools/model_complexity.py --gpu 0
@@ -9,6 +9,8 @@ Usage:
 
 Notes:
   - FLOPs use thop if installed, otherwise fvcore if installed, otherwise reported as "n/a".
+    For backbones with custom CUDA kernels (Mamba's selective_scan), the reported FLOPs
+    UNDER-COUNT the work done by those kernels (the counter only sees standard torch ops).
   - Peak VRAM is measured via torch.cuda.max_memory_allocated during a no-grad forward pass.
   - Throughput averages `iters` forward passes after `warmup` warmup passes.
 """
@@ -20,18 +22,30 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from experiments.core.model_adapters import get_model_adapter
 
 
 MODELS = [
-    ("ctcf",      "CTCF-CascadeA"),
-    ("tm-dca",    "TransMorph-3-LVL"),
-    ("utsrmorph", "UTSRMorph-Large"),
-    ("utsrmorph", "UTSRMorph-IXI-Large"),
+    # Paper 1 lineup
+    ("ctcf",           "CTCF-CascadeA"),
+    ("tm-dca",         "TransMorph-3-LVL"),
+    ("utsrmorph",      "UTSRMorph-Large"),
+    ("utsrmorph",      "UTSRMorph-IXI-Large"),
+    # Phase 6 backbones
+    ("lkunet",         "LKU-4"),
+    ("lkunet",         "LKU-8"),
+    ("efficientmorph", "EfficientMorph_2x3_2_hires"),
+    ("mambamorph",     "MambaMorph"),
+    ("vmambamorph",    "VMambaMorph"),
 ]
 
 INPUT_SHAPE = (1, 1, 160, 192, 224)
+
+# Models whose forward returns (warped, flow) directly via forward(mov, fix).
+# Used by both try_flops and the inference path of the adapter.
+_PAIR_OUTPUT_MODELS = {"lkunet", "efficientmorph", "mambamorph", "vmambamorph"}
 
 
 def count_params(model: torch.nn.Module) -> tuple[int, int]:
@@ -40,65 +54,58 @@ def count_params(model: torch.nn.Module) -> tuple[int, int]:
     return total, trainable
 
 
-def try_flops(model, x, y, model_name: str) -> str:
-    """Return GFLOPs as string, or 'n/a' if no counter is available / fails."""
+class _FlopWrapped(torch.nn.Module):
+    """Adapter-agnostic wrapper that exposes a forward(mov, fix) -> flow signature
+    so FLOPs counters (thop / fvcore) see a single, well-defined forward path."""
+    def __init__(self, inner: torch.nn.Module, name: str):
+        super().__init__()
+        self.inner = inner
+        self.name = name
+
+    def forward(self, xx, yy):
+        if self.name == "ctcf":
+            _, flow = self.inner(xx, yy, return_all=False, alpha_l1=1.0)
+            return flow
+        if self.name == "tm-dca":
+            return self.inner((F.avg_pool3d(xx, 2), F.avg_pool3d(yy, 2)))
+        if self.name == "utsrmorph":
+            _, flow = self.inner(torch.cat((xx, yy), dim=1))
+            return flow
+        if self.name in _PAIR_OUTPUT_MODELS:
+            _, flow = self.inner(xx, yy)
+            return flow
+        raise ValueError(f"Unknown model_name: {self.name}")
+
+
+def try_flops(model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, model_name: str) -> str:
+    """Return GFLOPs as a string ('xx.xx') or 'n/a' if no counter is available / fails.
+
+    For Mamba-based models, the counter under-counts the selective_scan_fn CUDA kernel
+    (it is invisible to thop/fvcore hooks). Treat reported numbers as a lower bound.
+    """
+    wrapped = _FlopWrapped(model, model_name)
+
     try:
         from thop import profile  # type: ignore
-
-        def _wrap_forward(m, xx, yy):
-            if model_name == "ctcf":
-                _, flow = m(xx, yy, return_all=False, alpha_l1=1.0)
-                return flow
-            if model_name == "tm-dca":
-                import torch.nn.functional as F
-                return m((F.avg_pool3d(xx, 2), F.avg_pool3d(yy, 2)))
-            if model_name == "utsrmorph":
-                _, flow = m(torch.cat((xx, yy), dim=1))
-                return flow
-            raise ValueError(model_name)
-
-        class Wrapped(torch.nn.Module):
-            def __init__(self, inner, name):
-                super().__init__()
-                self.inner = inner
-                self.name = name
-            def forward(self, xx, yy):
-                return _wrap_forward(self.inner, xx, yy)
-
-        w = Wrapped(model, model_name)
-        macs, _ = profile(w, inputs=(x, y), verbose=False)
-        gflops = 2.0 * macs / 1e9  # MACs -> FLOPs
-        return f"{gflops:.2f}"
+        macs, _ = profile(wrapped, inputs=(x, y), verbose=False)
+        return f"{2.0 * macs / 1e9:.2f}"
     except Exception:
         pass
 
     try:
         from fvcore.nn import FlopCountAnalysis  # type: ignore
-
-        class Wrapped(torch.nn.Module):
-            def __init__(self, inner, name):
-                super().__init__()
-                self.inner = inner
-                self.name = name
-            def forward(self, xx, yy):
-                if self.name == "ctcf":
-                    _, flow = self.inner(xx, yy, return_all=False, alpha_l1=1.0)
-                    return flow
-                if self.name == "tm-dca":
-                    import torch.nn.functional as F
-                    return self.inner((F.avg_pool3d(xx, 2), F.avg_pool3d(yy, 2)))
-                _, flow = self.inner(torch.cat((xx, yy), dim=1))
-                return flow
-
-        w = Wrapped(model, model_name)
-        f = FlopCountAnalysis(w, (x, y)).unsupported_ops_warnings(False).uncalled_modules_warnings(False)
+        f = (
+            FlopCountAnalysis(wrapped, (x, y))
+            .unsupported_ops_warnings(False)
+            .uncalled_modules_warnings(False)
+        )
         return f"{f.total() / 1e9:.2f}"
     except Exception:
         return "n/a"
 
 
 def measure_peak_vram(adapter, model, x, y, device) -> float:
-    """Peak VRAM in GB over a single no-grad forward (AMP fp16)."""
+    """Peak VRAM in GB over a single no-grad forward (per-adapter AMP setting)."""
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.synchronize(device)
     with torch.no_grad():
@@ -127,7 +134,7 @@ def main() -> None:
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--out", type=str, default="results/model_complexity.csv")
-    ap.add_argument("--skip-flops", action="store_true", help="Skip FLOPs counting (thop can be slow).")
+    ap.add_argument("--skip-flops", action="store_true", help="Skip FLOPs counting (thop can be slow on large models).")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -141,13 +148,20 @@ def main() -> None:
     for model_name, config_key in MODELS:
         print(f"\n=== {model_name} | {config_key} ===")
         adapter = get_model_adapter(model_name)
-        build_kwargs = {"config_key": config_key}
+        build_kwargs: dict = {"config_key": config_key}
         if model_name in ("ctcf", "tm-dca"):
             build_kwargs["time_steps"] = 12
 
-        # Free up memory between runs
         torch.cuda.empty_cache()
-        model = adapter.build(**build_kwargs).to(device).eval()
+        try:
+            model = adapter.build(**build_kwargs).to(device).eval()
+        except Exception as exc:
+            print(f"  BUILD FAILED: {type(exc).__name__}: {exc}")
+            rows.append([
+                model_name, config_key, "n/a", "n/a", "n/a", "n/a", "n/a", "n/a",
+            ])
+            continue
+
         total, trainable = count_params(model)
         print(f"  params total    : {total/1e6:.2f} M")
         print(f"  params trainable: {trainable/1e6:.2f} M")
@@ -183,7 +197,6 @@ def main() -> None:
         w.writerows(rows)
     print(f"\n[SAVED] {out_path}")
 
-    # Also emit JSON for reuse
     json_path = out_path.with_suffix(".json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump([dict(zip(header, r)) for r in rows], f, indent=2)
