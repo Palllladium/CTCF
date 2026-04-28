@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-# Unified ablation runner for CTCF.
-# Reproduces all ablation experiments from the paper (Rounds 1-5).
+# Unified ablation runner for CTCF (Swin-DCA backbone).
+# Reproduces all ablation experiments from Paper 1 (Rounds 1-5) plus R6.
+#
+# HISTORICAL — all rounds below have already been completed for Paper 1.
+# Results are documented in memory/ablation_data_r1_r5.md.
+# After the Phase 6 code cleanup (2026-04), several CLI flags referenced by
+# entries here were removed (l3_compose, l3_gate, l3_cab, l3_context, l1_cab,
+# prealign_encoder, learned_upsample, l2_l3_skip, l1_l2_skip). Those specific
+# entries will fail with argparse errors if rerun. Reference git history for
+# the original code state if a particular re-run is genuinely needed.
 #
 # Usage:
 #   bash tools/run_ablation.sh <round> [options]

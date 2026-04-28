@@ -38,25 +38,14 @@ def get_CTCF_config():
     c.use_level3 = True
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
-    c.prealign_encoder = False
 
-    # GEN2 enhancements (architectural)
+    # Architectural flags:
     c.l3_iters = 1              # Iterative L3: number of refinement passes (1 = default)
-    c.l3_full_res = False       # Run L3 at full-res (160x192x224) instead of half-res
-    c.learned_upsample = False  # Learned flow upsampling instead of trilinear
-    c.l2_l3_skip = False        # Pass L2 decoder features to L3 as skip connection
-    c.l1_half_res = False       # Run L1 at half-res instead of quarter-res
-    c.l2_full_res = False       # Run L2 at full-res (for lightweight backbones like VxM)
-    c.l1_l2_skip = False        # Pass L1 encoder features to L2 conv-skip path
-    c.l3_compose = False        # Use proper flow composition in L3 instead of addition
-    c.l3_svf = False            # Integrate L3 delta as SVF (scaling-and-squaring) → diffeomorphic
-
-    # GEN2.5 enhancements (capacity)
-    c.l3_cab = False            # Channel attention (CAB) in L3 decoder
-    c.l3_context_blocks = 0     # ResidualContext3D blocks in L3 bottleneck
-    c.l3_gate = False           # RefineGate3D spatial gating on L3 delta
     c.l3_unshared = False       # Separate L3 weights per iteration (requires l3_iters>1)
-    c.l1_cab = False            # Channel attention (CAB) in L1 decoder
+    c.l1_half_res = False       # Run L1 at half-res instead of quarter-res
+    c.l2_full_res = False       # Run L2 at full-res (recommended default for new backbones)
+    c.l3_full_res = False       # Legacy: run L3 alone at full-res (Paper 1 R5 reproducibility)
+    c.l3_svf = False            # Integrate L3 delta as SVF (scaling-and-squaring) → diffeomorphic, 0% folds
 
     return c
 
@@ -67,7 +56,6 @@ def get_CTCF_VM_config(*, use_cascade=True):
     c.img_size = (160, 192, 224)
     c.time_steps = 0  # unused by VxmDenseHalf (kept for adapter compatibility)
 
-    # VoxelMorph L2 params (standard VxmDense-2 diffeomorphic)
     c.vxm = ml_collections.ConfigDict()
     c.vxm.enc_nf = [16, 32, 32, 32]
     c.vxm.dec_nf = [32, 32, 32, 32, 32, 16, 16]
@@ -80,25 +68,13 @@ def get_CTCF_VM_config(*, use_cascade=True):
     c.use_level3 = use_cascade
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
-    c.prealign_encoder = False
 
-    # GEN2 enhancements (architectural)
     c.l3_iters = 1
-    c.l3_full_res = False
-    c.learned_upsample = False
-    c.l2_l3_skip = False
+    c.l3_unshared = False
     c.l1_half_res = False
     c.l2_full_res = False
-    c.l1_l2_skip = False
-    c.l3_compose = False
+    c.l3_full_res = False
     c.l3_svf = False
-
-    # GEN2.5 enhancements (capacity)
-    c.l3_cab = False
-    c.l3_context_blocks = 0
-    c.l3_gate = False
-    c.l3_unshared = False
-    c.l1_cab = False
 
     return c
 

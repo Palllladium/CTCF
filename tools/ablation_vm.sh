@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # VoxelMorph ablation runner: Phase 1, Phase 2, Phase 2D (decomposition).
 #
+# HISTORICAL — all phases below have already been completed.
+# Results are documented in:
+#   memory/phase1_results.md
+#   memory/phase2_results.md
+#   memory/phase25_results.md
+# After the Phase 6 code cleanup (2026-04), several CLI flags referenced by
+# entries here were removed (l3_compose, l3_gate, l3_cab, l3_context, l1_cab,
+# prealign_encoder, learned_upsample, l2_l3_skip, l1_l2_skip). Those specific
+# entries will fail with argparse errors if rerun. Reference git history for
+# the original code state if a particular re-run is genuinely needed.
+#
 # Usage:
 #   bash tools/ablation_vm.sh --phase 2 --paths-profile 3 --gpu 0 --max-epoch 100
 #   bash tools/ablation_vm.sh --phase 2.5 --paths-profile 3 --gpu 0 --max-epoch 100
