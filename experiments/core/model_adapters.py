@@ -105,7 +105,7 @@ class CtcfAdapter(ModelAdapter):
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
         use_amp = bool(amp and torch.cuda.is_available())
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = model(x, y, return_all=False, alpha_l1=1.0)
+            _, flow = model(x, y, alpha_l1=1.0)
         return flow.float()
 
 

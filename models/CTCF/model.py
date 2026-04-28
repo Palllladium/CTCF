@@ -110,14 +110,12 @@ class CTCF_CascadeA(nn.Module):
         mov_full: torch.Tensor,
         fix_full: torch.Tensor,
         *,
-        return_all: bool = False,
         alpha_l1: float = 1.0,
         alpha_l3: float = 1.0,
     ):
         mov_half = F.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
         fix_half = F.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
 
-        aux = {} if return_all else None
         flow_half_init = None
 
         # Level 1
@@ -130,9 +128,6 @@ class CTCF_CascadeA(nn.Module):
                 fix_quarter = F.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=False)
                 flow_quarter = self.level1(mov_quarter, fix_quarter)
                 flow_half_init = upsample_flow(flow_quarter, scale_factor=2) * float(alpha_l1)
-
-            if aux is not None:
-                aux["flow_half_init"] = flow_half_init
 
         if self.l2_full_res:
             flow_l2_init = self._upsample_to_full(flow_half_init) if flow_half_init is not None else None
@@ -150,9 +145,6 @@ class CTCF_CascadeA(nn.Module):
             init_flow_half=flow_l2_init,
             return_all_flows=False,
         )
-
-        if aux is not None:
-            aux["def_half_l2"] = def_half_l2
 
         # Level 3
         flow_half = flow_half_l2
@@ -175,9 +167,6 @@ class CTCF_CascadeA(nn.Module):
 
                 flow_full = flow_full_cur
                 def_full = self.st_full(mov_full, flow_full)
-
-                if return_all:
-                    return def_full, flow_full, aux
                 return def_full, flow_full
             else:
                 def_cur = def_half_l2
@@ -192,13 +181,9 @@ class CTCF_CascadeA(nn.Module):
                         def_cur = self.st_half(mov_half, flow_cur)
 
                 flow_half = flow_cur
-                if aux is not None:
-                    aux["flow_half_ref"] = flow_half - flow_half_l2
 
-        if self.l2_full_res: flow_full = flow_half  # L2 output already full-res
+        if self.l2_full_res: flow_full = flow_half
         else: flow_full = self._upsample_to_full(flow_half)
         def_full = self.st_full(mov_full, flow_full)
 
-        if return_all:
-            return def_full, flow_full, aux
         return def_full, flow_full

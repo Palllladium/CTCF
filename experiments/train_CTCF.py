@@ -53,18 +53,12 @@ class Runner:
         self._val_alpha_l1 = 0.0 if int(getattr(args, 'disable_l1', 0)) else 1.0
         self._val_alpha_l3 = 0.0 if int(getattr(args, 'disable_l3', 0)) else 1.0
 
-        # Phase 2 losses
-        self.l2_full_res = bool(int(getattr(args, 'l2_full_res', 0)))
         self.reg_mode = str(getattr(args, 'reg_mode', 'diffusion'))
         if self.reg_mode == 'dare':
             self.dare_reg = DareDiffusion(beta=float(getattr(args, 'dare_beta', 1.0)))
         elif self.reg_mode == 'elastic':
             self._elastic_mu = float(getattr(args, 'elastic_mu', 1.0))
             self._elastic_lam = float(getattr(args, 'elastic_lam', 1.0))
-        self.w_aux = float(getattr(args, 'w_aux', 0.0))
-        self.w_reg_l1 = float(getattr(args, 'w_reg_l1', 0.0))
-        self.w_reg_l3 = float(getattr(args, 'w_reg_l3', 0.0))
-        self._need_aux = self.w_aux > 0 or self.w_reg_l1 > 0 or self.w_reg_l3 > 0
 
 
     @staticmethod
@@ -81,7 +75,7 @@ class Runner:
     def _forward_flow(self, x, y):
         use_amp = torch.cuda.is_available()
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            _, flow = self.model(x, y, return_all=False,
+            _, flow = self.model(x, y,
                                 alpha_l1=self._val_alpha_l1,
                                 alpha_l3=self._val_alpha_l3)
         return flow.float()
@@ -101,28 +95,16 @@ class Runner:
 
         schedule_max_epoch = int(args.schedule_max_epoch) if int(getattr(args, "schedule_max_epoch", 0)) > 0 else int(args.max_epoch)
         alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=int(epoch), max_epoch=schedule_max_epoch)
-        if args.l1_from_start:
-            alpha_l1 = 1.0
-        if args.disable_l1:
-            alpha_l1 = 0.0
-        if args.disable_l3:
-            alpha_l3 = 0.0
+        if args.l1_from_start: alpha_l1 = 1.0
+        if args.disable_l1: alpha_l1 = 0.0
+        if args.disable_l3: alpha_l3 = 0.0
         self._val_alpha_l1 = alpha_l1
         self._val_alpha_l3 = alpha_l3
         W_icon = float(args.w_icon) * warm
         W_jac = float(args.w_jac) * warm
 
-        need_all = self._need_aux
-        out_xy = self.model(x, y, return_all=need_all, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
-        out_yx = self.model(y, x, return_all=need_all, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
-
-        if need_all:
-            def_xy, flow_xy, aux_xy = out_xy
-            def_yx, flow_yx, aux_yx = out_yx
-        else:
-            def_xy, flow_xy = out_xy
-            def_yx, flow_yx = out_yx
-            aux_xy = aux_yx = {}
+        def_xy, flow_xy = self.model(x, y, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+        def_yx, flow_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
 
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
@@ -131,37 +113,14 @@ class Runner:
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
 
         # Regularization (switchable)
-        if self.reg_mode == 'dare':
-            L_reg = 0.5 * (self.dare_reg(flow_xy) + self.dare_reg(flow_yx)) * args.w_reg
+        if self.reg_mode == 'dare': L_reg = 0.5 * (self.dare_reg(flow_xy) + self.dare_reg(flow_yx)) * args.w_reg
         elif self.reg_mode == 'elastic':
-            L_reg = 0.5 * (elastic_loss(flow_xy, self._elastic_mu, self._elastic_lam) +
-                           elastic_loss(flow_yx, self._elastic_mu, self._elastic_lam)) * args.w_reg
-        else:
-            L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
+            mu = self._elastic_mu
+            lam = self._elastic_lam
+            L_reg = 0.5 * (elastic_loss(flow_xy, mu, lam) + elastic_loss(flow_yx, mu, lam)) * args.w_reg
+        else: L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
 
         loss = L_ncc + L_icon + L_reg + L_jac
-
-        # Cascade-aware per-level regularization
-        L_reg_l1 = L_reg_l3 = torch.tensor(0.0)
-        if self.w_reg_l1 > 0 and "flow_half_init" in aux_xy:
-            L_reg_l1 = 0.5 * (ctx.reg(aux_xy["flow_half_init"]) + ctx.reg(aux_yx["flow_half_init"])) * self.w_reg_l1
-            loss = loss + L_reg_l1
-        if self.w_reg_l3 > 0 and "flow_half_ref" in aux_xy:
-            L_reg_l3 = 0.5 * (ctx.reg(aux_xy["flow_half_ref"]) + ctx.reg(aux_yx["flow_half_ref"])) * self.w_reg_l3
-            loss = loss + L_reg_l3
-
-        # Aux loss: NCC on L2 intermediate output
-        L_aux = torch.tensor(0.0)
-        if self.w_aux > 0 and "def_half_l2" in aux_xy:
-            if self.l2_full_res:
-                aux_tgt_xy, aux_tgt_yx = y, x  # L2 output already full-res
-            else:
-                aux_tgt_xy = torch.nn.functional.interpolate(y, scale_factor=0.5, mode="trilinear", align_corners=False)
-                aux_tgt_yx = torch.nn.functional.interpolate(x, scale_factor=0.5, mode="trilinear", align_corners=False)
-            with torch.autocast(device_type="cuda", enabled=False):
-                L_aux = 0.5 * (ctx.ncc(aux_xy["def_half_l2"].float(), aux_tgt_xy.float()) +
-                               ctx.ncc(aux_yx["def_half_l2"].float(), aux_tgt_yx.float())) * self.w_aux
-            loss = loss + L_aux
 
         logs = {
             "all": loss.item(),
@@ -173,9 +132,6 @@ class Runner:
             "alpha_l3": alpha_l3,
             "warm": warm,
         }
-        if self.w_aux > 0: logs["aux"] = L_aux.item()
-        if self.w_reg_l1 > 0: logs["reg_l1"] = L_reg_l1.item()
-        if self.w_reg_l3 > 0: logs["reg_l3"] = L_reg_l3.item()
 
         if self.is_synth:
             with torch.no_grad():
@@ -221,9 +177,6 @@ def parse_args():
     p.add_argument("--dare_beta", type=float, default=1.0, help="DARE beta: controls adaptive weighting strength.")
     p.add_argument("--elastic_mu", type=float, default=1.0, help="ElasticMorph mu (shear modulus).")
     p.add_argument("--elastic_lam", type=float, default=1.0, help="ElasticMorph lambda (Lame first parameter).")
-    p.add_argument("--w_aux", type=float, default=0.0, help="Auxiliary NCC loss on L2 intermediate output (0=disabled).")
-    p.add_argument("--w_reg_l1", type=float, default=0.0, help="Extra diffusion reg on L1 flow (cascade-aware, 0=disabled).")
-    p.add_argument("--w_reg_l3", type=float, default=0.0, help="Extra diffusion reg on L3 delta (cascade-aware, 0=disabled).")
 
     p.add_argument("--synth_train_samples", type=int, default=256, help="Number of synthetic training pairs.")
     p.add_argument("--synth_val_samples", type=int, default=32, help="Number of synthetic validation pairs.")

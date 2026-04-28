@@ -64,7 +64,7 @@ class _FlopWrapped(torch.nn.Module):
 
     def forward(self, xx, yy):
         if self.name == "ctcf":
-            _, flow = self.inner(xx, yy, return_all=False, alpha_l1=1.0)
+            _, flow = self.inner(xx, yy, alpha_l1=1.0)
             return flow
         if self.name == "tm-dca":
             return self.inner((F.avg_pool3d(xx, 2), F.avg_pool3d(yy, 2)))
