@@ -73,18 +73,18 @@ class VxmDenseHalf(nn.Module):
         self,
         mov_half: torch.Tensor,
         fix_half: torch.Tensor,
-        init_flow_half=None,
+        init_flow=None,
         return_all_flows: bool = False,
         l1_feat=None,
         return_features: bool = False,
     ):
-        if init_flow_half is not None: mov_warped = self.spatial_transform(mov_half, init_flow_half)
+        if init_flow is not None: mov_warped = self.spatial_transform(mov_half, init_flow)
         else: mov_warped = mov_half
 
         _, disp = self.vxm(mov_warped, fix_half)
 
         # Compose flows: total(x) = disp(x) + init(x + disp(x))
-        if init_flow_half is not None: flow_total = disp + self.spatial_transform(init_flow_half, disp)
+        if init_flow is not None: flow_total = disp + self.spatial_transform(init_flow, disp)
         else: flow_total = disp
 
         def_half = self.spatial_transform(mov_half, flow_total)
@@ -97,3 +97,18 @@ class VxmDenseHalf(nn.Module):
             )
             return out + (feat,)
         return out
+
+
+class VxmCascadeL2(VxmDenseHalf):
+    """VoxelMorph as a CTCF Level-2 backbone, built directly from CTCF config."""
+
+    def __init__(self, config):
+        vxm = getattr(config, "vxm", None)
+        l2_full_res = bool(getattr(config, "l2_full_res", False))
+        vol = tuple(config.img_size) if l2_full_res else tuple(s // 2 for s in config.img_size)
+        super().__init__(
+            vol_size=vol,
+            enc_nf=list(vxm.enc_nf) if vxm else [16, 32, 32, 32],
+            dec_nf=list(vxm.dec_nf) if vxm else [32, 32, 32, 32, 32, 16, 16],
+            int_steps=int(vxm.int_steps) if vxm else 7,
+        )

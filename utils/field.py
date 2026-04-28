@@ -26,7 +26,7 @@ def _warp(tensor: torch.Tensor, flow: torch.Tensor, mode: str = "bilinear") -> t
     new_locs[:, 1] = 2.0 * (new_locs[:, 1] / (h - 1) - 0.5)
     new_locs[:, 2] = 2.0 * (new_locs[:, 2] / (w - 1) - 0.5)
     grid_sample_grid = new_locs.permute(0, 2, 3, 4, 1)[..., [2, 1, 0]]
-    return F.grid_sample(tensor, grid_sample_grid, mode=mode, align_corners=False)
+    return F.grid_sample(tensor, grid_sample_grid, mode=mode, align_corners=True)
 
 
 def compose_flows(flow_ab: torch.Tensor, flow_bc: torch.Tensor, mode: str = "bilinear") -> torch.Tensor:

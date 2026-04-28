@@ -13,14 +13,6 @@
 #   - MambaMorph:     NCC + Grad3d L2 on velocity (preint_flow)
 #   - VMambaMorph:    NCC + Grad3d L2 on velocity (preint_flow)
 #
-# Training infrastructure (Adam+amsgrad, lr=1e-4, polynomial LR decay, AMP fp16,
-# single-direction forward) is uniform across backbones.
-#
-# Pre-flight on advisor's machine:
-#   conda activate ctcf
-#   bash tools/install_mamba.sh   # installs mamba_ssm + causal-conv1d + einops
-#                                  # (one-time; ~10-15 min compile)
-#
 # Run all four backbones sequentially:
 #   bash tools/phase6_solo_oasis.sh
 #

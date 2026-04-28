@@ -16,15 +16,17 @@ def _build_level2(config, backbone: str, l2_full_res: bool = False):
     if backbone == "swin-dca":
         return CTCF_DCA_CoreHalf(config, time_steps=config.time_steps)
     elif backbone == "vxm":
-        from models.VoxelMorph.wrapper import VxmDenseHalf
-        vxm = getattr(config, "vxm", None)
-        vol = tuple(config.img_size) if l2_full_res else tuple(s // 2 for s in config.img_size)
-        return VxmDenseHalf(
-            vol_size=vol,
-            enc_nf=list(vxm.enc_nf) if vxm else [16, 32, 32, 32],
-            dec_nf=list(vxm.dec_nf) if vxm else [32, 32, 32, 32, 32, 16, 16],
-            int_steps=int(vxm.int_steps) if vxm else 7,
-        )
+        from models.VoxelMorph.wrapper import VxmCascadeL2
+        return VxmCascadeL2(config)
+    elif backbone == "lku":
+        from models.LKUNet.wrapper import LkuNetCascadeL2
+        return LkuNetCascadeL2(config)
+    elif backbone == "mamba":
+        from models.MambaMorph.wrapper import MambaMorphCascadeL2
+        return MambaMorphCascadeL2(config)
+    elif backbone == "vmamba":
+        from models.VMambaMorph.wrapper import VMambaMorphCascadeL2
+        return VMambaMorphCascadeL2(config)
     else:
         raise ValueError(f"Unknown backbone: {backbone}")
 
@@ -139,21 +141,21 @@ class CTCF_CascadeA(nn.Module):
         if self.level2 is None:
             raise RuntimeError("CTCF_CascadeA requires level2 enabled (use_level2=True).")
 
-        def_half_l2, flow_half_l2 = self.level2(
+        def_l2, flow_l2 = self.level2(
             l2_mov, l2_fix,
-            init_flow_half=flow_l2_init,
+            init_flow=flow_l2_init,
             return_all_flows=False,
         )
 
         # Level 3
-        flow_half = flow_half_l2
+        flow_l2_current = flow_l2
         if self.level3 is not None and alpha_l3 > 0.0:
             if self.l3_full_res or self.l2_full_res:
                 if self.l2_full_res:
-                    flow_full_cur = flow_half_l2   # already full-res
-                    def_full_cur = def_half_l2
+                    flow_full_cur = flow_l2   # already full-res
+                    def_full_cur = def_l2
                 else:
-                    flow_full_cur = self._upsample_to_full(flow_half_l2)
+                    flow_full_cur = self._upsample_to_full(flow_l2)
                     def_full_cur = self.st_full(mov_full, flow_full_cur)
 
                 for it in range(self.l3_iters):
@@ -168,8 +170,8 @@ class CTCF_CascadeA(nn.Module):
                 def_full = self.st_full(mov_full, flow_full)
                 return def_full, flow_full
             else:
-                def_cur = def_half_l2
-                flow_cur = flow_half_l2
+                def_cur = def_l2
+                flow_cur = flow_l2
 
                 for it in range(self.l3_iters):
                     l3_mod = self._get_l3(it)
@@ -179,10 +181,10 @@ class CTCF_CascadeA(nn.Module):
                     if it < self.l3_iters - 1:
                         def_cur = self.st_half(mov_half, flow_cur)
 
-                flow_half = flow_cur
+                flow_l2_current = flow_cur
 
-        if self.l2_full_res: flow_full = flow_half
-        else: flow_full = self._upsample_to_full(flow_half)
+        if self.l2_full_res: flow_full = flow_l2_current
+        else: flow_full = self._upsample_to_full(flow_l2_current)
         def_full = self.st_full(mov_full, flow_full)
 
         return def_full, flow_full

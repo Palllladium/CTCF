@@ -129,14 +129,14 @@ class CTCF_DCA_CoreHalf(nn.Module):
         self,
         mov_half: torch.Tensor,
         fix_half: torch.Tensor,
-        init_flow_half: Optional[torch.Tensor] = None,
+        init_flow: Optional[torch.Tensor] = None,
         return_all_flows: bool = False,
     ):
-        if init_flow_half is None:
+        if init_flow is None:
             flow_prev = torch.zeros((mov_half.shape[0], 3, *self.img_size), device=mov_half.device, dtype=mov_half.dtype)
             def_x = mov_half
         else:
-            flow_prev = init_flow_half
+            flow_prev = init_flow
             def_x = self.spatial_trans(mov_half, flow_prev)
 
         x_cat = torch.cat((mov_half, fix_half), dim=1)
