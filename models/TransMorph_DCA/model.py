@@ -9,8 +9,6 @@ import torch.utils.checkpoint as checkpoint
 from torch.distributions.normal import Normal
 from timm.layers import DropPath, trunc_normal_, to_3tuple
 
-import models.TransMorph_DCA.configs as configs
-
 
 class LayerNormProxy(nn.Module):
 
@@ -1212,12 +1210,9 @@ class TransMorphCascadeAd(nn.Module):
                                            pat_merg_rf=config.pat_merg_rf,
                                            img_size=config.img_size,
                                            dwin_size=config.dwin_kernel_size)
-        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0,
-                                use_batchnorm=False)
-        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0,
-                                use_batchnorm=False)  # 384, 20, 20, 64
-        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0,
-                                use_batchnorm=False)  # 384, 20, 20, 64
+        self.up0 = DecoderBlock(embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if if_transskip else 0, use_batchnorm=False)
+        self.up1 = DecoderBlock(embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
+        self.up2 = DecoderBlock(embed_dim, embed_dim//2, skip_channels=embed_dim//2 if if_transskip else 0, use_batchnorm=False)  # 384, 20, 20, 64
         self.c1 = Conv3dReLU(2, embed_dim//2, 3, 1, use_batchnorm=False)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
         self.reg_heads = nn.ModuleList()
@@ -1226,8 +1221,7 @@ class TransMorphCascadeAd(nn.Module):
         for t in range(self.time_steps):
             self.cs.append(Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False))
             self.reg_heads.append(RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3, ))
-            self.up3s.append(DecoderBlock(embed_dim//2, config.reg_head_chan, skip_channels=embed_dim // 2 if if_convskip else 0,
-                                   use_batchnorm=False))
+            self.up3s.append(DecoderBlock(embed_dim//2, config.reg_head_chan, skip_channels=embed_dim // 2 if if_convskip else 0, use_batchnorm=False))
         self.spatial_trans = SpatialTransformer(config.img_size)
 
     def forward(self, inputs):
@@ -1267,8 +1261,3 @@ class TransMorphCascadeAd(nn.Module):
         flow = flow_new
 
         return flow
-
-
-CONFIGS = {
-    'TransMorph-3-LVL': configs.get_3DTransMorphDWin3Lvl_config(),
-}

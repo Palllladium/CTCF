@@ -82,12 +82,14 @@ class UNet(nn.Module):
         self.up3 = self._decoder(sc * 2, sc * 2)
         self.up4 = self._decoder(sc * 2, sc * 2)
 
+
     @staticmethod
     def _encoder(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False):
         return nn.Sequential(
             nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias),
             nn.PReLU(),
         )
+
 
     @staticmethod
     def _decoder(in_channels, out_channels, kernel_size=2, stride=2, padding=0, output_padding=0, bias=True):
@@ -97,6 +99,7 @@ class UNet(nn.Module):
             nn.PReLU(),
         )
 
+
     @staticmethod
     def _outputs(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False):
         # Softsign activation bounds the flow to [-1, 1] (normalized grid units).
@@ -104,6 +107,7 @@ class UNet(nn.Module):
             nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias),
             nn.Softsign(),
         )
+
 
     def forward(self, x, y):
         x_in = torch.cat((x, y), 1)

@@ -135,6 +135,11 @@ class InferRunner:
             case "tm-dca": self.model = self.adapter.build(time_steps=int(args.time_steps), config_key=args.tm_config).to(self.device)
             case "utsrmorph": self.model = self.adapter.build(config_key=args.utsr_config).to(self.device)
             case "ctcf": self.model = self.adapter.build(time_steps=int(args.time_steps), config_key=args.ctcf_config).to(self.device)
+            case "voxelmorph": self.model = self.adapter.build(config_key=args.vxm_config).to(self.device)
+            case "lkunet": self.model = self.adapter.build(config_key=args.lku_config).to(self.device)
+            case "efficientmorph": self.model = self.adapter.build(config_key=args.em_config).to(self.device)
+            case "mambamorph": self.model = self.adapter.build(config_key=args.mamba_config, diffeomorphic=bool(int(args.mamba_diffeo))).to(self.device)
+            case "vmambamorph": self.model = self.adapter.build(config_key=args.vmamba_config).to(self.device)
             case _: raise ValueError(f"Unknown model: {args.model}")
 
         if not os.path.isfile(args.ckpt):
@@ -257,7 +262,12 @@ class InferRunner:
 def parse_args():
     p = argparse.ArgumentParser()
     add_common_args(p, mode="infer")
-    p.add_argument("--model", required=True, choices=["tm-dca", "utsrmorph", "ctcf"], help="Model family to run.")
+    p.add_argument(
+        "--model",
+        required=True,
+        choices=["tm-dca", "utsrmorph", "ctcf", "voxelmorph", "lkunet", "efficientmorph", "mambamorph", "vmambamorph"],
+        help="Model family to run.",
+    )
     p.add_argument("--ckpt", required=True, help="Path to model checkpoint (.pth).")
     p.add_argument("--strict_ckpt", type=int, choices=[0, 1], default=1, help="Strict checkpoint key matching (1) or tolerant load (0).")
     
@@ -275,6 +285,12 @@ def parse_args():
     p.add_argument("--tm_config", type=str, default="TransMorph-3-LVL", help="TransMorph-DCA config key.")
     p.add_argument("--utsr_config", type=str, default="UTSRMorph-Large", help="UTSRMorph config key.")
     p.add_argument("--ctcf_config", type=str, default="CTCF-CascadeA", help="CTCF config key.")
+    p.add_argument("--vxm_config", type=str, default="VxmDense", help="VoxelMorph config key.")
+    p.add_argument("--lku_config", type=str, default="LKU-8", help="LKU-Net config key.")
+    p.add_argument("--em_config", type=str, default="EfficientMorph_2x3_2_hires", help="EfficientMorph config key.")
+    p.add_argument("--mamba_config", type=str, default="MambaMorph", help="MambaMorph config key.")
+    p.add_argument("--mamba_diffeo", type=int, choices=[0, 1], default=1, help="Use diffeomorphic MambaMorph variant.")
+    p.add_argument("--vmamba_config", type=str, default="VMambaMorph", help="VMambaMorph config key.")
     return p.parse_args()
 
 

@@ -5,7 +5,7 @@ from timm.models.layers import DropPath, trunc_normal_, to_3tuple
 from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
 import numpy as np
-from models.EfficientMorph import configs as configs
+
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -16,6 +16,7 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
+
 
     def forward(self, x):
         x = self.fc1(x)
@@ -40,8 +41,6 @@ class EfficientTransformerBlock(nn.Module):
         act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
-
-
     def __init__(self, dim, num_heads,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, rpe=True, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,proj_drop=0., axial_dims = '12',downsample_dims = (40,48,56)):
@@ -73,12 +72,9 @@ class EfficientTransformerBlock(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
 
         self.axial_dim_1, self.axial_dim_2 = int(self.axial_dims[0]),int(self.axial_dims[1])
-        if self.axial_dim_1 in [1, 2] and self.axial_dim_2 in [1, 2]:
-            self.extra_dim  =3
-        elif self.axial_dim_1 in [2, 3] and self.axial_dim_2 in [2, 3]:
-            self.extra_dim  =1
-        else:
-            self.extra_dim = 2
+        if self.axial_dim_1 in [1, 2] and self.axial_dim_2 in [1, 2]: self.extra_dim  =3
+        elif self.axial_dim_1 in [2, 3] and self.axial_dim_2 in [2, 3]: self.extra_dim  =1
+        else: self.extra_dim = 2
     
 
     def forward(self, x, mask_matrix):
@@ -91,7 +87,6 @@ class EfficientTransformerBlock(nn.Module):
         x = x.view(B, H, W, T, C)
 
         x = x.permute(0,self.extra_dim, self.axial_dim_1, self.axial_dim_2, 4).contiguous().view(x.shape[0]*x.shape[self.extra_dim], x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2] , x.shape[4])
-
 
         B_, N, C = x.shape #(B, axial_dim_1*axial_dim_2, C*extra_dim) #1,1920,5376
         qkv = self.qkv(x).permute(1,0,2).contiguous().reshape(1,N,3,self.num_heads, (x.shape[0]* (C//self.num_heads))).permute(2, 0, 3, 1, 4)
@@ -121,7 +116,6 @@ class PatchMerging(nn.Module):
         dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
-
     def __init__(self, dim, norm_layer=nn.LayerNorm, reduce_factor=2):
         super().__init__()
         self.dim = dim
@@ -159,6 +153,7 @@ class PatchMerging(nn.Module):
         x = self.reduction(x)
 
         return x
+
 
 class BasicLayer(nn.Module):
     """ A basic Efficient Transformer layer for one stage.
@@ -212,10 +207,9 @@ class BasicLayer(nn.Module):
             for i in range(depth)])
 
         # patch merging layer
-        if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer, reduce_factor=self.pat_merg_rf)
-        else:
-            self.downsample = None
+        if downsample is not None: self.downsample = downsample(dim=dim, norm_layer=norm_layer, reduce_factor=self.pat_merg_rf)
+        else: self.downsample = None
+
 
     def forward(self, x, H, W, T):
         """ Forward function.
@@ -236,6 +230,7 @@ class BasicLayer(nn.Module):
         else:
             return x, H, W, T, x, H, W, T
 
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     Args:
@@ -244,7 +239,6 @@ class PatchEmbed(nn.Module):
         embed_dim (int): Number of linear projection output channels. Default: 96.
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
-
     def __init__(self, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
         patch_size = to_3tuple(patch_size)
@@ -278,12 +272,14 @@ class PatchEmbed(nn.Module):
             x = x.transpose(1, 2).view(-1, self.embed_dim, Wh, Ww, Wt)
         return x
 
+
 class SinusoidalPositionEmbedding(nn.Module):
     '''
     Rotary Position Embedding
     '''
     def __init__(self,):
         super(SinusoidalPositionEmbedding, self).__init__()
+
 
     def forward(self, x):
         batch_sz, n_patches, hidden = x.shape
@@ -307,6 +303,7 @@ class SinPositionalEncoding3D(nn.Module):
         self.channels = channels
         inv_freq = 1. / (10000 ** (torch.arange(0, channels, 2).float() / channels))
         self.register_buffer('inv_freq', inv_freq, persistent=False)
+
 
     def forward(self, tensor):
         """
@@ -332,6 +329,7 @@ class SinPositionalEncoding3D(nn.Module):
         emb[:,:,:,2*self.channels:] = emb_z
         emb = emb[None,:,:,:,:orig_ch].repeat(batch_size, 1, 1, 1, 1)
         return emb.permute(0, 4, 1, 2, 3)
+
 
 class EfficientTransformer(nn.Module):
     def __init__(self, pretrain_img_size=224,
@@ -421,6 +419,7 @@ class EfficientTransformer(nn.Module):
 
         self._freeze_stages()
 
+
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
@@ -437,6 +436,7 @@ class EfficientTransformer(nn.Module):
                 m.eval()
                 for param in m.parameters():
                     param.requires_grad = False
+
 
     def init_weights(self, pretrained=None):
         """Initialize the weights in backbone.
@@ -460,6 +460,7 @@ class EfficientTransformer(nn.Module):
             self.apply(_init_weights)
         else:
             raise TypeError('pretrained must be a str or None')
+
 
     def forward(self, x):
         """Forward function."""
@@ -488,10 +489,12 @@ class EfficientTransformer(nn.Module):
                 outs.append(out)
         return outs
 
+
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""
         super(EfficientTransformer, self).train(mode)
         self._freeze_stages()
+
 
 class Conv3dReLU(nn.Sequential):
     def __init__(
@@ -512,12 +515,11 @@ class Conv3dReLU(nn.Sequential):
             bias=False,
         )
         relu = nn.LeakyReLU(inplace=True)
-        if not use_batchnorm:
-            nm = nn.InstanceNorm3d(out_channels)
-        else:
-            nm = nn.BatchNorm3d(out_channels)
+        if not use_batchnorm: nm = nn.InstanceNorm3d(out_channels)
+        else: nm = nn.BatchNorm3d(out_channels)
 
         super(Conv3dReLU, self).__init__(conv, nm, relu)
+
 
 class DecoderBlock(nn.Module):
     def __init__(
@@ -552,12 +554,14 @@ class DecoderBlock(nn.Module):
         x = self.conv2(x)
         return x
 
+
 class RegistrationHead(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3, upsampling=1):
         conv3d = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)
         conv3d.weight = nn.Parameter(Normal(0, 1e-5).sample(conv3d.weight.shape))
         conv3d.bias = nn.Parameter(torch.zeros(conv3d.bias.shape))
         super().__init__(conv3d)
+
 
 class SpatialTransformer(nn.Module):
     """
@@ -592,6 +596,7 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs[..., [2, 1, 0]]
 
         return nnf.grid_sample(src, new_locs, align_corners=False, mode=self.mode)
+
 
 class EfficientMorph(nn.Module):
     def __init__(self, config):
@@ -636,6 +641,7 @@ class EfficientMorph(nn.Module):
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
 
+
     def forward(self, x):
         source = x[:, 0:1, :, :]
         if self.if_convskip:
@@ -660,15 +666,3 @@ class EfficientMorph(nn.Module):
             flow = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)(flow)
         out = self.spatial_trans(source, flow)
         return out, flow
-
-
-CONFIGS = {
-    # Light variants (embed_dim=24) — sub-0.2M params, useful as ultra-lightweight baseline
-    'EfficientMorph_2x3_2': configs.get_EM_2x3_2_config(),
-    'EfficientMorph_1x1_2': configs.get_EM_1x1_2_config(),
-    'EfficientMorph_2x3_4': configs.get_EM_2x3_4_config(),
-    'EfficientMorph_1x1_4': configs.get_EM_1x1_4_config(),
-    # Hires variants (embed_dim=96) — match the paper's headline ~2.8M model
-    'EfficientMorph_2x3_2_hires': configs.get_EM_2x3_2_hires_config(),
-    'EfficientMorph_1x1_2_hires': configs.get_EM_1x1_2_hires_config(),
-}

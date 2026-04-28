@@ -1,14 +1,13 @@
 import argparse
-from functools import partial
 
 import torch
 from torch import optim
 
 from datasets.synthetic import build_synth_loaders
 from experiments.core.model_adapters import get_model_adapter
-from experiments.core.train_rules import apply_ctcf_dataset_defaults
-from experiments.core.train_runtime import Ctx, add_common_args, loaders_baseline, run_train
+from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
 from utils import RegisterModel, ctcf_schedule, dice_val, icon_loss, neg_jacobian_penalty, setup_device, DareDiffusion, elastic_loss
+from models.CTCF.configs import CONFIGS
 
 
 class Runner:
@@ -35,7 +34,6 @@ class Runner:
             l1_base_ch=getattr(args, 'l1_base_ch', None),
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
-            # Architectural flags (kept after Phase 6 cleanup)
             l3_iters=getattr(args, 'l3_iters', None),
             l3_unshared=True if int(getattr(args, 'l3_unshared', 0)) else None,
             l1_half_res=True if int(getattr(args, 'l1_half_res', 0)) else None,
@@ -112,7 +110,6 @@ class Runner:
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
 
-        # Regularization (switchable)
         if self.reg_mode == 'dare': L_reg = 0.5 * (self.dare_reg(flow_xy) + self.dare_reg(flow_yx)) * args.w_reg
         elif self.reg_mode == 'elastic':
             mu = self._elastic_mu
@@ -146,7 +143,7 @@ def parse_args():
     add_common_args(p, include_synth=True)
     p.set_defaults(exp="CTCF")
 
-    p.add_argument("--config", type=str, default="CTCF-CascadeA", help="Model config key.")
+    p.add_argument("--config", type=str, default="CTCF-CascadeA", choices=list(CONFIGS.keys()), help="Model config key.")
     p.add_argument("--time_steps", type=int, default=6, help="Number of velocity integration steps.")
     p.add_argument("--schedule_max_epoch", type=int, default=0, help="If >0, uses this epoch horizon for CTCF stage schedule (alpha/warm), independent of --max_epoch.")
     p.add_argument("--use_checkpoint", type=int, choices=[0, 1], default=1, help="Enable gradient checkpointing in Swin blocks.")
@@ -163,15 +160,13 @@ def parse_args():
     p.add_argument("--l3_base_ch", type=int, default=None, help="L3 refiner base channels (default: config value, typically 16).")
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
 
-    # Architectural flags (kept after Phase 6 cleanup)
     p.add_argument("--l3_iters", type=int, default=None, help="Number of L3 refinement iterations (default: 1).")
     p.add_argument("--l3_unshared", type=int, choices=[0, 1], default=0, help="If 1, use separate L3 weights per iteration (requires l3_iters>1).")
     p.add_argument("--l1_half_res", type=int, choices=[0, 1], default=0, help="If 1, run L1 at half-res instead of quarter-res.")
     p.add_argument("--l2_full_res", type=int, choices=[0, 1], default=0, help="If 1, run L2 at full-res (recommended default for new backbones).")
     p.add_argument("--l3_full_res", type=int, choices=[0, 1], default=0, help="Legacy: if 1, run L3 alone at full-res (Paper 1 R5 path).")
-    p.add_argument("--l3_svf", type=int, choices=[0, 1], default=0, help="If 1, integrate L3 delta as SVF via scaling-and-squaring (diffeomorphic L3, 0% folds).")
+    p.add_argument("--l3_svf", type=int, choices=[0, 1], default=0, help="If 1, integrate L3 delta as SVF via scaling-and-squaring.")
 
-    # Phase 2: loss innovations
     p.add_argument("--reg_mode", type=str, choices=["diffusion", "dare", "elastic"], default="diffusion",
                     help="Regularization mode: diffusion (default Grad3d), dare (DARE-minimal), elastic (Navier-Cauchy).")
     p.add_argument("--dare_beta", type=float, default=1.0, help="DARE beta: controls adaptive weighting strength.")
@@ -189,12 +184,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    apply_ctcf_dataset_defaults(args)
-
-    # IXI: flip axis 0 only (depth), matching UTSRMorph original protocol.
-    # OASIS / other: flip all 3 axes.
-    ixi_flip = (0,) if args.ds == "IXI" else (1, 2, 3)
-    build_loaders = build_synth_loaders if args.ds == "SYNTH" else partial(loaders_baseline, ixi_flip_axes=ixi_flip)
+    if args.w_reg is None:
+        args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
+    build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
     run_train(args=args, runner=runner, build_loaders=build_loaders)

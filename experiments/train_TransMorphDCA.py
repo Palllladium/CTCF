@@ -4,8 +4,9 @@ import torch
 from torch import optim
 
 from utils import setup_device
-from experiments.core.train_runtime import Ctx, add_common_args, run_train, loaders_baseline
+from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
 from experiments.core.model_adapters import get_model_adapter
+from models.TransMorph_DCA.configs import CONFIGS
 
 
 class Runner:
@@ -43,7 +44,8 @@ def parse_args():
     add_common_args(p)
     p.set_defaults(exp="TM_DCA")
     
-    p.add_argument("--config", type=str, default="TransMorph-3-LVL", help="Model config key.")
+    p.add_argument("--config", type=str, default="TransMorph-3-LVL",
+                   choices=list(CONFIGS.keys()), help="Model config key.")
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
     p.add_argument("--w_reg", type=float, default=1.0, help="Flow regularization loss weight.")
     p.add_argument("--time_steps", type=int, default=12, help="Number of velocity integration steps.")
@@ -54,7 +56,7 @@ def main():
     args = parse_args()
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
-    run_train(args=args, runner=runner, build_loaders=loaders_baseline)
+    run_train(args=args, runner=runner, build_loaders=baseline_loader_builder(args))
 
 
 if __name__ == "__main__":

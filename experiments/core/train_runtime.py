@@ -1,4 +1,5 @@
 import argparse
+from functools import partial
 import glob
 import os
 import time
@@ -87,6 +88,7 @@ def add_common_args(p: argparse.ArgumentParser, *, include_synth: bool = False, 
         p.add_argument("--max_epoch", type=int, default=400, help="Number of training epochs.")
         p.add_argument("--batch_size", type=int, default=1, help="Training batch size.")
         p.add_argument("--lr", type=float, default=1e-4, help="Initial learning rate.")
+        p.add_argument("--img_size", type=int, nargs=3, default=(160, 192, 224), help="Input volume size D H W.")
         p.add_argument("--max_train_iters", type=int, default=0, help="Limit train iterations per epoch; <=0 disables limit.")
         p.add_argument("--max_val_batches", type=int, default=0, help="Limit validation batches per epoch; <=0 disables limit.")
         p.add_argument("--resume", default="", help="Checkpoint path to resume training from.")
@@ -166,6 +168,16 @@ def loaders_baseline(args, *, ixi_flip_axes=(1, 2, 3)):
                 flip_axes=ixi_flip_axes)
         case _:
             raise ValueError(f"Unsupported dataset = '{args.ds}' for baseline loaders.")
+
+
+def ixi_flip_axes_for(ds):
+    """Depth-only flips for IXI; all-axis flips otherwise."""
+    return (0,) if str(ds).upper() == "IXI" else (1, 2, 3)
+
+
+def baseline_loader_builder(args):
+    """Return the baseline loader factory used by solo model trainers."""
+    return partial(loaders_baseline, ixi_flip_axes=ixi_flip_axes_for(args.ds))
 
 
 def write_tb_images(writer: SummaryWriter, last_vis: dict, epoch: int):

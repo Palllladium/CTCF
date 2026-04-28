@@ -1,5 +1,6 @@
 import ml_collections
 
+
 def get_EM_2x3_2_hires_config():
     config = ml_collections.ConfigDict()
     config.if_transskip = True
@@ -28,6 +29,7 @@ def get_EM_2x3_2_hires_config():
     config.ds_dims = ((40,48,56),(20,24,28),(10,12,14),(5,6,7))
     return config
 
+
 def get_EM_1x1_2_hires_config():
     config = ml_collections.ConfigDict()
     config.if_transskip = True
@@ -55,6 +57,7 @@ def get_EM_1x1_2_hires_config():
     config.ds_dims = ((40,48,56),(20,24,28),(10,12,14),(5,6,7))
     return config
 
+
 def get_EM_1x1_2_config():
     config = ml_collections.ConfigDict()
     config.if_transskip = True
@@ -81,6 +84,7 @@ def get_EM_1x1_2_config():
     config.ds_dims = ((40,48,56),(20,24,28),(10,12,14),(5,6,7))
     config.hires = True
     return config
+
 
 def get_EM_2x3_2_config():
     config = ml_collections.ConfigDict()
@@ -135,6 +139,7 @@ def get_EM_1x1_4_config():
     config.ds_dims = ((40,48,56),(20,24,28),(10,12,14),(5,6,7))
     return config
 
+
 def get_EM_2x3_4_config():
     config = ml_collections.ConfigDict()
     config.if_transskip = True
@@ -160,4 +165,16 @@ def get_EM_2x3_4_config():
     config.img_size = (160, 192, 224)
     config.ds_dims = ((40,48,56),(20,24,28),(10,12,14),(5,6,7))
     return config
+
+
+CONFIGS = {
+    # Light variants (embed_dim=24): sub-0.2M params, useful as ultra-lightweight baselines.
+    "EfficientMorph_2x3_2": get_EM_2x3_2_config(),
+    "EfficientMorph_1x1_2": get_EM_1x1_2_config(),
+    "EfficientMorph_2x3_4": get_EM_2x3_4_config(),
+    "EfficientMorph_1x1_4": get_EM_1x1_4_config(),
+    # Hires variants (embed_dim=96): match the paper's headline ~2.8M model.
+    "EfficientMorph_2x3_2_hires": get_EM_2x3_2_hires_config(),
+    "EfficientMorph_1x1_2_hires": get_EM_1x1_2_hires_config(),
+}
 

@@ -94,6 +94,7 @@ class SS2D(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else None
 
+
     @staticmethod
     def _dt_init(dt_rank, d_inner, dt_scale=1.0, dt_init="random",
                  dt_min=0.001, dt_max=0.1, dt_init_floor=1e-4, **factory):
@@ -114,6 +115,7 @@ class SS2D(nn.Module):
         dt_proj.bias._no_reinit = True
         return dt_proj
 
+
     @staticmethod
     def _A_log_init(d_state, d_inner, copies=1, device=None, merge=True):
         A = repeat(
@@ -129,6 +131,7 @@ class SS2D(nn.Module):
         A_log._no_weight_decay = True
         return A_log
 
+
     @staticmethod
     def _D_init(d_inner, copies=1, device=None, merge=True):
         D = torch.ones(d_inner, device=device)
@@ -139,6 +142,7 @@ class SS2D(nn.Module):
         D = nn.Parameter(D)
         D._no_weight_decay = True
         return D
+
 
     def _forward_core(self, x):
         B, C, H, W, D = x.shape
@@ -176,6 +180,7 @@ class SS2D(nn.Module):
         y = torch.transpose(y, dim0=1, dim1=2).contiguous().view(B, H, W, D, -1)
         y = self.out_norm(y).to(x.dtype)
         return y
+
 
     def forward(self, x, H, W, T):
         # input: (B, L, C). The upstream code assumed L is a perfect cube
@@ -285,6 +290,7 @@ class VMambaBlock(nn.Module):
         for i in out_indices:
             self.add_module(f"norm{i}", norm_layer(self.num_features[i]))
 
+
     def forward(self, x):
         x = self.patch_embed(x)
         Wh, Ww, Wt = x.size(2), x.size(3), x.size(4)
@@ -345,6 +351,7 @@ class VMambaMorph(nn.Module):
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
         self.integrate = VecInt(config.img_size, nsteps=7)
+
 
     def forward(self, source, target, return_pos_flow=True):
         x = torch.cat([source, target], dim=1)

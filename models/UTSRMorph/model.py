@@ -11,8 +11,6 @@ from einops import rearrange
 from torch.distributions.normal import Normal
 from timm.layers import DropPath, trunc_normal_, to_3tuple
 
-import models.UTSRMorph.configs as configs
-
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -1214,11 +1212,3 @@ class UTSRMorph(nn.Module):
         flow = self.up(flow)
         out = self.spatial_trans(source, flow)
         return out, flow
-
-
-CONFIGS = {
-    'UTSRMorph': configs.get_UTSRMorph_config(),
-    'UTSRMorph-Large': configs.get_UTSRMorphLarge_config(),
-    'UTSRMorph-IXI-Large': configs.get_UTSRMorphIXILarge_config(),
-    'UTSRMorph-Debug': configs.get_UTSRMorph_debug_config(),
-}

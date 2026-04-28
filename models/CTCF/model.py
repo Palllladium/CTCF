@@ -46,12 +46,11 @@ class CTCF_CascadeA(nn.Module):
         self.use_level3 = bool(config.use_level3)
         self.backbone = str(getattr(config, 'backbone', 'swin-dca'))
 
-        # Architectural flags (kept after Phase 6 cleanup):
         self.l3_iters = int(getattr(config, 'l3_iters', 1))
         self.l3_svf = bool(getattr(config, 'l3_svf', False))
         self.l1_half_res = bool(getattr(config, 'l1_half_res', False))
         self.l2_full_res = bool(getattr(config, 'l2_full_res', False))
-        self.l3_full_res = bool(getattr(config, 'l3_full_res', False))   # legacy: kept for Paper 1 R5 reproducibility
+        self.l3_full_res = bool(getattr(config, 'l3_full_res', False))
         self.l3_unshared = bool(getattr(config, 'l3_unshared', False)) and self.l3_iters > 1
 
         l3_kwargs = dict(

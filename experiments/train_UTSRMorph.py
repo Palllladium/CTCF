@@ -1,12 +1,12 @@
 import argparse
-from functools import partial
 
 import torch
 from torch import optim
 
 from utils import setup_device
-from experiments.core.train_runtime import Ctx, add_common_args, run_train, loaders_baseline
+from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
 from experiments.core.model_adapters import get_model_adapter
+from models.UTSRMorph.configs import CONFIGS
 
 
 class Runner:
@@ -43,7 +43,7 @@ def parse_args():
     add_common_args(p)
     p.set_defaults(exp="UTSRMorph")
     
-    p.add_argument("--config", type=str, default="UTSRMorph-Large", help="Model config key.")
+    p.add_argument("--config", type=str, default="UTSRMorph-Large", choices=list(CONFIGS.keys()), help="Model config key.")
     p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
     p.add_argument("--w_reg", type=float, default=1.0, help="Flow regularization loss weight.")
     return p.parse_args()
@@ -53,10 +53,7 @@ def main():
     args = parse_args()
     device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
     runner = Runner(args, device)
-    # Original UTSRMorph IXI uses RandomFlip(0) only; OASIS uses no flip
-    ixi_flip = (0,) if args.ds == "IXI" else (1, 2, 3)
-    build_loaders = partial(loaders_baseline, ixi_flip_axes=ixi_flip)
-    run_train(args=args, runner=runner, build_loaders=build_loaders)
+    run_train(args=args, runner=runner, build_loaders=baseline_loader_builder(args))
 
 
 if __name__ == "__main__":

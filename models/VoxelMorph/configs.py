@@ -1,16 +1,22 @@
+import ml_collections
+
+
+def get_VxmDense_config():
+    c = ml_collections.ConfigDict()
+    c.img_size = (160, 192, 224)
+    c.enc_nf = (16, 32, 32, 32)
+    c.dec_nf = (32, 32, 32, 32, 32, 16, 16)
+    c.int_steps = 7
+    return c
+
+
+def get_VxmDense_nodiff_config():
+    c = get_VxmDense_config()
+    c.int_steps = 0
+    return c
+
+
 CONFIGS = {
-    # VoxelMorph-2 diffeomorphic (Dalca et al., TMI 2019)
-    # Standard baseline used in TransMorph, iPEAR, RDN, DARE, etc.
-    "VxmDense": {
-        "enc_nf": [16, 32, 32, 32],
-        "dec_nf": [32, 32, 32, 32, 32, 16, 16],
-        "int_steps": 7,
-    },
-    # VoxelMorph-1 (Balakrishnan et al., CVPR 2018)
-    # Direct displacement, no diffeomorphic integration
-    "VxmDense-nodiff": {
-        "enc_nf": [16, 32, 32, 32],
-        "dec_nf": [32, 32, 32, 32, 32, 16, 16],
-        "int_steps": 0,
-    },
+    "VxmDense": get_VxmDense_config(),
+    "VxmDense-nodiff": get_VxmDense_nodiff_config(),
 }

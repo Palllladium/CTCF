@@ -24,8 +24,6 @@ from torch.distributions.normal import Normal
 from mamba_ssm import Mamba
 
 
-# ───────────────────────── core blocks ─────────────────────────
-
 class PatchEmbed(nn.Module):
     def __init__(self, patch_size=4, in_chans=2, embed_dim=96, norm_layer=None):
         super().__init__()
@@ -92,6 +90,7 @@ class PatchMerging(nn.Module):
         self.dim = dim
         self.reduction = nn.Linear(8 * dim, (8 // reduce_factor) * dim, bias=False)
         self.norm = norm_layer(8 * dim)
+
 
     def forward(self, x, H, W, T):
         B, L, C = x.shape
@@ -185,6 +184,7 @@ class MambaBlock(nn.Module):
         for i in out_indices:
             self.add_module(f"norm{i}", norm_layer(self.num_features[i]))
 
+
     def forward(self, x):
         x = self.patch_embed(x)
         Wh, Ww, Wt = x.size(2), x.size(3), x.size(4)
@@ -193,10 +193,8 @@ class MambaBlock(nn.Module):
                 self.absolute_pos_embed, size=(Wh, Ww, Wt), mode="trilinear"
             )
             x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)
-        elif self.spe:
-            x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
-        else:
-            x = x.flatten(2).transpose(1, 2)
+        elif self.spe: x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
+        else: x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
 
         outs = []
@@ -226,6 +224,7 @@ class DecoderBlock(nn.Module):
         self.conv2 = Conv3dReLU(out_channels, out_channels,
                                 kernel_size=3, padding=1, use_batchnorm=use_batchnorm)
         self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
+
 
     def forward(self, x, skip=None):
         x = self.up(x)
@@ -274,14 +273,13 @@ class VecInt(nn.Module):
         self.scale = 1.0 / (2 ** nsteps)
         self.transformer = SpatialTransformer(inshape)
 
+
     def forward(self, vec):
         vec = vec * self.scale
         for _ in range(self.nsteps):
             vec = vec + self.transformer(vec, vec)
         return vec
 
-
-# ───────────────────────── MambaMorph models ─────────────────────────
 
 class MambaMorph(nn.Module):
     """Diffeomorphic MambaMorph (with VecInt integration of the predicted velocity)."""
@@ -318,6 +316,7 @@ class MambaMorph(nn.Module):
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
         self.integrate = VecInt(config.img_size, nsteps=7)
+
 
     def forward(self, source, target, return_pos_flow=True):
         x = torch.cat([source, target], dim=1)
@@ -376,6 +375,7 @@ class MambaMorphOri(nn.Module):
         self.reg_head = RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3)
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
+
 
     def forward(self, source, target):
         x = torch.cat([source, target], dim=1)

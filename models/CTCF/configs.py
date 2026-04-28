@@ -31,7 +31,6 @@ def get_CTCF_config():
     c.reg_head_chan = 16
     c.time_steps = 6
 
-    # Cascade switches
     c.use_level1 = True
     c.level1_base_ch = 32
     c.use_level2 = True
@@ -39,13 +38,12 @@ def get_CTCF_config():
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
 
-    # Architectural flags:
-    c.l3_iters = 1              # Iterative L3: number of refinement passes (1 = default)
-    c.l3_unshared = False       # Separate L3 weights per iteration (requires l3_iters>1)
-    c.l1_half_res = False       # Run L1 at half-res instead of quarter-res
-    c.l2_full_res = False       # Run L2 at full-res (recommended default for new backbones)
-    c.l3_full_res = False       # Legacy: run L3 alone at full-res (Paper 1 R5 reproducibility)
-    c.l3_svf = False            # Integrate L3 delta as SVF (scaling-and-squaring) → diffeomorphic, 0% folds
+    c.l3_iters = 1
+    c.l3_unshared = False
+    c.l1_half_res = False
+    c.l2_full_res = False
+    c.l3_full_res = False
+    c.l3_svf = False
 
     return c
 
@@ -61,7 +59,6 @@ def get_CTCF_VM_config(*, use_cascade=True):
     c.vxm.dec_nf = [32, 32, 32, 32, 32, 16, 16]
     c.vxm.int_steps = 7
 
-    # Cascade switches
     c.use_level1 = use_cascade
     c.level1_base_ch = 32
     c.use_level2 = True

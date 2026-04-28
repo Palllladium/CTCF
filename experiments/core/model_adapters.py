@@ -12,6 +12,7 @@ class ModelAdapter:
     def build(self, **kwargs) -> torch.nn.Module:
         raise NotImplementedError
 
+
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError
 
@@ -20,12 +21,14 @@ class TmDcaAdapter(ModelAdapter):
     key = "tm-dca"
 
     def build(self, *, time_steps: int = 12, config_key: str = "TransMorph-3-LVL") -> torch.nn.Module:
-        from models.TransMorph_DCA.model import CONFIGS, TransMorphCascadeAd
+        from models.TransMorph_DCA.configs import CONFIGS
+        from models.TransMorph_DCA.model import TransMorphCascadeAd
 
         cfg = deepcopy(CONFIGS[config_key])
         model = TransMorphCascadeAd(cfg, int(time_steps))
         model.cfg = cfg
         return model
+
 
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True, pool: int = 2) -> torch.Tensor:
         use_amp = bool(amp and torch.cuda.is_available())
@@ -38,12 +41,14 @@ class UtsrMorphAdapter(ModelAdapter):
     key = "utsrmorph"
 
     def build(self, *, config_key: str = "UTSRMorph-Large") -> torch.nn.Module:
-        from models.UTSRMorph.model import CONFIGS, UTSRMorph
+        from models.UTSRMorph.configs import CONFIGS
+        from models.UTSRMorph.model import UTSRMorph
 
         cfg = deepcopy(CONFIGS[config_key])
         model = UTSRMorph(cfg)
         model.cfg = cfg
         return model
+
 
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
         use_amp = bool(amp and torch.cuda.is_available())
@@ -66,7 +71,6 @@ class CtcfAdapter(ModelAdapter):
         l1_base_ch: Optional[int] = None,
         l3_base_ch: Optional[int] = None,
         l3_error_mode: Optional[str] = None,
-        # Architectural flags (kept after Phase 6 cleanup)
         l3_iters: Optional[int] = None,
         l3_unshared: Optional[bool] = None,
         l1_half_res: Optional[bool] = None,
@@ -74,7 +78,8 @@ class CtcfAdapter(ModelAdapter):
         l3_full_res: Optional[bool] = None,
         l3_svf: Optional[bool] = None,
     ) -> torch.nn.Module:
-        from models.CTCF.model import CONFIGS, CTCF_CascadeA
+        from models.CTCF.configs import CONFIGS
+        from models.CTCF.model import CTCF_CascadeA
 
         cfg = deepcopy(CONFIGS[config_key])
         cfg.time_steps = int(time_steps)
@@ -90,7 +95,6 @@ class CtcfAdapter(ModelAdapter):
         if l3_base_ch is not None: cfg.level3_base_ch = int(l3_base_ch)
         if l3_error_mode is not None: cfg.level3_error_mode = str(l3_error_mode)
 
-        # Architectural flags
         if l3_iters is not None: cfg.l3_iters = int(l3_iters)
         if l3_unshared is not None: cfg.l3_unshared = bool(l3_unshared)
         if l1_half_res is not None: cfg.l1_half_res = bool(l1_half_res)
@@ -102,6 +106,7 @@ class CtcfAdapter(ModelAdapter):
         model.cfg = cfg
         return model
 
+
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
         use_amp = bool(amp and torch.cuda.is_available())
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
@@ -109,30 +114,53 @@ class CtcfAdapter(ModelAdapter):
         return flow.float()
 
 
-class LkuNetAdapter(ModelAdapter):
-    key = "lkunet"
+class VoxelMorphAdapter(ModelAdapter):
+    key = "voxelmorph"
 
-    def build(self, *, config_key: str = "LKU-8", img_size: Tuple[int, int, int] = (160, 192, 224)) -> torch.nn.Module:
-        from models.LKUNet.configs import CONFIGS
-        from models.LKUNet.wrapper import LkuNetSolo
+    def build(self, *, config_key: str = "VxmDense", img_size: Optional[Tuple[int, int, int]] = None) -> torch.nn.Module:
+        from models.VoxelMorph.configs import CONFIGS
+        from models.VoxelMorph.wrapper import VxmDense
 
         cfg = deepcopy(CONFIGS[config_key])
-        model = LkuNetSolo(
+        img_size = tuple(cfg.img_size) if img_size is None else tuple(int(v) for v in img_size)
+        model = VxmDense(
             vol_size=img_size,
-            in_channel=cfg["in_channel"],
-            n_classes=cfg["n_classes"],
-            start_channel=cfg["start_channel"],
+            enc_nf=list(cfg.enc_nf),
+            dec_nf=list(cfg.dec_nf),
+            int_steps=int(cfg.int_steps),
         )
         model.cfg = cfg
         return model
 
-    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
-        """Inference forward: returns flow in VOXEL units, channel-first (B, 3, D, H, W).
 
-        LKU-Net's UNet emits Softsign-bounded normalized flow ([-1, 1]); we scale
-        per axis to convert to the voxel-unit convention used by downstream
-        Dice/Jacobian/HD95 metrics in this repo.
-        """
+    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
+        use_amp = bool(amp and torch.cuda.is_available())
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            _, flow = model(x, y)
+        return flow.float()
+
+
+class LkuNetAdapter(ModelAdapter):
+    key = "lkunet"
+
+    def build(self, *, config_key: str = "LKU-8", img_size: Optional[Tuple[int, int, int]] = None) -> torch.nn.Module:
+        from models.LKUNet.configs import CONFIGS
+        from models.LKUNet.wrapper import LkuNetSolo
+
+        cfg = deepcopy(CONFIGS[config_key])
+        img_size = tuple(cfg.img_size) if img_size is None else tuple(int(v) for v in img_size)
+        model = LkuNetSolo(
+            vol_size=img_size,
+            in_channel=int(cfg.in_channel),
+            n_classes=int(cfg.n_classes),
+            start_channel=int(cfg.start_channel),
+        )
+        model.cfg = cfg
+        return model
+
+
+    def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
+        """Return voxel-unit flow; LKU-Net predicts normalized grid flow."""
         use_amp = bool(amp and torch.cuda.is_available())
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
             flow_normalized = model.unet(x, y)
@@ -149,12 +177,12 @@ class LkuNetAdapter(ModelAdapter):
 class EfficientMorphAdapter(ModelAdapter):
     key = "efficientmorph"
 
-    def build(self, *, config_key: str = "EfficientMorph_2x3_2") -> torch.nn.Module:
+    def build(self, *, config_key: str = "EfficientMorph_2x3_2", img_size: Optional[Tuple[int, int, int]] = None) -> torch.nn.Module:
         from models.EfficientMorph.wrapper import EfficientMorphSolo
 
-        model = EfficientMorphSolo(config_key=config_key)
-        model.cfg = model.cfg
+        model = EfficientMorphSolo(config_key=config_key, img_size=img_size)
         return model
+
 
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
         use_amp = bool(amp and torch.cuda.is_available())
@@ -166,18 +194,14 @@ class EfficientMorphAdapter(ModelAdapter):
 class MambaMorphAdapter(ModelAdapter):
     key = "mambamorph"
 
-    def build(self, *, config_key: str = "MambaMorph", diffeomorphic: bool = True) -> torch.nn.Module:
+    def build(self, *, config_key: str = "MambaMorph", diffeomorphic: bool = True, img_size: Optional[Tuple[int, int, int]] = None) -> torch.nn.Module:
         from models.MambaMorph.wrapper import MambaMorphSolo
 
-        model = MambaMorphSolo(config_key=config_key, diffeomorphic=diffeomorphic)
-        model.cfg = model.cfg
+        model = MambaMorphSolo(config_key=config_key, diffeomorphic=diffeomorphic, img_size=img_size)
         return model
 
+
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
-        # MambaMorph's mamba_ssm CUDA kernel often fails under autocast fp16,
-        # and the upstream code force-casts to fp32 inside the SSM block. So
-        # we run inference in fp32 by default for stability.
-        _ = amp  # unused
         with torch.autocast(device_type="cuda", enabled=False):
             _, flow = model(x, y)
         return flow.float()
@@ -186,16 +210,14 @@ class MambaMorphAdapter(ModelAdapter):
 class VMambaMorphAdapter(ModelAdapter):
     key = "vmambamorph"
 
-    def build(self, *, config_key: str = "VMambaMorph") -> torch.nn.Module:
+    def build(self, *, config_key: str = "VMambaMorph", img_size: Optional[Tuple[int, int, int]] = None) -> torch.nn.Module:
         from models.VMambaMorph.wrapper import VMambaMorphSolo
 
-        model = VMambaMorphSolo(config_key=config_key)
-        model.cfg = model.cfg
+        model = VMambaMorphSolo(config_key=config_key, img_size=img_size)
         return model
 
+
     def forward(self, model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, *, amp: bool = True) -> torch.Tensor:
-        # selective_scan_fn requires fp32 inputs.
-        _ = amp
         with torch.autocast(device_type="cuda", enabled=False):
             _, flow = model(x, y)
         return flow.float()
@@ -208,6 +230,7 @@ def get_model_adapter(name: str) -> ModelAdapter:
         case "tm-dca": return TmDcaAdapter()
         case "utsrmorph": return UtsrMorphAdapter()
         case "ctcf": return CtcfAdapter()
+        case "voxelmorph" | "vxm" | "vxmdense": return VoxelMorphAdapter()
         case "lkunet": return LkuNetAdapter()
         case "efficientmorph": return EfficientMorphAdapter()
         case "mambamorph": return MambaMorphAdapter()
