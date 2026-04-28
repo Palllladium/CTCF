@@ -87,7 +87,7 @@ def get_CTCF_LKU_config(config_key="LKU-8", *, use_cascade=True):
     c.level1_base_ch = 32
     c.use_level2 = True
     c.use_level3 = use_cascade
-    c.level3_base_ch = 64
+    c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
 
     c.l3_iters = 1
@@ -111,7 +111,7 @@ def get_CTCF_Mamba_config(*, use_cascade=True):
     c.level1_base_ch = 32
     c.use_level2 = True
     c.use_level3 = use_cascade
-    c.level3_base_ch = 64
+    c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
 
     c.l3_iters = 1
@@ -135,7 +135,7 @@ def get_CTCF_VMamba_config(*, use_cascade=True):
     c.level1_base_ch = 32
     c.use_level2 = True
     c.use_level3 = use_cascade
-    c.level3_base_ch = 64
+    c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
 
     c.l3_iters = 1
