@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 # Phase 8 cascade runs (Paper 2 finalization).
 #
-# Goals:
-#   1. Validate --l1_from_start 1 as the cascade-warmup fix on a known-stable
-#      LKU-8 baseline (sanity).
-#   2. Add LKU-32 (33.35M) cascade points for the params spectrum.
-#   3. Head-to-head LKU-32 SVF vs Mamba SVF at comparable diffeomorphic protocol.
-#   4. Isolate SVF-on-L3 contribution for Mamba (one no-SVF control).
-#   5. Cross-dataset generalization on IXI for the two best cascades.
+# REVISION HISTORY:
+#   v1: 6 runs (LKU8_FIXSCHED, LKU32_OASIS, LKU32_SVF, MAMBA_NOSVF, MAMBA_IXI, LKU32_SVF_IXI).
+#   v2: 4 runs after LKU-32 NaN at ep14:
+#       - DONE: P8_CASC_LKU8_FIXSCHED_OASIS (0.8263, sanity passed).
+#       - DROPPED: P8_CASC_LKU32_OASIS (deterministic NaN ep14, partial 0.8202@ep11 documented).
+#       - Remaining 4 runs reordered: stable Mamba first, LKU-32 SVF after.
 #
-# Run order is intentional:
-#   - LKU-8 fixed-schedule first (cheap, ~1.5h, gates the schedule fix)
-#   - LKU-32 no-SVF before LKU-32 SVF (isolates the SVF effect for the bigger LKU)
-#   - Mamba no-SVF after LKU is settled (cheaper to schedule late)
-#   - IXI runs last (only fire if OASIS counterparts succeeded)
+# Goals (remaining):
+#   1. Isolate L3-SVF contribution for Mamba (1 control run, OASIS).
+#   2. Test SVF-on-L3 hypothesis as the LKU-32 cascade stabilizer (best LKU vs Mamba).
+#   3. Cross-dataset generalization on IXI for the two best cascades.
 #
 # Usage:
 #   conda activate ctcf
@@ -22,8 +20,13 @@
 # Override defaults:
 #   MAX_EPOCH=100 GPU=0 PATHS_PROFILE=--2 bash tools/phase8_cascade.sh
 #
-# Staged execution:
-#   SKIP_LKU8_SCHED=1 SKIP_LKU32=1 ... bash tools/phase8_cascade.sh
+# Staged execution (recommended — set -e aborts on any failure):
+#   # Batch 1: stable Mamba runs (independent of LKU-32 outcome)
+#   SKIP_LKU32_SVF=1 SKIP_LKU32_SVF_IXI=1 bash tools/phase8_cascade.sh
+#   # Batch 2: LKU-32 SVF test on OASIS
+#   SKIP_MAMBA_NOSVF=1 SKIP_MAMBA_IXI=1 SKIP_LKU32_SVF_IXI=1 bash tools/phase8_cascade.sh
+#   # Batch 3: LKU-32 SVF IXI (only if Batch 2 succeeded)
+#   SKIP_MAMBA_NOSVF=1 SKIP_MAMBA_IXI=1 SKIP_LKU32_SVF=1 bash tools/phase8_cascade.sh
 
 set -e
 
@@ -32,11 +35,9 @@ MAX_EPOCH="${MAX_EPOCH:-100}"
 PATHS_PROFILE="${PATHS_PROFILE:---2}"
 PYBIN="${PYBIN:-python}"
 
-SKIP_LKU8_SCHED="${SKIP_LKU8_SCHED:-0}"
-SKIP_LKU32="${SKIP_LKU32:-0}"
-SKIP_LKU32_SVF="${SKIP_LKU32_SVF:-0}"
 SKIP_MAMBA_NOSVF="${SKIP_MAMBA_NOSVF:-0}"
 SKIP_MAMBA_IXI="${SKIP_MAMBA_IXI:-0}"
+SKIP_LKU32_SVF="${SKIP_LKU32_SVF:-0}"
 SKIP_LKU32_SVF_IXI="${SKIP_LKU32_SVF_IXI:-0}"
 
 COMMON="--gpu ${GPU} --max_epoch ${MAX_EPOCH} --use_tb 1 --save_ckpt 1"
@@ -52,26 +53,32 @@ run_ctcf() {
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
-# 1. Sanity: --l1_from_start 1 on known-good LKU-8 cascade.
-#    Expected: Dice within +/-0.005 of P7_CASC_LKU8_OASIS (0.8248), no crash.
-if [ "${SKIP_LKU8_SCHED}" != "1" ]; then
-    run_ctcf "P8_CASC_LKU8_FIXSCHED_OASIS" \
-        --config CTCF-CascadeA-LKU8 \
-        --l1_from_start 1 \
+# 1. Mamba cascade WITHOUT SVF on L3.
+#    Mamba's L2 already integrates VecInt internally; this run tells us whether
+#    L3-SVF is necessary for 0% folds or whether L2 integration alone suffices.
+#    Most stable run; goes first to ensure Mamba data is collected even if LKU-32 SVF fails.
+if [ "${SKIP_MAMBA_NOSVF}" != "1" ]; then
+    run_ctcf "P8_CASC_MAMBA_NOSVF_OASIS" \
+        --config CTCF-CascadeA-Mamba \
+        --l3_svf 0 \
         ${CTCF_OASIS}
 fi
 
-# 2. LKU-32 cascade, no SVF. Tests that the schedule fix unblocks the
-#    capacity-33M backbone that NaN'd in P7_CASC_LKU32_OASIS at ep6.
-if [ "${SKIP_LKU32}" != "1" ]; then
-    run_ctcf "P8_CASC_LKU32_OASIS" \
-        --config CTCF-CascadeA-LKU32 \
-        --l1_from_start 1 \
-        ${CTCF_OASIS}
+# 2. Mamba SVF cascade on IXI. Generalization check for the headline backbone.
+#    Independent of LKU-32 outcome; provides cross-dataset evidence for Paper 2.
+if [ "${SKIP_MAMBA_IXI}" != "1" ]; then
+    run_ctcf "P8_CASC_MAMBA_SVF_IXI" \
+        --config CTCF-CascadeA-Mamba \
+        --l3_svf 1 \
+        ${CTCF_IXI}
 fi
 
-# 3. LKU-32 cascade with SVF on L3. Best-effort LKU representative for the
-#    head-to-head against Mamba SVF cascade.
+# 3. LKU-32 cascade with SVF on L3 + --l1_from_start 1.
+#    Tests two hypotheses simultaneously:
+#      (a) --l1_from_start 1 fixes the ep6 distribution-shift NaN (P7_CASC_LKU32 mode).
+#      (b) SVF on L3 fixes the ep14 ICON-spike NaN (P8_CASC_LKU32 mode).
+#    Best-effort LKU representative for head-to-head against Mamba SVF cascade.
+#    If this crashes too: drop LKU-32 from Paper 2, keep LKU-8 as single LKU point.
 if [ "${SKIP_LKU32_SVF}" != "1" ]; then
     run_ctcf "P8_CASC_LKU32_SVF_OASIS" \
         --config CTCF-CascadeA-LKU32 \
@@ -80,25 +87,7 @@ if [ "${SKIP_LKU32_SVF}" != "1" ]; then
         ${CTCF_OASIS}
 fi
 
-# 4. Mamba cascade WITHOUT SVF on L3. Mamba's L2 already integrates VecInt
-#    internally; this run tells us whether L3-SVF is necessary for 0% folds
-#    or whether L2 integration alone suffices.
-if [ "${SKIP_MAMBA_NOSVF}" != "1" ]; then
-    run_ctcf "P8_CASC_MAMBA_NOSVF_OASIS" \
-        --config CTCF-CascadeA-Mamba \
-        --l3_svf 0 \
-        ${CTCF_OASIS}
-fi
-
-# 5. Mamba SVF cascade on IXI. Generalization check for the headline backbone.
-if [ "${SKIP_MAMBA_IXI}" != "1" ]; then
-    run_ctcf "P8_CASC_MAMBA_SVF_IXI" \
-        --config CTCF-CascadeA-Mamba \
-        --l3_svf 1 \
-        ${CTCF_IXI}
-fi
-
-# 6. LKU-32 SVF cascade on IXI. Generalization check for best LKU.
+# 4. LKU-32 SVF cascade on IXI. Generalization check for best LKU.
 #    Only meaningful if (3) succeeded on OASIS.
 if [ "${SKIP_LKU32_SVF_IXI}" != "1" ]; then
     run_ctcf "P8_CASC_LKU32_SVF_IXI" \
