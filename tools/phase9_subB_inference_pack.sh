@@ -38,6 +38,10 @@ PATHS_PROFILE="${PATHS_PROFILE:---2}"
 PYBIN="${PYBIN:-python}"
 OUT="${OUT:-results/SEDM}"
 
+# Ensure project root is on PYTHONPATH so 'from experiments.core...' imports work
+# when calling python tools/model_complexity.py directly (it's not a package).
+export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+
 SKIP_INFERENCE="${SKIP_INFERENCE:-0}"
 SKIP_COMPLEXITY="${SKIP_COMPLEXITY:-0}"
 SKIP_AGGREGATE="${SKIP_AGGREGATE:-0}"
@@ -53,7 +57,9 @@ run_inf() {
     local config_arg="$4"
     local extra_args="$5"
 
-    local ckpt="experiments/${exp_name}/ckpt/best.pth"
+    # Checkpoints are saved by make_exp_dirs() to results/<exp_name>/ckpt/,
+    # NOT to experiments/<exp_name>/ckpt/. See utils/runtime.py:95.
+    local ckpt="results/${exp_name}/ckpt/best.pth"
     if [ ! -f "${ckpt}" ]; then
         echo "[SKIP] ${exp_name} — no ckpt at ${ckpt}"
         return
@@ -141,7 +147,7 @@ echo ""
 echo "==========================================="
 echo "SEDM packaging complete."
 echo "Output: ${OUT}/"
-echo "  inference/<exp>/best/per_case.csv  — per-pair metrics"
+echo "  inference/<exp>/per_case.csv       — per-pair metrics"
 echo "  complexity.csv                     — params, GFLOPs, VRAM, throughput"
 echo "  summary/main_oasis.{md,tex}        — paste-ready main OASIS table"
 echo "  summary/main_ixi.{md,tex}          — paste-ready main IXI table"

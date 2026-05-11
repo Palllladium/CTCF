@@ -1,7 +1,7 @@
 """
 Aggregate per_case.csv outputs from inference.py into SEDM-ready summary tables.
 
-Reads from:  <inference-dir>/<exp_name>/best/per_case.csv
+Reads from:  <inference-dir>/<exp_name>/per_case.csv
 Writes:
   <output-dir>/main_oasis.md        — Markdown table of OASIS cascade configs
   <output-dir>/main_oasis.tex       — LaTeX tabular of the same
@@ -324,7 +324,9 @@ def main():
 
     stats_by_exp = {}
     for exp_name, cfg in CONFIGS.items():
-        csv_path = inference_dir / exp_name / "best" / "per_case.csv"
+        # inference.py with --out_dir writes per_case.csv directly under that dir
+        # (no extra <ckpt_stem> subdir when --out_dir is explicitly provided).
+        csv_path = inference_dir / exp_name / "per_case.csv"
         if not csv_path.exists():
             continue
         stats_by_exp[exp_name] = aggregate_one(csv_path, cfg["ds"])
