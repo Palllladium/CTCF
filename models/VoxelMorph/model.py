@@ -166,7 +166,7 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs.permute(0, 2, 3, 4, 1) 
             new_locs = new_locs[..., [2,1,0]]
 
-        return nnf.grid_sample(src, new_locs, mode=self.mode)
+        return nnf.grid_sample(src, new_locs, mode=self.mode, align_corners=False)
 
 
 class conv_block(nn.Module):
