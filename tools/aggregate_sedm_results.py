@@ -37,6 +37,7 @@ except ImportError:
 CONFIGS = {
     # ---------- OASIS cascades ----------
     "P9_CASC_VXM_SVF_OASIS":         dict(family="classical CNN",         backbone="VoxelMorph",  svf="ON",  params_m=0.3,  ds="OASIS", group="cascade"),
+    "SEDM_CASC_VXM_NOSVF_OASIS":     dict(family="classical CNN",         backbone="VoxelMorph",  svf="OFF", params_m=0.3,  ds="OASIS", group="cascade"),
     "P7_CASC_LKU8_OASIS":            dict(family="large-kernel CNN",      backbone="LKU-8",       svf="OFF", params_m=2.1,  ds="OASIS", group="cascade", note="P7 (без SVF)"),
     "P8_CASC_LKU8_FIXSCHED_OASIS":   dict(family="large-kernel CNN",      backbone="LKU-8",       svf="OFF", params_m=2.1,  ds="OASIS", group="cascade", note="P8 fixsched"),
     "P9_CASC_LKU8_SVF_OASIS":        dict(family="large-kernel CNN",      backbone="LKU-8",       svf="ON",  params_m=2.1,  ds="OASIS", group="cascade"),
@@ -47,7 +48,9 @@ CONFIGS = {
 
     # ---------- IXI cascades ----------
     "P9_CASC_VXM_SVF_IXI":           dict(family="classical CNN",         backbone="VoxelMorph",  svf="ON",  params_m=0.3,  ds="IXI",   group="cascade"),
+    "SEDM_CASC_VXM_NOSVF_IXI":       dict(family="classical CNN",         backbone="VoxelMorph",  svf="OFF", params_m=0.3,  ds="IXI",   group="cascade"),
     "P9_CASC_LKU8_SVF_IXI":          dict(family="large-kernel CNN",      backbone="LKU-8",       svf="ON",  params_m=2.1,  ds="IXI",   group="cascade"),
+    "SEDM_CASC_LKU8_NOSVF_IXI":      dict(family="large-kernel CNN",      backbone="LKU-8",       svf="OFF", params_m=2.1,  ds="IXI",   group="cascade"),
     "P8_CASC_LKU32_SVF_IXI":         dict(family="large-kernel CNN",      backbone="LKU-32",      svf="ON",  params_m=33.0, ds="IXI",   group="cascade"),
     "P8_CASC_MAMBA_SVF_IXI":         dict(family="state-space",           backbone="MambaMorph",  svf="ON",  params_m=7.3,  ds="IXI",   group="cascade"),
     "P9_CASC_MAMBA_NOSVF_IXI":       dict(family="state-space",           backbone="MambaMorph",  svf="OFF", params_m=7.3,  ds="IXI",   group="cascade"),
@@ -152,12 +155,13 @@ def write_main_table(stats_by_exp, output_dir: Path, ds: str):
     (output_dir / f"main_{suffix}.md").write_text("\n".join(md), encoding="utf-8")
 
     # LaTeX
+    jac_header = rows[0][1]["jac_name"].replace("%", r"\%")
     tex = [r"\begin{table}[h]", r"\centering",
            f"\\caption{{Сравнение каскадных конфигураций на {ds}, 100 эпох.}}",
            f"\\label{{tab:main_{suffix}}}",
            r"\begin{tabular}{lllrccccr}",
            r"\hline",
-           f"Семейство & Backbone & SVF & Параметры, млн & Dice $\\uparrow$ & HD95 $\\downarrow$ & {rows[0][1]['jac_name'].replace('%',r'\%')} $\\downarrow$ & N \\\\",
+           f"Семейство & Backbone & SVF & Параметры, млн & Dice $\\uparrow$ & HD95 $\\downarrow$ & {jac_header} $\\downarrow$ & N \\\\",
            r"\hline"]
     for exp_name, s in rows:
         cfg = CONFIGS[exp_name]
@@ -224,15 +228,19 @@ def write_cascade_delta_table(stats_by_exp, output_dir: Path):
 
 
 def write_stat_tests(stats_by_exp, output_dir: Path):
-    """Paired Wilcoxon for SVF-redundancy claim: Mamba NoSVF vs SVF on OASIS, IXI."""
+    """Paired Wilcoxon for available NoSVF vs SVF comparisons."""
     md = ["# Парные статистические тесты (Wilcoxon signed-rank)\n",
-          "Сравнения для подтверждения секонд-кляйм SEDM (избыточность L3-SVF для SSM):\n"]
+          "Доступные парные сравнения L3-SVF OFF против L3-SVF ON:\n"]
     if wilcoxon is None:
         md.append("> SciPy не установлен, тесты пропущены.")
         (output_dir / "stat_tests.md").write_text("\n".join(md), encoding="utf-8")
         return
 
     comparisons = [
+        ("SEDM_CASC_VXM_NOSVF_OASIS",  "P9_CASC_VXM_SVF_OASIS",    "VoxelMorph NoSVF vs SVF (OASIS)"),
+        ("SEDM_CASC_VXM_NOSVF_IXI",    "P9_CASC_VXM_SVF_IXI",      "VoxelMorph NoSVF vs SVF (IXI)"),
+        ("P7_CASC_LKU8_OASIS",         "P9_CASC_LKU8_SVF_OASIS",   "LKU-8 NoSVF vs SVF (OASIS)"),
+        ("SEDM_CASC_LKU8_NOSVF_IXI",   "P9_CASC_LKU8_SVF_IXI",     "LKU-8 NoSVF vs SVF (IXI)"),
         ("P8_CASC_MAMBA_NOSVF_OASIS", "P7_CASC_MAMBA_SVF_OASIS",  "Mamba NoSVF vs SVF (OASIS)"),
         ("P9_CASC_MAMBA_NOSVF_IXI",   "P8_CASC_MAMBA_SVF_IXI",    "Mamba NoSVF vs SVF (IXI)"),
     ]

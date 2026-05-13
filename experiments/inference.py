@@ -134,7 +134,17 @@ class InferRunner:
         match self.name:
             case "tm-dca": self.model = self.adapter.build(time_steps=int(args.time_steps), config_key=args.tm_config).to(self.device)
             case "utsrmorph": self.model = self.adapter.build(config_key=args.utsr_config).to(self.device)
-            case "ctcf": self.model = self.adapter.build(time_steps=int(args.time_steps), config_key=args.ctcf_config).to(self.device)
+            case "ctcf":
+                self.model = self.adapter.build(
+                    time_steps=int(args.time_steps),
+                    config_key=args.ctcf_config,
+                    l3_iters=args.ctcf_l3_iters,
+                    l3_unshared=_optional_bool(args.ctcf_l3_unshared),
+                    l1_half_res=_optional_bool(args.ctcf_l1_half_res),
+                    l2_full_res=_optional_bool(args.ctcf_l2_full_res),
+                    l3_full_res=_optional_bool(args.ctcf_l3_full_res),
+                    l3_svf=_optional_bool(args.ctcf_l3_svf),
+                ).to(self.device)
             case "voxelmorph": self.model = self.adapter.build(config_key=args.vxm_config).to(self.device)
             case "lkunet": self.model = self.adapter.build(config_key=args.lku_config).to(self.device)
             case "efficientmorph": self.model = self.adapter.build(config_key=args.em_config).to(self.device)
@@ -259,6 +269,12 @@ class InferRunner:
         if self.args.save_flow: print(f"[SAVED] flow dir: {os.path.join(out_dir, 'flows')}")
 
 
+def _optional_bool(value: Optional[int]) -> Optional[bool]:
+    if value is None:
+        return None
+    return bool(int(value))
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     add_common_args(p, mode="infer")
@@ -285,6 +301,12 @@ def parse_args():
     p.add_argument("--tm_config", type=str, default="TransMorph-3-LVL", help="TransMorph-DCA config key.")
     p.add_argument("--utsr_config", type=str, default="UTSRMorph-Large", help="UTSRMorph config key.")
     p.add_argument("--ctcf_config", type=str, default="CTCF-CascadeA", help="CTCF config key.")
+    p.add_argument("--ctcf_l3_iters", type=int, default=None, help="Override CTCF Level-3 refinement iterations.")
+    p.add_argument("--ctcf_l3_unshared", type=int, choices=[0, 1], default=None, help="Override CTCF unshared Level-3 iter modules.")
+    p.add_argument("--ctcf_l1_half_res", type=int, choices=[0, 1], default=None, help="Override CTCF Level-1 half-res mode.")
+    p.add_argument("--ctcf_l2_full_res", type=int, choices=[0, 1], default=None, help="Override CTCF Level-2 full-res mode.")
+    p.add_argument("--ctcf_l3_full_res", type=int, choices=[0, 1], default=None, help="Override CTCF Level-3 full-res mode.")
+    p.add_argument("--ctcf_l3_svf", type=int, choices=[0, 1], default=None, help="Override CTCF Level-3 SVF integration mode.")
     p.add_argument("--vxm_config", type=str, default="VxmDense", help="VoxelMorph config key.")
     p.add_argument("--lku_config", type=str, default="LKU-8", help="LKU-Net config key.")
     p.add_argument("--em_config", type=str, default="EfficientMorph_2x3_2_hires", help="EfficientMorph config key.")

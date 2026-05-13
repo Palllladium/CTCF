@@ -1,157 +1,104 @@
 #!/usr/bin/env bash
-# Phase 9 Sub-B — inference + complexity + aggregation for SEDM paper.
+# Phase 9 Sub-B repair inference pack.
 #
-# Runs inference.py on every available cascade/L2-only checkpoint from P7/P8/P9
-# (skips missing ones gracefully), computes cascade-level computational complexity,
-# and aggregates per-pair metrics into paste-ready Markdown + LaTeX tables.
+# Purpose:
+#   Re-run only the CTCF inference jobs whose previous metrics were suspect
+#   because experiments.inference did not expose the Level-3 SVF flag.
 #
-# Output structure:
-#   results/SEDM/
-#     inference/<exp_name>/best/per_case.csv      (default inference.py output dir)
-#     inference/<exp_name>/best/summary.csv
-#     complexity.csv                              (params, GFLOPs, VRAM, throughput)
-#     summary/main_oasis.md                       (paste-ready Markdown)
-#     summary/main_oasis.tex                      (paste-ready LaTeX tabularx)
-#     summary/main_ixi.md
-#     summary/main_ixi.tex
-#     summary/cascade_delta.md                    (L2-only vs cascade Δ)
-#     summary/cascade_delta.tex
-#     summary/stat_tests.md                       (paired Wilcoxon vs Paper 1 baselines)
-#     summary/README.md                           (overview, what's where, how to paste)
+# Why this exists:
+#   Training scripts used explicit --l3_svf values, but inference previously
+#   rebuilt CTCF models from config defaults. That mismatched these checkpoints:
+#     - VoxelMorph/LKU SVF checkpoints were inferred as NoSVF.
+#     - Mamba NoSVF checkpoints were inferred as SVF.
 #
-# Usage:
+# Usage on the lab machine:
 #   conda activate ctcf
-#   bash tools/phase9_subB_inference_pack.sh
+#   GPU=0 PATHS_PROFILE=--2 bash tools/phase9_subB_inference_pack.sh
 #
-# Override defaults:
-#   GPU=0 PATHS_PROFILE=--2 OUT=results/SEDM bash tools/phase9_subB_inference_pack.sh
+# Output:
+#   results/SEDM_l3svf_recheck/inference/<exp_name>/per_case.csv
+#   results/SEDM_l3svf_recheck/inference/<exp_name>/summary.{csv,json}
 #
-# Skip flags (для частичных перезапусков):
-#   SKIP_INFERENCE=1 — пропустить inference, только перегнерировать summary tables
-#   SKIP_COMPLEXITY=1 — пропустить cascade complexity
-#   SKIP_AGGREGATE=1 — пропустить aggregation
+# Common overrides:
+#   OUT=results/SEDM bash tools/phase9_subB_inference_pack.sh
+#   SKIP_VXM=1 bash tools/phase9_subB_inference_pack.sh
+#   SKIP_LKU8=1 bash tools/phase9_subB_inference_pack.sh
+#   SKIP_LKU32=1 bash tools/phase9_subB_inference_pack.sh
+#   SKIP_MAMBA_NOSVF=1 bash tools/phase9_subB_inference_pack.sh
 
-set -e
+set -euo pipefail
 
 GPU="${GPU:-0}"
 PATHS_PROFILE="${PATHS_PROFILE:---2}"
 PYBIN="${PYBIN:-python}"
-OUT="${OUT:-results/SEDM}"
+OUT="${OUT:-results/SEDM_l3svf_recheck}"
 
-# Ensure project root is on PYTHONPATH so 'from experiments.core...' imports work
-# when calling python tools/model_complexity.py directly (it's not a package).
+SKIP_VXM="${SKIP_VXM:-0}"
+SKIP_LKU8="${SKIP_LKU8:-0}"
+SKIP_LKU32="${SKIP_LKU32:-0}"
+SKIP_MAMBA_NOSVF="${SKIP_MAMBA_NOSVF:-0}"
+
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
-SKIP_INFERENCE="${SKIP_INFERENCE:-0}"
-SKIP_COMPLEXITY="${SKIP_COMPLEXITY:-0}"
-SKIP_AGGREGATE="${SKIP_AGGREGATE:-0}"
+mkdir -p "${OUT}/inference"
 
-mkdir -p "${OUT}/summary"
-
-# Helper: run inference.py for a given experiment.
-# Gracefully skips if checkpoint is absent (so the script tolerates partial Sub-A completion).
 run_inf() {
     local exp_name="$1"
     local ds="$2"
-    local model="$3"
-    local config_arg="$4"
-    local extra_args="$5"
+    local ctcf_config="$3"
+    local ctcf_l3_svf="$4"
 
-    # Checkpoints are saved by make_exp_dirs() to results/<exp_name>/ckpt/,
-    # NOT to experiments/<exp_name>/ckpt/. See utils/runtime.py:95.
     local ckpt="results/${exp_name}/ckpt/best.pth"
+    local out_dir="${OUT}/inference/${exp_name}"
+    local use_test_flag=""
+
+    [ "${ds}" = "IXI" ] && use_test_flag="--use_test"
+
     if [ ! -f "${ckpt}" ]; then
-        echo "[SKIP] ${exp_name} — no ckpt at ${ckpt}"
+        echo "[SKIP] ${exp_name} - no checkpoint at ${ckpt}"
         return
     fi
 
-    local use_test_flag=""
-    [ "${ds}" = "IXI" ] && use_test_flag="--use_test"
-
-    local out_dir="${OUT}/inference/${exp_name}"
-
-    echo "==========================================="
-    echo ">> ${exp_name} (${ds}, model=${model})"
-    echo "==========================================="
+    echo "==================================================================="
+    echo "> INFER ${exp_name}"
+    echo "  ds=${ds}, config=${ctcf_config}, ctcf_l3_svf=${ctcf_l3_svf}"
+    echo "  out=${out_dir}"
+    echo "==================================================================="
 
     "${PYBIN}" -m experiments.inference \
         --ds "${ds}" ${PATHS_PROFILE} --gpu "${GPU}" \
-        --model "${model}" \
+        --model ctcf \
         --ckpt "${ckpt}" \
         --strict_ckpt 0 \
         --hd95 \
         ${use_test_flag} \
-        ${config_arg} \
-        ${extra_args} \
+        --ctcf_config "${ctcf_config}" \
+        --ctcf_l3_svf "${ctcf_l3_svf}" \
         --out_dir "${out_dir}"
 }
 
-if [ "${SKIP_INFERENCE}" != "1" ]; then
-
-    # ===== Cascade runs OASIS =====
-    run_inf P7_CASC_LKU8_OASIS          OASIS ctcf "--ctcf_config CTCF-CascadeA-LKU8"  ""
-    run_inf P8_CASC_LKU8_FIXSCHED_OASIS OASIS ctcf "--ctcf_config CTCF-CascadeA-LKU8"  ""
-    run_inf P8_CASC_LKU32_SVF_OASIS     OASIS ctcf "--ctcf_config CTCF-CascadeA-LKU32" ""
-    run_inf P7_CASC_MAMBA_SVF_OASIS     OASIS ctcf "--ctcf_config CTCF-CascadeA-Mamba" ""
-    run_inf P8_CASC_MAMBA_NOSVF_OASIS   OASIS ctcf "--ctcf_config CTCF-CascadeA-Mamba" ""
-    run_inf P7_CASC_VMAMBA_SVF_OASIS    OASIS ctcf "--ctcf_config CTCF-CascadeA-VMamba" ""
-    run_inf P9_CASC_VXM_SVF_OASIS       OASIS ctcf "--ctcf_config CTCF-CascadeA-VM" ""
-    run_inf P9_CASC_LKU8_SVF_OASIS      OASIS ctcf "--ctcf_config CTCF-CascadeA-LKU8" ""
-
-    # ===== Cascade runs IXI =====
-    run_inf P8_CASC_MAMBA_SVF_IXI       IXI ctcf "--ctcf_config CTCF-CascadeA-Mamba"  ""
-    run_inf P8_CASC_LKU32_SVF_IXI       IXI ctcf "--ctcf_config CTCF-CascadeA-LKU32" ""
-    run_inf P9_CASC_VXM_SVF_IXI         IXI ctcf "--ctcf_config CTCF-CascadeA-VM" ""
-    run_inf P9_CASC_LKU8_SVF_IXI        IXI ctcf "--ctcf_config CTCF-CascadeA-LKU8" ""
-    run_inf P9_CASC_MAMBA_NOSVF_IXI     IXI ctcf "--ctcf_config CTCF-CascadeA-Mamba" ""
-    run_inf P9_CASC_VMAMBA_SVF_IXI      IXI ctcf "--ctcf_config CTCF-CascadeA-VMamba" ""
-
-    # ===== L2-only controls OASIS =====
-    run_inf P7_CTRL_LKU8_L2ONLY_OASIS   OASIS ctcf "--ctcf_config CTCF-LKU8-solo" ""
-    run_inf P7_CTRL_LKU32_L2ONLY_OASIS  OASIS ctcf "--ctcf_config CTCF-LKU32-solo" ""
-    run_inf P7_CTRL_MAMBA_L2ONLY_OASIS  OASIS ctcf "--ctcf_config CTCF-Mamba-solo" ""
-    run_inf P7_CTRL_VMAMBA_L2ONLY_OASIS OASIS ctcf "--ctcf_config CTCF-VMamba-solo" ""
-    run_inf P9_CTRL_VXM_L2ONLY_OASIS    OASIS ctcf "--ctcf_config CTCF-VM-solo" ""
-
-    # ===== L2-only controls IXI =====
-    run_inf P9_CTRL_LKU8_L2ONLY_IXI     IXI ctcf "--ctcf_config CTCF-LKU8-solo" ""
-    run_inf P9_CTRL_LKU32_L2ONLY_IXI    IXI ctcf "--ctcf_config CTCF-LKU32-solo" ""
-    run_inf P9_CTRL_MAMBA_L2ONLY_IXI    IXI ctcf "--ctcf_config CTCF-Mamba-solo" ""
-    run_inf P9_CTRL_VMAMBA_L2ONLY_IXI   IXI ctcf "--ctcf_config CTCF-VMamba-solo" ""
-    run_inf P9_CTRL_VXM_L2ONLY_IXI      IXI ctcf "--ctcf_config CTCF-VM-solo" ""
-
+if [ "${SKIP_VXM}" != "1" ]; then
+    run_inf P9_CASC_VXM_SVF_OASIS_FIX OASIS CTCF-CascadeA-VM 1
+    run_inf P9_CASC_VXM_SVF_IXI_FIX   IXI   CTCF-CascadeA-VM 1
 fi
 
-# ===== Cascade complexity (params, GFLOPs, VRAM, throughput) =====
-if [ "${SKIP_COMPLEXITY}" != "1" ]; then
-    echo ""
-    echo "==========================================="
-    echo ">> Cascade complexity"
-    echo "==========================================="
-    "${PYBIN}" tools/model_complexity.py --gpu "${GPU}" --out "${OUT}/complexity.csv"
+if [ "${SKIP_LKU8}" != "1" ]; then
+    run_inf P9_CASC_LKU8_SVF_OASIS_FIX OASIS CTCF-CascadeA-LKU8 1
+    run_inf P9_CASC_LKU8_SVF_IXI_FIX   IXI   CTCF-CascadeA-LKU8 1
 fi
 
-# ===== Aggregate per_case.csv into paste-ready tables =====
-if [ "${SKIP_AGGREGATE}" != "1" ]; then
-    echo ""
-    echo "==========================================="
-    echo ">> Aggregating into paste-ready tables"
-    echo "==========================================="
-    "${PYBIN}" tools/aggregate_sedm_results.py \
-        --inference-dir "${OUT}/inference" \
-        --complexity "${OUT}/complexity.csv" \
-        --output-dir "${OUT}/summary"
+if [ "${SKIP_LKU32}" != "1" ]; then
+    run_inf P8_CASC_LKU32_SVF_OASIS_FIX OASIS CTCF-CascadeA-LKU32 1
+    run_inf P8_CASC_LKU32_SVF_IXI_FIX   IXI   CTCF-CascadeA-LKU32 1
 fi
 
-echo ""
-echo "==========================================="
-echo "SEDM packaging complete."
-echo "Output: ${OUT}/"
-echo "  inference/<exp>/per_case.csv       — per-pair metrics"
-echo "  complexity.csv                     — params, GFLOPs, VRAM, throughput"
-echo "  summary/main_oasis.{md,tex}        — paste-ready main OASIS table"
-echo "  summary/main_ixi.{md,tex}          — paste-ready main IXI table"
-echo "  summary/cascade_delta.{md,tex}     — L2-only vs cascade Δ"
-echo "  summary/stat_tests.md              — paired Wilcoxon vs Paper 1"
-echo "  summary/README.md                  — overview"
-echo "==========================================="
+if [ "${SKIP_MAMBA_NOSVF}" != "1" ]; then
+    run_inf P8_CASC_MAMBA_NOSVF_OASIS_FIX OASIS CTCF-CascadeA-Mamba 0
+    run_inf P9_CASC_MAMBA_NOSVF_IXI_FIX   IXI   CTCF-CascadeA-Mamba 0
+fi
+
+echo "==================================================================="
+echo "Phase 9 Sub-B repair inference complete."
+echo "Output: ${OUT}/inference/<exp_name>/"
+echo "Send back this output directory plus the console log."
+echo "==================================================================="
