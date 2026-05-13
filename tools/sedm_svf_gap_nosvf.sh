@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# SEDM SVF gap closure: train and infer only the three missing NoSVF runs.
+# SEDM SVF gap closure: train and infer only the missing NoSVF runs.
 #
 # Purpose:
-#   Close the smallest fair L3-SVF OFF/ON comparison matrix for SEDM without
-#   rerunning the already completed inference pack.
+#   Close the fair L3-SVF OFF/ON comparison matrix for SEDM without rerunning
+#   already completed SVF checkpoints.
 #
 # Runs:
 #   SEDM_CASC_LKU8_NOSVF_IXI
 #   SEDM_CASC_VXM_NOSVF_OASIS
 #   SEDM_CASC_VXM_NOSVF_IXI
+#   SEDM_CASC_MAMBA_NOSVF_OASIS
+#   SEDM_CASC_MAMBA_NOSVF_IXI
 #
 # Usage:
 #   conda activate ctcf
@@ -18,6 +20,7 @@
 #   GPU=0 MAX_EPOCH=100 PATHS_PROFILE=--2 bash tools/sedm_svf_gap_nosvf.sh
 #   RUN_TRAIN=0 bash tools/sedm_svf_gap_nosvf.sh
 #   RUN_INFERENCE=0 bash tools/sedm_svf_gap_nosvf.sh
+#   SKIP_MAMBA_OASIS=1 SKIP_MAMBA_IXI=1 bash tools/sedm_svf_gap_nosvf.sh
 #   DRY_RUN=1 bash tools/sedm_svf_gap_nosvf.sh
 
 set -euo pipefail
@@ -34,6 +37,8 @@ RUN_INFERENCE="${RUN_INFERENCE:-1}"
 SKIP_LKU8_IXI="${SKIP_LKU8_IXI:-0}"
 SKIP_VXM_OASIS="${SKIP_VXM_OASIS:-0}"
 SKIP_VXM_IXI="${SKIP_VXM_IXI:-0}"
+SKIP_MAMBA_OASIS="${SKIP_MAMBA_OASIS:-0}"
+SKIP_MAMBA_IXI="${SKIP_MAMBA_IXI:-0}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
@@ -62,6 +67,7 @@ infer_ctcf() {
     local exp_name="$1"
     local ds="$2"
     local ctcf_config="$3"
+    local ctcf_l3_svf="$4"
     local ckpt="results/${exp_name}/ckpt/best.pth"
     local out_dir="${OUT}/inference/${exp_name}"
     local use_test_flag=""
@@ -84,6 +90,7 @@ infer_ctcf() {
         --hd95 \
         ${use_test_flag} \
         --ctcf_config "${ctcf_config}" \
+        --ctcf_l3_svf "${ctcf_l3_svf}" \
         --out_dir "${out_dir}"
 }
 
@@ -108,19 +115,41 @@ if [ "${RUN_TRAIN}" = "1" ]; then
             --l3_svf 0 \
             ${CTCF_IXI}
     fi
+
+    if [ "${SKIP_MAMBA_OASIS}" != "1" ]; then
+        train_ctcf "SEDM_CASC_MAMBA_NOSVF_OASIS" \
+            --config CTCF-CascadeA-Mamba \
+            --l3_svf 0 \
+            ${CTCF_OASIS}
+    fi
+
+    if [ "${SKIP_MAMBA_IXI}" != "1" ]; then
+        train_ctcf "SEDM_CASC_MAMBA_NOSVF_IXI" \
+            --config CTCF-CascadeA-Mamba \
+            --l3_svf 0 \
+            ${CTCF_IXI}
+    fi
 fi
 
 if [ "${RUN_INFERENCE}" = "1" ]; then
     if [ "${SKIP_LKU8_IXI}" != "1" ]; then
-        infer_ctcf "SEDM_CASC_LKU8_NOSVF_IXI" IXI CTCF-CascadeA-LKU8
+        infer_ctcf "SEDM_CASC_LKU8_NOSVF_IXI" IXI CTCF-CascadeA-LKU8 0
     fi
 
     if [ "${SKIP_VXM_OASIS}" != "1" ]; then
-        infer_ctcf "SEDM_CASC_VXM_NOSVF_OASIS" OASIS CTCF-CascadeA-VM
+        infer_ctcf "SEDM_CASC_VXM_NOSVF_OASIS" OASIS CTCF-CascadeA-VM 0
     fi
 
     if [ "${SKIP_VXM_IXI}" != "1" ]; then
-        infer_ctcf "SEDM_CASC_VXM_NOSVF_IXI" IXI CTCF-CascadeA-VM
+        infer_ctcf "SEDM_CASC_VXM_NOSVF_IXI" IXI CTCF-CascadeA-VM 0
+    fi
+
+    if [ "${SKIP_MAMBA_OASIS}" != "1" ]; then
+        infer_ctcf "SEDM_CASC_MAMBA_NOSVF_OASIS" OASIS CTCF-CascadeA-Mamba 0
+    fi
+
+    if [ "${SKIP_MAMBA_IXI}" != "1" ]; then
+        infer_ctcf "SEDM_CASC_MAMBA_NOSVF_IXI" IXI CTCF-CascadeA-Mamba 0
     fi
 fi
 

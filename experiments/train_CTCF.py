@@ -10,6 +10,12 @@ from utils import RegisterModel, ctcf_schedule, dice_val, icon_loss, neg_jacobia
 from models.CTCF.configs import CONFIGS
 
 
+def _optional_bool(value):
+    if value is None:
+        return None
+    return bool(int(value))
+
+
 class Runner:
     """CTCF trainer with legacy cascade warm-up schedule and bidirectional losses."""
     def __init__(self, args, device):
@@ -35,11 +41,11 @@ class Runner:
             l3_base_ch=getattr(args, 'l3_base_ch', None),
             l3_error_mode=getattr(args, 'l3_error_mode', None),
             l3_iters=getattr(args, 'l3_iters', None),
-            l3_unshared=True if int(getattr(args, 'l3_unshared', 0)) else None,
-            l1_half_res=True if int(getattr(args, 'l1_half_res', 0)) else None,
-            l2_full_res=True if int(getattr(args, 'l2_full_res', 0)) else None,
-            l3_full_res=True if int(getattr(args, 'l3_full_res', 0)) else None,
-            l3_svf=True if int(getattr(args, 'l3_svf', 0)) else None,
+            l3_unshared=_optional_bool(getattr(args, 'l3_unshared', None)),
+            l1_half_res=_optional_bool(getattr(args, 'l1_half_res', None)),
+            l2_full_res=_optional_bool(getattr(args, 'l2_full_res', None)),
+            l3_full_res=_optional_bool(getattr(args, 'l3_full_res', None)),
+            l3_svf=_optional_bool(getattr(args, 'l3_svf', None)),
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -161,11 +167,11 @@ def parse_args():
     p.add_argument("--l3_error_mode", type=str, choices=["absdiff", "gradmag", "ncc"], default=None, help="L3 error map mode.")
 
     p.add_argument("--l3_iters", type=int, default=None, help="Number of L3 refinement iterations (default: 1).")
-    p.add_argument("--l3_unshared", type=int, choices=[0, 1], default=0, help="If 1, use separate L3 weights per iteration (requires l3_iters>1).")
-    p.add_argument("--l1_half_res", type=int, choices=[0, 1], default=0, help="If 1, run L1 at half-res instead of quarter-res.")
-    p.add_argument("--l2_full_res", type=int, choices=[0, 1], default=0, help="If 1, run L2 at full-res (recommended default for new backbones).")
-    p.add_argument("--l3_full_res", type=int, choices=[0, 1], default=0, help="Legacy: if 1, run L3 alone at full-res (Paper 1 R5 path).")
-    p.add_argument("--l3_svf", type=int, choices=[0, 1], default=0, help="If 1, integrate L3 delta as SVF via scaling-and-squaring.")
+    p.add_argument("--l3_unshared", type=int, choices=[0, 1], default=None, help="Override config: use separate L3 weights per iteration (requires l3_iters>1).")
+    p.add_argument("--l1_half_res", type=int, choices=[0, 1], default=None, help="Override config: run L1 at half-res instead of quarter-res.")
+    p.add_argument("--l2_full_res", type=int, choices=[0, 1], default=None, help="Override config: run L2 at full-res.")
+    p.add_argument("--l3_full_res", type=int, choices=[0, 1], default=None, help="Override config: run L3 at full-res.")
+    p.add_argument("--l3_svf", type=int, choices=[0, 1], default=None, help="Override config: integrate L3 delta as SVF via scaling-and-squaring.")
 
     p.add_argument("--reg_mode", type=str, choices=["diffusion", "dare", "elastic"], default="diffusion",
                     help="Regularization mode: diffusion (default Grad3d), dare (DARE-minimal), elastic (Navier-Cauchy).")
