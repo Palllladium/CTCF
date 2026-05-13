@@ -78,23 +78,23 @@ run_inf() {
 }
 
 if [ "${SKIP_VXM}" != "1" ]; then
-    run_inf P9_CASC_VXM_SVF_OASIS_FIX OASIS CTCF-CascadeA-VM 1
-    run_inf P9_CASC_VXM_SVF_IXI_FIX   IXI   CTCF-CascadeA-VM 1
+    run_inf P9_CASC_VXM_SVF_OASIS OASIS CTCF-CascadeA-VM 1
+    run_inf P9_CASC_VXM_SVF_IXI   IXI   CTCF-CascadeA-VM 1
 fi
 
 if [ "${SKIP_LKU8}" != "1" ]; then
-    run_inf P9_CASC_LKU8_SVF_OASIS_FIX OASIS CTCF-CascadeA-LKU8 1
-    run_inf P9_CASC_LKU8_SVF_IXI_FIX   IXI   CTCF-CascadeA-LKU8 1
+    run_inf P9_CASC_LKU8_SVF_OASIS OASIS CTCF-CascadeA-LKU8 1
+    run_inf P9_CASC_LKU8_SVF_IXI   IXI   CTCF-CascadeA-LKU8 1
 fi
 
 if [ "${SKIP_LKU32}" != "1" ]; then
-    run_inf P8_CASC_LKU32_SVF_OASIS_FIX OASIS CTCF-CascadeA-LKU32 1
-    run_inf P8_CASC_LKU32_SVF_IXI_FIX   IXI   CTCF-CascadeA-LKU32 1
+    run_inf P8_CASC_LKU32_SVF_OASIS OASIS CTCF-CascadeA-LKU32 1
+    run_inf P8_CASC_LKU32_SVF_IXI   IXI   CTCF-CascadeA-LKU32 1
 fi
 
 if [ "${SKIP_MAMBA_NOSVF}" != "1" ]; then
-    run_inf P8_CASC_MAMBA_NOSVF_OASIS_FIX OASIS CTCF-CascadeA-Mamba 0
-    run_inf P9_CASC_MAMBA_NOSVF_IXI_FIX   IXI   CTCF-CascadeA-Mamba 0
+    run_inf P8_CASC_MAMBA_NOSVF_OASIS OASIS CTCF-CascadeA-Mamba 0
+    run_inf P9_CASC_MAMBA_NOSVF_IXI   IXI   CTCF-CascadeA-Mamba 0
 fi
 
 echo "==================================================================="
