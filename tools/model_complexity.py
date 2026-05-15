@@ -1,7 +1,7 @@
 """
 Model complexity report for the paper: params, FLOPs, peak VRAM, inference throughput.
 
-Reports one line per (model, config_key) pair at the OASIS/IXI input shape (160, 192, 224).
+Reports one line per model/configuration at the OASIS/IXI input shape (160, 192, 224).
 
 Usage:
   python tools/model_complexity.py --gpu 0
@@ -28,17 +28,38 @@ from experiments.core.model_adapters import get_model_adapter
 
 
 MODELS = [
-    # Paper 1 lineup
-    ("ctcf",           "CTCF-CascadeA"),
-    ("tm-dca",         "TransMorph-3-LVL"),
-    ("utsrmorph",      "UTSRMorph-Large"),
-    ("utsrmorph",      "UTSRMorph-IXI-Large"),
-    # Phase 6 backbones
-    ("lkunet",         "LKU-4"),
-    ("lkunet",         "LKU-8"),
-    ("efficientmorph", "EfficientMorph_2x3_2_hires"),
-    ("mambamorph",     "MambaMorph"),
-    ("vmambamorph",    "VMambaMorph"),
+    # Earlier paper lineup.
+    {"role": "mdpi", "label": "CTCF-CascadeA", "model": "ctcf", "config": "CTCF-CascadeA"},
+    {"role": "mdpi", "label": "TransMorph-3-LVL", "model": "tm-dca", "config": "TransMorph-3-LVL"},
+    {"role": "mdpi", "label": "UTSRMorph-Large", "model": "utsrmorph", "config": "UTSRMorph-Large"},
+    {"role": "mdpi", "label": "UTSRMorph-IXI-Large", "model": "utsrmorph", "config": "UTSRMorph-IXI-Large"},
+
+    # Standalone backbones considered for SEDM.
+    {"role": "standalone", "label": "LKU-4", "model": "lkunet", "config": "LKU-4"},
+    {"role": "standalone", "label": "LKU-8", "model": "lkunet", "config": "LKU-8"},
+    {"role": "standalone", "label": "EfficientMorph_2x3_2_hires", "model": "efficientmorph", "config": "EfficientMorph_2x3_2_hires"},
+    {"role": "standalone", "label": "MambaMorph", "model": "mambamorph", "config": "MambaMorph"},
+    {"role": "standalone", "label": "VMambaMorph", "model": "vmambamorph", "config": "VMambaMorph"},
+
+    # SEDM Level-2-only controls through the CTCF adapter.
+    {"role": "sedm_l2_only", "label": "CTCF-VM-solo", "model": "ctcf", "config": "CTCF-VM-solo"},
+    {"role": "sedm_l2_only", "label": "CTCF-LKU8-solo", "model": "ctcf", "config": "CTCF-LKU8-solo"},
+    {"role": "sedm_l2_only", "label": "CTCF-LKU32-solo", "model": "ctcf", "config": "CTCF-LKU32-solo"},
+    {"role": "sedm_l2_only", "label": "CTCF-Mamba-solo", "model": "ctcf", "config": "CTCF-Mamba-solo"},
+    {"role": "sedm_l2_only", "label": "CTCF-VMamba-solo", "model": "ctcf", "config": "CTCF-VMamba-solo"},
+
+    # SEDM cascades. SVF changes runtime/VRAM but not parameter count, so keep both
+    # variants where they are part of the experiment matrix or a planned gap run.
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VM-SVF", "model": "ctcf", "config": "CTCF-CascadeA-VM", "l3_svf": True},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VM-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-VM", "l3_svf": False},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU8-SVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU8", "l3_svf": True},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU8-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU8", "l3_svf": False},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU32-SVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU32", "l3_svf": True},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU32-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU32", "l3_svf": False},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-Mamba-SVF", "model": "ctcf", "config": "CTCF-CascadeA-Mamba", "l3_svf": True},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-Mamba-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-Mamba", "l3_svf": False},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VMamba-SVF", "model": "ctcf", "config": "CTCF-CascadeA-VMamba", "l3_svf": True},
+    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VMamba-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-VMamba", "l3_svf": False},
 ]
 
 INPUT_SHAPE = (1, 1, 160, 192, 224)
@@ -52,6 +73,14 @@ def count_params(model: torch.nn.Module) -> tuple[int, int]:
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
+
+
+def svf_label(value) -> str:
+    if value is True:
+        return "on"
+    if value is False:
+        return "off"
+    return "config"
 
 
 class _FlopWrapped(torch.nn.Module):
@@ -138,19 +167,31 @@ def main() -> None:
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA unavailable — complexity measurements require a GPU.")
+        raise RuntimeError("CUDA unavailable: complexity measurements require a GPU.")
     device = torch.device(f"cuda:{args.gpu}")
     torch.cuda.set_device(device)
 
-    header = ["model", "config", "params_M", "params_trainable_M", "gflops", "peak_vram_GB", "sec_per_pair", "pairs_per_sec"]
+    header = [
+        "role", "label", "model", "config", "l3_svf",
+        "params_M", "params_trainable_M", "gflops",
+        "peak_vram_GB", "sec_per_pair", "pairs_per_sec",
+    ]
     rows = []
 
-    for model_name, config_key in MODELS:
-        print(f"\n=== {model_name} | {config_key} ===")
+    for spec in MODELS:
+        role = spec["role"]
+        label = spec["label"]
+        model_name = spec["model"]
+        config_key = spec["config"]
+        l3_svf = spec.get("l3_svf")
+
+        print(f"\n=== {role} | {label} | {model_name} | {config_key} ===")
         adapter = get_model_adapter(model_name)
         build_kwargs: dict = {"config_key": config_key}
         if model_name in ("ctcf", "tm-dca"):
             build_kwargs["time_steps"] = 12
+        if model_name == "ctcf" and l3_svf is not None:
+            build_kwargs["l3_svf"] = bool(l3_svf)
 
         torch.cuda.empty_cache()
         try:
@@ -158,7 +199,8 @@ def main() -> None:
         except Exception as exc:
             print(f"  BUILD FAILED: {type(exc).__name__}: {exc}")
             rows.append([
-                model_name, config_key, "n/a", "n/a", "n/a", "n/a", "n/a", "n/a",
+                role, label, model_name, config_key, svf_label(l3_svf),
+                "n/a", "n/a", "n/a", "n/a", "n/a", "n/a",
             ])
             continue
 
@@ -166,21 +208,37 @@ def main() -> None:
         print(f"  params total    : {total/1e6:.2f} M")
         print(f"  params trainable: {trainable/1e6:.2f} M")
 
-        x = torch.randn(*INPUT_SHAPE, device=device)
-        y = torch.randn(*INPUT_SHAPE, device=device)
+        x = y = None
+        try:
+            x = torch.randn(*INPUT_SHAPE, device=device)
+            y = torch.randn(*INPUT_SHAPE, device=device)
 
-        gflops = "n/a" if args.skip_flops else try_flops(model, x, y, model_name)
-        print(f"  gflops          : {gflops}")
+            gflops = "n/a" if args.skip_flops else try_flops(model, x, y, model_name)
+            print(f"  gflops          : {gflops}")
 
-        peak_gb = measure_peak_vram(adapter, model, x, y, device)
-        print(f"  peak VRAM       : {peak_gb:.2f} GB")
+            peak_gb = measure_peak_vram(adapter, model, x, y, device)
+            print(f"  peak VRAM       : {peak_gb:.2f} GB")
 
-        sec_per_pair, pairs_per_sec = measure_throughput(adapter, model, x, y, device, args.warmup, args.iters)
-        print(f"  sec/pair        : {sec_per_pair:.4f}")
-        print(f"  pairs/sec       : {pairs_per_sec:.2f}")
+            sec_per_pair, pairs_per_sec = measure_throughput(adapter, model, x, y, device, args.warmup, args.iters)
+            print(f"  sec/pair        : {sec_per_pair:.4f}")
+            print(f"  pairs/sec       : {pairs_per_sec:.2f}")
+        except Exception as exc:
+            print(f"  MEASURE FAILED: {type(exc).__name__}: {exc}")
+            rows.append([
+                role, label, model_name, config_key, svf_label(l3_svf),
+                f"{total/1e6:.2f}", f"{trainable/1e6:.2f}",
+                "n/a", "n/a", "n/a", "n/a",
+            ])
+            del model
+            if x is not None:
+                del x
+            if y is not None:
+                del y
+            torch.cuda.empty_cache()
+            continue
 
         rows.append([
-            model_name, config_key,
+            role, label, model_name, config_key, svf_label(l3_svf),
             f"{total/1e6:.2f}", f"{trainable/1e6:.2f}",
             gflops, f"{peak_gb:.2f}",
             f"{sec_per_pair:.4f}", f"{pairs_per_sec:.2f}",

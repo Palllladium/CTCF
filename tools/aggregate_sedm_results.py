@@ -69,6 +69,44 @@ CONFIGS = {
     "P9_CTRL_VMAMBA_L2ONLY_IXI":     dict(family="state-space cross-scan",backbone="VMambaMorph", params_m=9.4,  ds="IXI",   group="L2-only"),
 }
 
+# Corrections after the Level-3 SVF inference/training flag audit.
+# Keep the original registry above as historical context, then normalize the
+# experiments that should be used by the current SEDM tables.
+CONFIGS.pop("P7_CASC_LKU8_OASIS", None)
+CONFIGS.pop("P8_CASC_MAMBA_NOSVF_OASIS", None)
+CONFIGS.pop("P9_CASC_MAMBA_NOSVF_IXI", None)
+
+CONFIGS.update({
+    "P9_CASC_VXM_SVF_OASIS":         dict(family="classical CNN",         backbone="VoxelMorph",  svf="ON",  params_m=9.240905,  ds="OASIS", group="cascade"),
+    "SEDM_CASC_VXM_NOSVF_OASIS":     dict(family="classical CNN",         backbone="VoxelMorph",  svf="OFF", params_m=9.240905,  ds="OASIS", group="cascade"),
+    "P8_CASC_LKU8_FIXSCHED_OASIS":   dict(family="large-kernel CNN",      backbone="LKU-8",       svf="OFF", params_m=6.691596,  ds="OASIS", group="cascade", note="P8 fixsched"),
+    "P9_CASC_LKU8_SVF_OASIS":        dict(family="large-kernel CNN",      backbone="LKU-8",       svf="ON",  params_m=6.691596,  ds="OASIS", group="cascade"),
+    "P8_CASC_LKU32_SVF_OASIS":       dict(family="large-kernel CNN",      backbone="LKU-32",      svf="ON",  params_m=37.952796, ds="OASIS", group="cascade"),
+    "P7_CASC_MAMBA_SVF_OASIS":       dict(family="state-space",           backbone="MambaMorph",  svf="ON",  params_m=11.910713, ds="OASIS", group="cascade"),
+    "SEDM_CASC_MAMBA_NOSVF_OASIS":   dict(family="state-space",           backbone="MambaMorph",  svf="OFF", params_m=11.910713, ds="OASIS", group="cascade"),
+    "P7_CASC_VMAMBA_SVF_OASIS":      dict(family="state-space cross-scan",backbone="VMambaMorph", svf="ON",  params_m=13.957625, ds="OASIS", group="cascade"),
+
+    "P9_CASC_VXM_SVF_IXI":           dict(family="classical CNN",         backbone="VoxelMorph",  svf="ON",  params_m=9.240905,  ds="IXI",   group="cascade"),
+    "SEDM_CASC_VXM_NOSVF_IXI":       dict(family="classical CNN",         backbone="VoxelMorph",  svf="OFF", params_m=9.240905,  ds="IXI",   group="cascade"),
+    "P9_CASC_LKU8_SVF_IXI":          dict(family="large-kernel CNN",      backbone="LKU-8",       svf="ON",  params_m=6.691596,  ds="IXI",   group="cascade"),
+    "SEDM_CASC_LKU8_NOSVF_IXI":      dict(family="large-kernel CNN",      backbone="LKU-8",       svf="OFF", params_m=6.691596,  ds="IXI",   group="cascade"),
+    "P8_CASC_LKU32_SVF_IXI":         dict(family="large-kernel CNN",      backbone="LKU-32",      svf="ON",  params_m=37.952796, ds="IXI",   group="cascade"),
+    "P8_CASC_MAMBA_SVF_IXI":         dict(family="state-space",           backbone="MambaMorph",  svf="ON",  params_m=11.910713, ds="IXI",   group="cascade"),
+    "SEDM_CASC_MAMBA_NOSVF_IXI":     dict(family="state-space",           backbone="MambaMorph",  svf="OFF", params_m=11.910713, ds="IXI",   group="cascade"),
+    "P9_CASC_VMAMBA_SVF_IXI":        dict(family="state-space cross-scan",backbone="VMambaMorph", svf="ON",  params_m=13.957625, ds="IXI",   group="cascade"),
+
+    "P9_CTRL_VXM_L2ONLY_OASIS":      dict(family="classical CNN",         backbone="VoxelMorph",  params_m=0.396451,  ds="OASIS", group="L2-only"),
+    "P7_CTRL_LKU8_L2ONLY_OASIS":     dict(family="large-kernel CNN",      backbone="LKU-8",       params_m=2.086342,  ds="OASIS", group="L2-only"),
+    "P7_CTRL_LKU32_L2ONLY_OASIS":    dict(family="large-kernel CNN",      backbone="LKU-32",      params_m=33.347542, ds="OASIS", group="L2-only"),
+    "P7_CTRL_MAMBA_L2ONLY_OASIS":    dict(family="state-space",           backbone="MambaMorph",  params_m=7.305459,  ds="OASIS", group="L2-only"),
+    "P7_CTRL_VMAMBA_L2ONLY_OASIS":   dict(family="state-space cross-scan",backbone="VMambaMorph", params_m=9.352371,  ds="OASIS", group="L2-only"),
+    "P9_CTRL_VXM_L2ONLY_IXI":        dict(family="classical CNN",         backbone="VoxelMorph",  params_m=0.396451,  ds="IXI",   group="L2-only"),
+    "P9_CTRL_LKU8_L2ONLY_IXI":       dict(family="large-kernel CNN",      backbone="LKU-8",       params_m=2.086342,  ds="IXI",   group="L2-only"),
+    "P9_CTRL_LKU32_L2ONLY_IXI":      dict(family="large-kernel CNN",      backbone="LKU-32",      params_m=33.347542, ds="IXI",   group="L2-only"),
+    "P9_CTRL_MAMBA_L2ONLY_IXI":      dict(family="state-space",           backbone="MambaMorph",  params_m=7.305459,  ds="IXI",   group="L2-only"),
+    "P9_CTRL_VMAMBA_L2ONLY_IXI":     dict(family="state-space cross-scan",backbone="VMambaMorph", params_m=9.352371,  ds="IXI",   group="L2-only"),
+})
+
 
 def load_per_case(csv_path: Path) -> list[dict]:
     with open(csv_path, "r", encoding="utf-8") as f:
@@ -241,8 +279,8 @@ def write_stat_tests(stats_by_exp, output_dir: Path):
         ("SEDM_CASC_VXM_NOSVF_IXI",    "P9_CASC_VXM_SVF_IXI",      "VoxelMorph NoSVF vs SVF (IXI)"),
         ("P7_CASC_LKU8_OASIS",         "P9_CASC_LKU8_SVF_OASIS",   "LKU-8 NoSVF vs SVF (OASIS)"),
         ("SEDM_CASC_LKU8_NOSVF_IXI",   "P9_CASC_LKU8_SVF_IXI",     "LKU-8 NoSVF vs SVF (IXI)"),
-        ("P8_CASC_MAMBA_NOSVF_OASIS", "P7_CASC_MAMBA_SVF_OASIS",  "Mamba NoSVF vs SVF (OASIS)"),
-        ("P9_CASC_MAMBA_NOSVF_IXI",   "P8_CASC_MAMBA_SVF_IXI",    "Mamba NoSVF vs SVF (IXI)"),
+        ("SEDM_CASC_MAMBA_NOSVF_OASIS", "P7_CASC_MAMBA_SVF_OASIS",  "Mamba NoSVF vs SVF (OASIS)"),
+        ("SEDM_CASC_MAMBA_NOSVF_IXI",   "P8_CASC_MAMBA_SVF_IXI",    "Mamba NoSVF vs SVF (IXI)"),
     ]
     md.append("| Сравнение | N | mean Δ Dice | Wilcoxon p |")
     md.append("|---|---|---|---|")
