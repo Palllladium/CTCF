@@ -27,6 +27,9 @@ def _build_level2(config, backbone: str, l2_full_res: bool = False):
     elif backbone == "vmamba":
         from models.VMambaMorph.wrapper import VMambaMorphCascadeL2
         return VMambaMorphCascadeL2(config)
+    elif backbone == "effm":
+        from models.EfficientMorph.wrapper import EffMorphCascadeL2
+        return EffMorphCascadeL2(config)
     else:
         raise ValueError(f"Unknown backbone: {backbone}")
 

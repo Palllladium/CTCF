@@ -277,7 +277,7 @@ def write_stat_tests(stats_by_exp, output_dir: Path):
     comparisons = [
         ("SEDM_CASC_VXM_NOSVF_OASIS",  "P9_CASC_VXM_SVF_OASIS",    "VoxelMorph NoSVF vs SVF (OASIS)"),
         ("SEDM_CASC_VXM_NOSVF_IXI",    "P9_CASC_VXM_SVF_IXI",      "VoxelMorph NoSVF vs SVF (IXI)"),
-        ("P7_CASC_LKU8_OASIS",         "P9_CASC_LKU8_SVF_OASIS",   "LKU-8 NoSVF vs SVF (OASIS)"),
+        ("P8_CASC_LKU8_FIXSCHED_OASIS", "P9_CASC_LKU8_SVF_OASIS",  "LKU-8 NoSVF vs SVF (OASIS)"),
         ("SEDM_CASC_LKU8_NOSVF_IXI",   "P9_CASC_LKU8_SVF_IXI",     "LKU-8 NoSVF vs SVF (IXI)"),
         ("SEDM_CASC_MAMBA_NOSVF_OASIS", "P7_CASC_MAMBA_SVF_OASIS",  "Mamba NoSVF vs SVF (OASIS)"),
         ("SEDM_CASC_MAMBA_NOSVF_IXI",   "P8_CASC_MAMBA_SVF_IXI",    "Mamba NoSVF vs SVF (IXI)"),
