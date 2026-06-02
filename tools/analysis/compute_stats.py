@@ -293,24 +293,39 @@ def cmd_cross(args):
 # ---------------------------------------------------------------------------
 
 SEDM_OASIS_CONFIGS = [
-    ("P9_CASC_VXM_SVF_OASIS",          "VxM SVF"),
-    ("SEDM_CASC_VXM_NOSVF_OASIS",      "VxM NoSVF"),
-    ("P8_CASC_LKU8_FIXSCHED_OASIS",    "LKU-8 NoSVF (fixsched)"),
-    ("P9_CASC_LKU8_SVF_OASIS",         "LKU-8 SVF"),
-    ("P8_CASC_LKU32_SVF_OASIS",        "LKU-32 SVF"),
-    ("P7_CASC_MAMBA_SVF_OASIS",        "Mamba SVF"),
-    ("SEDM_CASC_MAMBA_NOSVF_OASIS",    "Mamba NoSVF"),
-    ("P7_CASC_VMAMBA_SVF_OASIS",       "VMamba SVF"),
+    # ---- 100ep matrix (Phase 9 + SEDM gap-closers) ----
+    ("P9_CASC_VXM_SVF_OASIS",          "VxM SVF (100ep, legacy cfg)"),
+    ("SEDM_CASC_VXM_NOSVF_OASIS",      "VxM NoSVF (100ep)"),
+    ("P8_CASC_LKU8_FIXSCHED_OASIS",    "LKU-8 NoSVF fixsched (100ep)"),
+    ("P9_CASC_LKU8_SVF_OASIS",         "LKU-8 SVF (100ep)"),
+    ("P8_CASC_LKU32_SVF_OASIS",        "LKU-32 SVF (100ep)"),
+    ("P7_CASC_MAMBA_SVF_OASIS",        "Mamba SVF (100ep)"),
+    ("SEDM_CASC_MAMBA_NOSVF_OASIS",    "Mamba NoSVF (100ep)"),
+    ("P7_CASC_VMAMBA_SVF_OASIS",       "VMamba SVF (100ep)"),
+    # ---- 500ep longruns (Phase 10) ----
+    ("P10_LONGRUN_VXM_UNIFIED_SVF_OASIS", "VxM Unified SVF (500ep)"),
+    ("P10_LONGRUN_LKU8_SVF_OASIS",        "LKU-8 SVF (500ep)"),
+    ("P10_LONGRUN_MAMBA_SVF_OASIS",       "Mamba SVF (500ep)"),
+    ("P10_LONGRUN_MAMBA_NOSVF_OASIS",     "Mamba NoSVF (500ep)"),
+    # ---- Cross-dataset zero-shot (Mamba SVF headline) ----
+    ("P10_CROSS_MAMBA_SVF_IXI_TO_OASIS",  "Mamba SVF cross (IXI→OASIS, 500ep)"),
 ]
 SEDM_IXI_CONFIGS = [
-    ("P9_CASC_VXM_SVF_IXI",            "VxM SVF"),
-    ("SEDM_CASC_VXM_NOSVF_IXI",        "VxM NoSVF"),
-    ("P9_CASC_LKU8_SVF_IXI",           "LKU-8 SVF"),
-    ("SEDM_CASC_LKU8_NOSVF_IXI",       "LKU-8 NoSVF"),
-    ("P8_CASC_LKU32_SVF_IXI",          "LKU-32 SVF"),
-    ("P8_CASC_MAMBA_SVF_IXI",          "Mamba SVF"),
-    ("SEDM_CASC_MAMBA_NOSVF_IXI",      "Mamba NoSVF"),
-    ("P9_CASC_VMAMBA_SVF_IXI",         "VMamba SVF"),
+    # ---- 100ep matrix ----
+    ("P9_CASC_VXM_SVF_IXI",            "VxM SVF (100ep, legacy cfg)"),
+    ("SEDM_CASC_VXM_NOSVF_IXI",        "VxM NoSVF (100ep)"),
+    ("P9_CASC_LKU8_SVF_IXI",           "LKU-8 SVF (100ep)"),
+    ("SEDM_CASC_LKU8_NOSVF_IXI",       "LKU-8 NoSVF (100ep)"),
+    ("P8_CASC_LKU32_SVF_IXI",          "LKU-32 SVF (100ep)"),
+    ("P8_CASC_MAMBA_SVF_IXI",          "Mamba SVF (100ep)"),
+    ("SEDM_CASC_MAMBA_NOSVF_IXI",      "Mamba NoSVF (100ep)"),
+    ("P9_CASC_VMAMBA_SVF_IXI",         "VMamba SVF (100ep)"),
+    # ---- 500ep longruns (Phase 10) ----
+    ("P10_LONGRUN_VXM_UNIFIED_SVF_IXI",  "VxM Unified SVF (500ep)"),
+    ("P10_LONGRUN_LKU8_SVF_IXI",         "LKU-8 SVF (500ep)"),
+    ("P10_LONGRUN_MAMBA_SVF_IXI",        "Mamba SVF (500ep)"),
+    # ---- Cross-dataset zero-shot ----
+    ("P10_CROSS_MAMBA_SVF_OASIS_TO_IXI", "Mamba SVF cross (OASIS→IXI, 500ep)"),
 ]
 
 

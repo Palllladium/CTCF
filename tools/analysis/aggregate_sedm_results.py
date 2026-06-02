@@ -105,6 +105,21 @@ CONFIGS.update({
     "P9_CTRL_LKU32_L2ONLY_IXI":      dict(family="large-kernel CNN",      backbone="LKU-32",      params_m=33.347542, ds="IXI",   group="L2-only"),
     "P9_CTRL_MAMBA_L2ONLY_IXI":      dict(family="state-space",           backbone="MambaMorph",  params_m=7.305459,  ds="IXI",   group="L2-only"),
     "P9_CTRL_VMAMBA_L2ONLY_IXI":     dict(family="state-space cross-scan",backbone="VMambaMorph", params_m=9.352371,  ds="IXI",   group="L2-only"),
+
+    # ---------- Phase 10 longruns (500ep) — Paper 2 finalization ----------
+    "P10_LONGRUN_VXM_UNIFIED_SVF_OASIS":  dict(family="classical CNN",    backbone="VoxelMorph",  svf="ON",  params_m=9.240905,  ds="OASIS", group="cascade", note="500ep Unified"),
+    "P10_LONGRUN_VXM_UNIFIED_SVF_IXI":    dict(family="classical CNN",    backbone="VoxelMorph",  svf="ON",  params_m=9.240905,  ds="IXI",   group="cascade", note="500ep Unified"),
+    "P10_LONGRUN_LKU8_SVF_OASIS":         dict(family="large-kernel CNN", backbone="LKU-8",       svf="ON",  params_m=6.691596,  ds="OASIS", group="cascade", note="500ep"),
+    "P10_LONGRUN_LKU8_SVF_IXI":           dict(family="large-kernel CNN", backbone="LKU-8",       svf="ON",  params_m=6.691596,  ds="IXI",   group="cascade", note="500ep"),
+    "P10_LONGRUN_MAMBA_SVF_OASIS":        dict(family="state-space",      backbone="MambaMorph",  svf="ON",  params_m=11.910713, ds="OASIS", group="cascade", note="500ep"),
+    "P10_LONGRUN_MAMBA_SVF_IXI":          dict(family="state-space",      backbone="MambaMorph",  svf="ON",  params_m=11.910713, ds="IXI",   group="cascade", note="500ep"),
+    "P10_LONGRUN_MAMBA_NOSVF_OASIS":      dict(family="state-space",      backbone="MambaMorph",  svf="OFF", params_m=11.910713, ds="OASIS", group="cascade", note="500ep"),
+
+    # ---------- Phase 10 cross-dataset zero-shot (Mamba SVF headline) ----------
+    # Mamba SVF OASIS-trained ckpt evaluated on IXI test (cross direction OASIS→IXI)
+    "P10_CROSS_MAMBA_SVF_OASIS_TO_IXI":   dict(family="state-space",      backbone="MambaMorph",  svf="ON",  params_m=11.910713, ds="IXI",   group="cross-dataset", note="OASIS→IXI, 500ep ckpt"),
+    # Mamba SVF IXI-trained ckpt evaluated on OASIS test (cross direction IXI→OASIS)
+    "P10_CROSS_MAMBA_SVF_IXI_TO_OASIS":   dict(family="state-space",      backbone="MambaMorph",  svf="ON",  params_m=11.910713, ds="OASIS", group="cross-dataset", note="IXI→OASIS, 500ep ckpt"),
 })
 
 
