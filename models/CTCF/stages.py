@@ -184,10 +184,21 @@ class FlowRefiner3D(nn.Module):
       - flow:     (B,3,D,H,W) current flow (context)
     Output:
       - delta_flow: (B,3,D,H,W)
+
+    When ``num_heads > 1`` (M1: Multi-head L3 with learned routing), the final
+    3-channel output head is replaced by K parallel 3-channel heads. A small
+    routing sub-network predicts per-voxel logits, softmax-normalized across
+    K, and the final delta flow is the routing-weighted sum of head outputs.
+    Heads and routing logits are zero-initialised, so the model at init
+    behaves identically to a single-head zero-init refiner (delta = 0).
+    ``num_heads = 1`` keeps the original single-head architecture exactly
+    (same parameter names ``self.out.{weight,bias}``), preserving backward
+    compatibility with existing checkpoints.
     """
-    def __init__(self, base_ch: int = 16, error_mode: str = "absdiff"):
+    def __init__(self, base_ch: int = 16, error_mode: str = "absdiff", num_heads: int = 1):
         super().__init__()
         self.error_mode = str(error_mode)
+        self.num_heads = max(1, int(num_heads))
         c = int(base_ch)
         in_ch = 6  # mov_warp(1) + fix(1) + err(1) + flow(3)
         self.enc1 = ConvBlock(in_ch, c)
@@ -199,9 +210,27 @@ class FlowRefiner3D(nn.Module):
         self.dec2 = ConvBlock(c * 4 + c * 2, c * 2)
         self.up1 = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
         self.dec1 = ConvBlock(c * 2 + c, c)
-        self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
-        nn.init.zeros_(self.out.weight)
-        nn.init.zeros_(self.out.bias)
+
+        if self.num_heads == 1:
+            self.out = nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
+            nn.init.zeros_(self.out.weight)
+            nn.init.zeros_(self.out.bias)
+        else:
+            self.flow_heads = nn.ModuleList([
+                nn.Conv3d(c, 3, kernel_size=3, padding=1, bias=True)
+                for _ in range(self.num_heads)
+            ])
+            for h in self.flow_heads:
+                nn.init.zeros_(h.weight)
+                nn.init.zeros_(h.bias)
+            r_mid = max(1, c // 2)
+            self.routing = nn.Sequential(
+                nn.Conv3d(c, r_mid, kernel_size=3, padding=1, bias=True),
+                nn.LeakyReLU(0.1, inplace=True),
+                nn.Conv3d(r_mid, self.num_heads, kernel_size=1, bias=True),
+            )
+            nn.init.zeros_(self.routing[-1].weight)
+            nn.init.zeros_(self.routing[-1].bias)
 
 
     @staticmethod
@@ -260,5 +289,10 @@ class FlowRefiner3D(nn.Module):
         d2 = self.up2(b)
         d2 = self.dec2(torch.cat([d2, e2], dim=1))
         d1 = self.up1(d2)
-        d1 = self.dec1(torch.cat([d1, e1], dim=1))
-        return self.out(d1)
+        feats = self.dec1(torch.cat([d1, e1], dim=1))
+        if self.num_heads == 1:
+            return self.out(feats)
+        # Multi-head: K parallel 3-channel flow heads + per-voxel routing.
+        flows = torch.stack([h(feats) for h in self.flow_heads], dim=1)        # (B,K,3,D,H,W)
+        weights = F.softmax(self.routing(feats), dim=1).unsqueeze(2)            # (B,K,1,D,H,W)
+        return (flows * weights).sum(dim=1)                                     # (B,3,D,H,W)

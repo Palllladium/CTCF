@@ -1,4 +1,5 @@
 import argparse
+import copy
 
 import torch
 from torch import optim
@@ -46,6 +47,7 @@ class Runner:
             l2_full_res=_optional_bool(getattr(args, 'l2_full_res', None)),
             l3_full_res=_optional_bool(getattr(args, 'l3_full_res', None)),
             l3_svf=_optional_bool(getattr(args, 'l3_svf', None)),
+            l3_num_heads=getattr(args, 'l3_num_heads', None),
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -63,6 +65,30 @@ class Runner:
         elif self.reg_mode == 'elastic':
             self._elastic_mu = float(getattr(args, 'elastic_mu', 1.0))
             self._elastic_lam = float(getattr(args, 'elastic_lam', 1.0))
+
+        # M2: EMA self-distillation
+        self.ema_decay = float(getattr(args, 'ema_decay', 0.0) or 0.0)
+        self.ema_lambda = float(getattr(args, 'ema_lambda', 0.0) or 0.0)
+        self.use_ema = self.ema_decay > 0.0 and self.ema_lambda > 0.0
+        if self.use_ema:
+            self.teacher = copy.deepcopy(self.model)
+            for p in self.teacher.parameters():
+                p.requires_grad = False
+            self.teacher.eval()
+        else:
+            self.teacher = None
+
+        # M3: cascade-aware (per-level) regularization
+        w_l1 = getattr(args, 'w_reg_l1', None)
+        w_l2 = getattr(args, 'w_reg_l2', None)
+        w_l3 = getattr(args, 'w_reg_l3', None)
+        self.use_cascade_reg = any(v is not None for v in (w_l1, w_l2, w_l3))
+        if self.use_cascade_reg:
+            self.w_reg_l1 = float(w_l1) if w_l1 is not None else 1.0
+            self.w_reg_l2 = float(w_l2) if w_l2 is not None else 1.0
+            self.w_reg_l3 = float(w_l3) if w_l3 is not None else 1.0
+            if self.reg_mode != 'diffusion':
+                raise ValueError("Cascade-aware reg (w_reg_l1/l2/l3) requires --reg_mode diffusion.")
 
 
     @staticmethod
@@ -85,8 +111,26 @@ class Runner:
         return flow.float()
 
 
+    def _ema_update(self):
+        """M2: update EMA teacher towards current student weights.
+        Called at the start of each train_step, so the update reflects the
+        student state after the *previous* optimizer.step() (one-step lag,
+        irrelevant for slow decay ~0.999).
+        """
+        if not self.use_ema or self.teacher is None:
+            return
+        with torch.no_grad():
+            for p_t, p_s in zip(self.teacher.parameters(), self.model.parameters()):
+                p_t.data.mul_(self.ema_decay).add_(p_s.data, alpha=1.0 - self.ema_decay)
+            for b_t, b_s in zip(self.teacher.buffers(), self.model.buffers()):
+                b_t.data.copy_(b_s.data)
+
+
     def train_step(self, batch, epoch):
         args, ctx = self.args, self.ctx
+
+        # M2: refresh EMA teacher from last-step student weights (no-op if disabled).
+        self._ema_update()
 
         if self.is_synth:
             x, y, x_seg, y_seg = batch[0], batch[1], batch[2], batch[3]
@@ -107,8 +151,12 @@ class Runner:
         W_icon = float(args.w_icon) * warm
         W_jac = float(args.w_jac) * warm
 
-        def_xy, flow_xy = self.model(x, y, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
-        def_yx, flow_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+        if self.use_cascade_reg:
+            def_xy, flow_xy, bd_xy = self.model(x, y, alpha_l1=alpha_l1, alpha_l3=alpha_l3, return_breakdown=True)
+            def_yx, flow_yx, bd_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3, return_breakdown=True)
+        else:
+            def_xy, flow_xy = self.model(x, y, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+            def_yx, flow_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
 
         with torch.autocast(device_type="cuda", enabled=False):
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
@@ -116,14 +164,39 @@ class Runner:
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
 
-        if self.reg_mode == 'dare': L_reg = 0.5 * (self.dare_reg(flow_xy) + self.dare_reg(flow_yx)) * args.w_reg
+        # M3: cascade-aware regularisation overrides flat L_reg when enabled.
+        if self.use_cascade_reg:
+            level_weights = (('phi_L1', self.w_reg_l1),
+                             ('phi_L2', self.w_reg_l2),
+                             ('delta_L3', self.w_reg_l3))
+            L_reg = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
+            for key, w in level_weights:
+                f_xy, f_yx = bd_xy.get(key), bd_yx.get(key)
+                if f_xy is None or f_yx is None or w == 0.0:
+                    continue
+                L_reg = L_reg + 0.5 * w * (ctx.reg(f_xy) + ctx.reg(f_yx))
+            L_reg = L_reg * args.w_reg
+        elif self.reg_mode == 'dare':
+            L_reg = 0.5 * (self.dare_reg(flow_xy) + self.dare_reg(flow_yx)) * args.w_reg
         elif self.reg_mode == 'elastic':
             mu = self._elastic_mu
             lam = self._elastic_lam
             L_reg = 0.5 * (elastic_loss(flow_xy, mu, lam) + elastic_loss(flow_yx, mu, lam)) * args.w_reg
-        else: L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
+        else:
+            L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
 
-        loss = L_ncc + L_icon + L_reg + L_jac
+        # M2: EMA consistency on flow (student vs teacher), warm-ramped together with ICON/Jac.
+        L_ema = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
+        if self.use_ema and self.teacher is not None:
+            with torch.no_grad():
+                _, flow_xy_t = self.teacher(x, y, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+                _, flow_yx_t = self.teacher(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
+            L_ema = 0.5 * (
+                (flow_xy - flow_xy_t.detach()).abs().mean() +
+                (flow_yx - flow_yx_t.detach()).abs().mean()
+            ) * self.ema_lambda * warm
+
+        loss = L_ncc + L_icon + L_reg + L_jac + L_ema
 
         logs = {
             "all": loss.item(),
@@ -135,6 +208,8 @@ class Runner:
             "alpha_l3": alpha_l3,
             "warm": warm,
         }
+        if self.use_ema:
+            logs["ema"] = float(L_ema.item())
 
         if self.is_synth:
             with torch.no_grad():
@@ -172,6 +247,16 @@ def parse_args():
     p.add_argument("--l2_full_res", type=int, choices=[0, 1], default=None, help="Override config: run L2 at full-res.")
     p.add_argument("--l3_full_res", type=int, choices=[0, 1], default=None, help="Override config: run L3 at full-res.")
     p.add_argument("--l3_svf", type=int, choices=[0, 1], default=None, help="Override config: integrate L3 delta as SVF via scaling-and-squaring.")
+    p.add_argument("--l3_num_heads", type=int, default=None, help="M1 Multi-head L3: number of parallel flow heads with per-voxel learned routing (default: 1 = standard single-head).")
+
+    # M2: EMA self-distillation
+    p.add_argument("--ema_decay", type=float, default=0.0, help="M2 EMA self-distillation: teacher decay rate (e.g., 0.999). 0 = disabled.")
+    p.add_argument("--ema_lambda", type=float, default=0.0, help="M2 EMA self-distillation: weight on student-teacher flow L1 consistency loss. 0 = disabled.")
+
+    # M3: cascade-aware regularization
+    p.add_argument("--w_reg_l1", type=float, default=None, help="M3 cascade-aware reg: diffusion weight on raw L1 flow. If any of w_reg_l1/l2/l3 set, replaces uniform w_reg.")
+    p.add_argument("--w_reg_l2", type=float, default=None, help="M3 cascade-aware reg: diffusion weight on raw L2 flow.")
+    p.add_argument("--w_reg_l3", type=float, default=None, help="M3 cascade-aware reg: diffusion weight on mean L3 delta (raw, before SVF).")
 
     p.add_argument("--reg_mode", type=str, choices=["diffusion", "dare", "elastic"], default="diffusion",
                     help="Regularization mode: diffusion (default Grad3d), dare (DARE-minimal), elastic (Navier-Cauchy).")

@@ -77,6 +77,7 @@ class CtcfAdapter(ModelAdapter):
         l2_full_res: Optional[bool] = None,
         l3_full_res: Optional[bool] = None,
         l3_svf: Optional[bool] = None,
+        l3_num_heads: Optional[int] = None,
     ) -> torch.nn.Module:
         from models.CTCF.configs import CONFIGS
         from models.CTCF.model import CTCF_CascadeA
@@ -94,6 +95,7 @@ class CtcfAdapter(ModelAdapter):
         if l1_base_ch is not None: cfg.level1_base_ch = int(l1_base_ch)
         if l3_base_ch is not None: cfg.level3_base_ch = int(l3_base_ch)
         if l3_error_mode is not None: cfg.level3_error_mode = str(l3_error_mode)
+        if l3_num_heads is not None: cfg.level3_num_heads = int(l3_num_heads)
 
         if l3_iters is not None: cfg.l3_iters = int(l3_iters)
         if l3_unshared is not None: cfg.l3_unshared = bool(l3_unshared)

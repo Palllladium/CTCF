@@ -61,6 +61,7 @@ class CTCF_CascadeA(nn.Module):
         l3_kwargs = dict(
             base_ch=config.level3_base_ch,
             error_mode=config.level3_error_mode,
+            num_heads=int(getattr(config, 'level3_num_heads', 1)),
         )
 
         self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch) if self.use_level1 else None
@@ -116,22 +117,39 @@ class CTCF_CascadeA(nn.Module):
         *,
         alpha_l1: float = 1.0,
         alpha_l3: float = 1.0,
+        return_breakdown: bool = False,
     ):
+        """Forward.
+
+        If ``return_breakdown=True``, returns ``(def_full, flow_full, bd)``
+        where ``bd`` is a dict with the raw per-level flow tensors at their
+        native resolution:
+          - 'phi_L1' : raw L1 output (zeros tensor if L1 disabled or alpha_l1=0)
+          - 'phi_L2' : raw L2 output (with L1 init absorbed; L2's combined flow)
+          - 'delta_L3' : mean of raw L3 head outputs across iterations (zeros
+                         if L3 disabled or alpha_l3=0), BEFORE SVF integration
+
+        These tensors are intended for cascade-aware regularisation (M3): each
+        is penalised with a level-specific diffusion weight w_reg_l1/l2/l3.
+        """
+        bd = {} if return_breakdown else None
+
         mov_half = F.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
         fix_half = F.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
 
         flow_half_init = None
+        phi_L1_raw = None  # raw L1 output at its native resolution
 
         # Level 1
         if self.level1 is not None and alpha_l1 > 0.0:
             if self.l1_half_res:
-                flow_half_l1 = self.level1(mov_half, fix_half)
-                flow_half_init = flow_half_l1 * float(alpha_l1)
+                phi_L1_raw = self.level1(mov_half, fix_half)
+                flow_half_init = phi_L1_raw * float(alpha_l1)
             else:
                 mov_quarter = F.interpolate(mov_full, scale_factor=0.25, mode="trilinear", align_corners=False)
                 fix_quarter = F.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=False)
-                flow_quarter = self.level1(mov_quarter, fix_quarter)
-                flow_half_init = upsample_flow(flow_quarter, scale_factor=2) * float(alpha_l1)
+                phi_L1_raw = self.level1(mov_quarter, fix_quarter)
+                flow_half_init = upsample_flow(phi_L1_raw, scale_factor=2) * float(alpha_l1)
 
         if self.l2_full_res:
             flow_l2_init = self._upsample_to_full(flow_half_init) if flow_half_init is not None else None
@@ -152,6 +170,8 @@ class CTCF_CascadeA(nn.Module):
 
         # Level 3
         flow_l2_current = flow_l2
+        delta_L3_accum = None  # sum of raw L3 outputs across iterations (for breakdown)
+        l3_count = 0
         if self.level3 is not None and alpha_l3 > 0.0:
             if self.l3_full_res or self.l2_full_res:
                 if self.l2_full_res:
@@ -163,14 +183,22 @@ class CTCF_CascadeA(nn.Module):
 
                 for it in range(self.l3_iters):
                     l3_mod = self._get_l3(it)
-                    delta_full = l3_mod(def_full_cur, fix_full, flow_full_cur)
-                    delta_full = delta_full * float(alpha_l3)
+                    delta_full_raw = l3_mod(def_full_cur, fix_full, flow_full_cur)
+                    if bd is not None:
+                        delta_L3_accum = delta_full_raw if delta_L3_accum is None else (delta_L3_accum + delta_full_raw)
+                        l3_count += 1
+                    delta_full = delta_full_raw * float(alpha_l3)
                     flow_full_cur = self._apply_l3_delta(delta_full, flow_full_cur, self.st_full)
                     if it < self.l3_iters - 1:
                         def_full_cur = self.st_full(mov_full, flow_full_cur)
 
                 flow_full = flow_full_cur
                 def_full = self.st_full(mov_full, flow_full)
+                if bd is not None:
+                    bd['phi_L1'] = phi_L1_raw
+                    bd['phi_L2'] = flow_l2
+                    bd['delta_L3'] = (delta_L3_accum / max(1, l3_count)) if delta_L3_accum is not None else None
+                    return def_full, flow_full, bd
                 return def_full, flow_full
             else:
                 def_cur = def_l2
@@ -178,8 +206,11 @@ class CTCF_CascadeA(nn.Module):
 
                 for it in range(self.l3_iters):
                     l3_mod = self._get_l3(it)
-                    delta = l3_mod(def_cur, fix_half, flow_cur)
-                    delta = delta * float(alpha_l3)
+                    delta_raw = l3_mod(def_cur, fix_half, flow_cur)
+                    if bd is not None:
+                        delta_L3_accum = delta_raw if delta_L3_accum is None else (delta_L3_accum + delta_raw)
+                        l3_count += 1
+                    delta = delta_raw * float(alpha_l3)
                     flow_cur = self._apply_l3_delta(delta, flow_cur, self.st_half)
                     if it < self.l3_iters - 1:
                         def_cur = self.st_half(mov_half, flow_cur)
@@ -190,4 +221,9 @@ class CTCF_CascadeA(nn.Module):
         else: flow_full = self._upsample_to_full(flow_l2_current)
         def_full = self.st_full(mov_full, flow_full)
 
+        if bd is not None:
+            bd['phi_L1'] = phi_L1_raw
+            bd['phi_L2'] = flow_l2
+            bd['delta_L3'] = (delta_L3_accum / max(1, l3_count)) if delta_L3_accum is not None else None
+            return def_full, flow_full, bd
         return def_full, flow_full

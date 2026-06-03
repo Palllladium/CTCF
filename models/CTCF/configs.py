@@ -37,6 +37,7 @@ def get_CTCF_config():
     c.use_level3 = True
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -67,6 +68,7 @@ def get_CTCF_VM_config(*, use_cascade=True):
     c.use_level3 = use_cascade
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -98,6 +100,7 @@ def get_CTCF_VM_Unified_config(*, use_cascade=True):
     c.use_level3 = use_cascade
     c.level3_base_ch = 32          # unified with other backbones
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -122,6 +125,7 @@ def get_CTCF_LKU_config(config_key="LKU-8", *, use_cascade=True):
     c.use_level3 = use_cascade
     c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -146,6 +150,7 @@ def get_CTCF_Mamba_config(*, use_cascade=True):
     c.use_level3 = use_cascade
     c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -171,6 +176,7 @@ def get_CTCF_EFFM_config(config_key="EfficientMorph_2x3_2_hires", *, use_cascade
     c.use_level3 = use_cascade
     c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -195,6 +201,7 @@ def get_CTCF_VMamba_config(*, use_cascade=True):
     c.use_level3 = use_cascade
     c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
 
     c.l3_iters = 1
     c.l3_unshared = False
