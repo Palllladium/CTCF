@@ -1,229 +1,349 @@
-from typing import Tuple
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
+from models.CTCF.blocks import resize_3d, upsample_flow
+from models.CTCF.stages import CoarseFlowNetQuarter, CTCFDCACoreHalf, FlowRefiner3D
 from models.TransMorph_DCA.model import SpatialTransformer
-from models.CTCF.blocks import upsample_flow
-from models.CTCF.stages import CTCF_DCA_CoreHalf, CoarseFlowNetQuarter, FlowRefiner3D
-from models.CTCF.configs import CONFIGS
 from utils.field import compose_flows
 
 
-def _build_level2(config, backbone: str, l2_full_res: bool = False):
-    """Build L2 backbone module based on config.backbone."""
+def _build_level2(config, backbone: str) -> nn.Module:
+    """Dispatch L2 backbone construction. Wrappers are lazy-imported per branch."""
     if backbone == "swin-dca":
-        return CTCF_DCA_CoreHalf(config, time_steps=config.time_steps)
-    elif backbone == "vxm":
+        return CTCFDCACoreHalf(config, time_steps=config.time_steps)
+    if backbone == "vxm":
         from models.VoxelMorph.wrapper import VxmCascadeL2
+
         return VxmCascadeL2(config)
-    elif backbone == "lku":
+    if backbone == "lku":
         from models.LKUNet.wrapper import LkuNetCascadeL2
+
         return LkuNetCascadeL2(config)
-    elif backbone == "mamba":
+    if backbone == "mamba":
         from models.MambaMorph.wrapper import MambaMorphCascadeL2
+
         return MambaMorphCascadeL2(config)
-    elif backbone == "vmamba":
+    if backbone == "vmamba":
         from models.VMambaMorph.wrapper import VMambaMorphCascadeL2
+
         return VMambaMorphCascadeL2(config)
-    elif backbone == "effm":
+    if backbone == "effm":
         from models.EfficientMorph.wrapper import EffMorphCascadeL2
+
         return EffMorphCascadeL2(config)
-    else:
-        raise ValueError(f"Unknown backbone: {backbone}")
+    raise ValueError(f"Unknown backbone: {backbone}")
 
 
-class CTCF_CascadeA(nn.Module):
+class CTCFCascadeA(nn.Module):
+    """Three-level coarse-to-fine cascade. Composes L1 -> L2 -> L3 into a full-resolution warp.
+
+    When called with `return_breakdown=True`, forward returns an extra dict with per-level
+    contributions at their native resolution, intended as the level-isolated signal for
+    cascade-aware per-level regularisation:
+        * phi_l1 — raw L1 output (None if L1 disabled or alpha_l1 = 0);
+        * phi_l2_residual — L2 contribution alone (flow_l2 - flow_l2_init); equals raw flow_l2
+          when L1 did not inject anything;
+        * delta_l3 — mean of raw L3 head outputs across iterations, BEFORE SVF integration
+          (None if L3 disabled or alpha_l3 = 0).
     """
-    Variant A:
-      L1: CoarseFlowNetQuarter (1/4 or 1/2)
-      L2: CTCF_DCA_CoreHalf    (1/2) with init_flow from L1
-      L3: FlowRefiner3D        (1/2 or full) with residual refinement
-    Output is produced on FULL-res by upsampling final half-res flow by x2.
-    """
+
     def __init__(self, config):
         super().__init__()
 
-        self.img_size_full: Tuple[int, int, int] = tuple(config.img_size)
-        self.use_level1 = bool(config.use_level1)
-        self.use_level2 = bool(config.use_level2)
-        self.use_level3 = bool(config.use_level3)
-        self.backbone = str(getattr(config, 'backbone', 'swin-dca'))
+        self.img_size_full: tuple[int, int, int] = tuple(config.img_size)
+        self.use_level1 = config.use_level1
+        self.use_level2 = config.use_level2
+        self.use_level3 = config.use_level3
+        self.backbone = config.backbone
 
-        self.l3_iters = int(getattr(config, 'l3_iters', 1))
-        self.l3_svf = bool(getattr(config, 'l3_svf', False))
-        self.l1_half_res = bool(getattr(config, 'l1_half_res', False))
-        self.l2_full_res = bool(getattr(config, 'l2_full_res', False))
-        self.l3_full_res = bool(getattr(config, 'l3_full_res', False))
-        self.l3_unshared = bool(getattr(config, 'l3_unshared', False)) and self.l3_iters > 1
+        self.l3_iters = config.l3_iters
+        self.l3_svf = config.l3_svf
+        self.l1_half_res = config.l1_half_res
+        self.l2_full_res = config.l2_full_res
+        self.l3_full_res = config.l3_full_res
+        self.l3_unshared = config.l3_unshared and self.l3_iters > 1
 
-        l3_kwargs = dict(
-            base_ch=config.level3_base_ch,
-            error_mode=config.level3_error_mode,
-            num_heads=int(getattr(config, 'level3_num_heads', 1)),
-        )
+        self._validate_flags()
 
-        self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch) if self.use_level1 else None
-        self.level2 = _build_level2(config, self.backbone, self.l2_full_res) if self.use_level2 else None
-        self.level3 = FlowRefiner3D(**l3_kwargs) if self.use_level3 else None
+        l3_kwargs = {
+            "base_ch": config.level3_base_ch,
+            "error_mode": config.level3_error_mode,
+            "num_heads": config.level3_num_heads,
+        }
 
-        # Unshared L3: separate weights for iterations 1..n-1
+        self.level1 = None
+        if self.use_level1:
+            self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch)
+
+        self.level2 = None
+        if self.use_level2:
+            self.level2 = _build_level2(config, self.backbone)
+
+        self.level3 = None
+        if self.use_level3:
+            self.level3 = FlowRefiner3D(**l3_kwargs)
+
+        self.level3_extra = None
         if self.l3_unshared and self.use_level3:
-            self.level3_extra = nn.ModuleList([
-                FlowRefiner3D(**l3_kwargs) for _ in range(self.l3_iters - 1)
-            ])
-        else:
-            self.level3_extra = None
+            extras = [FlowRefiner3D(**l3_kwargs) for _ in range(self.l3_iters - 1)]
+            self.level3_extra = nn.ModuleList(extras)
 
         self.st_full = SpatialTransformer(self.img_size_full)
         img_size_half = tuple(s // 2 for s in self.img_size_full)
         self.st_half = SpatialTransformer(img_size_half)
 
+    def _validate_flags(self) -> None:
+        """Reject configuration combinations the cascade cannot honour."""
+        if self.backbone == "swin-dca" and self.l2_full_res:
+            raise ValueError(
+                "Swin-DCA L2 (CTCFDCACoreHalf) operates on a half-resolution grid by construction; "
+                "l2_full_res=True is incompatible with backbone='swin-dca'.",
+            )
+        if self.l3_iters < 1:
+            raise ValueError(f"l3_iters must be >= 1, got {self.l3_iters}.")
+        if not self.use_level2:
+            raise ValueError("CTCFCascadeA requires use_level2=True; L1/L3 alone are not enough.")
 
     def _get_l3(self, it: int) -> FlowRefiner3D:
-        """Return L3 module for iteration `it` (unshared: separate weights per iter)."""
+        """Return the L3 module to use at iteration `it`."""
         if it == 0 or self.level3_extra is None:
             return self.level3
         return self.level3_extra[it - 1]
 
-
-    def _upsample_to_full(self, flow_half: torch.Tensor) -> torch.Tensor:
-        """Upsample half-res flow to full-res via trilinear + magnitude scaling."""
-        return upsample_flow(flow_half, scale_factor=2)
-
-
-    def _integrate_svf(self, vel: torch.Tensor, st: SpatialTransformer, steps: int = 7) -> torch.Tensor:
-        """Integrate stationary velocity field via scaling and squaring."""
-        disp = vel * (1.0 / (2 ** steps))
+    def _integrate_svf(
+        self,
+        vel: torch.Tensor,
+        st: SpatialTransformer,
+        steps: int = 7,
+    ) -> torch.Tensor:
+        """Integrate a stationary velocity field via scaling-and-squaring."""
+        disp = vel * (1.0 / (2**steps))
         for _ in range(steps):
             disp = disp + st(disp, disp)
         return disp
 
-
-    def _apply_l3_delta(self, delta: torch.Tensor, flow_cur: torch.Tensor,
-                        st: SpatialTransformer) -> torch.Tensor:
-        """Apply L3 delta to current flow (SVF integration + composition, or simple add)."""
+    def _apply_l3_delta(
+        self,
+        delta: torch.Tensor,
+        flow_cur: torch.Tensor,
+        st: SpatialTransformer,
+    ) -> torch.Tensor:
+        """Merge L3 residual into the running flow (SVF + composition, or direct addition)."""
         if self.l3_svf:
             delta = self._integrate_svf(delta, st)
             return compose_flows(delta, flow_cur)
         return flow_cur + delta
 
+    def _to_full_flow(
+        self,
+        flow: torch.Tensor,
+        already_full_res: bool,
+    ) -> torch.Tensor:
+        """Return `flow` at full resolution, upsampling from half-res if necessary."""
+        if already_full_res:
+            return flow
+        return upsample_flow(flow, scale_factor=2)
+
+    def _run_level1(
+        self,
+        mov_full: torch.Tensor,
+        fix_full: torch.Tensor,
+        mov_half: torch.Tensor,
+        fix_half: torch.Tensor,
+        alpha_l1: float,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Run L1 if enabled. Returns (flow_half_init, phi_l1_raw); both None if skipped."""
+        if self.level1 is None or alpha_l1 <= 0.0:
+            return None, None
+
+        if self.l1_half_res:
+            phi_l1_raw = self.level1(mov_half, fix_half)
+            flow_half_init = phi_l1_raw * alpha_l1
+            return flow_half_init, phi_l1_raw
+
+        mov_quarter = resize_3d(mov_full, scale_factor=0.25)
+        fix_quarter = resize_3d(fix_full, scale_factor=0.25)
+        phi_l1_raw = self.level1(mov_quarter, fix_quarter)
+        flow_half_init = upsample_flow(phi_l1_raw, scale_factor=2) * alpha_l1
+        return flow_half_init, phi_l1_raw
+
+    def _prepare_level2_inputs(
+        self,
+        mov_full: torch.Tensor,
+        fix_full: torch.Tensor,
+        mov_half: torch.Tensor,
+        fix_half: torch.Tensor,
+        flow_half_init: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Select L2 working resolution and adapt the L1 init flow to it."""
+        if not self.l2_full_res:
+            return mov_half, fix_half, flow_half_init
+
+        flow_l2_init = None
+        if flow_half_init is not None:
+            flow_l2_init = upsample_flow(flow_half_init, scale_factor=2)
+        return mov_full, fix_full, flow_l2_init
+
+    def _prepare_l3_frame(
+        self,
+        mov_full: torch.Tensor,
+        fix_full: torch.Tensor,
+        mov_half: torch.Tensor,
+        fix_half: torch.Tensor,
+        def_l2: torch.Tensor,
+        flow_l2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, SpatialTransformer, bool]:
+        """Pick the resolution at which L3 iterates and prepare matching inputs.
+
+        Returns (def_cur, flow_cur, mov_ref, fix_ref, st, is_full_res) — the inputs to
+        `_run_l3_loop` and a flag telling the caller whether the result needs upsampling.
+        """
+        run_full_res = self.l3_full_res or self.l2_full_res
+
+        if not run_full_res:
+            return def_l2, flow_l2, mov_half, fix_half, self.st_half, False
+
+        if self.l2_full_res:
+            return def_l2, flow_l2, mov_full, fix_full, self.st_full, True
+
+        flow_cur = upsample_flow(flow_l2, scale_factor=2)
+        def_cur = self.st_full(mov_full, flow_cur)
+        return def_cur, flow_cur, mov_full, fix_full, self.st_full, True
+
+    def _run_l3_loop(
+        self,
+        def_cur: torch.Tensor,
+        flow_cur: torch.Tensor,
+        mov_ref: torch.Tensor,
+        fix_ref: torch.Tensor,
+        st: SpatialTransformer,
+        alpha_l3: float,
+        track_breakdown: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, int]:
+        """Iterate L3 refinement `l3_iters` times at a single resolution."""
+        delta_accum: torch.Tensor | None = None
+        count = 0
+
+        for it in range(self.l3_iters):
+            delta_raw = self._get_l3(it)(def_cur, fix_ref, flow_cur)
+
+            if track_breakdown:
+                if delta_accum is None:
+                    delta_accum = delta_raw
+                else:
+                    delta_accum = delta_accum + delta_raw
+                count += 1
+
+            flow_cur = self._apply_l3_delta(delta_raw * alpha_l3, flow_cur, st)
+            if it < self.l3_iters - 1:
+                def_cur = st(mov_ref, flow_cur)
+
+        return flow_cur, delta_accum, count
+
+    def _finalize(
+        self,
+        def_full: torch.Tensor,
+        flow_full: torch.Tensor,
+        breakdown: dict[str, torch.Tensor | None] | None,
+        phi_l1_raw: torch.Tensor | None,
+        flow_l2: torch.Tensor,
+        flow_l2_init: torch.Tensor | None,
+        delta_l3_accum: torch.Tensor | None,
+        l3_count: int,
+    ):
+        """Pack the breakdown dict (if requested) and return the cascade output."""
+        if breakdown is None:
+            return def_full, flow_full
+
+        phi_l2_residual = flow_l2
+        if flow_l2_init is not None:
+            phi_l2_residual = flow_l2 - flow_l2_init
+
+        delta_l3 = None
+        if delta_l3_accum is not None:
+            delta_l3 = delta_l3_accum / max(1, l3_count)
+
+        breakdown.update(
+            phi_l1=phi_l1_raw,
+            phi_l2_residual=phi_l2_residual,
+            delta_l3=delta_l3,
+        )
+
+        return def_full, flow_full, breakdown
 
     def forward(
         self,
         mov_full: torch.Tensor,
         fix_full: torch.Tensor,
-        *,
         alpha_l1: float = 1.0,
         alpha_l3: float = 1.0,
         return_breakdown: bool = False,
     ):
-        """Forward.
+        """Run the cascade. Returns `(def_full, flow_full)`, or `(..., breakdown)` when requested."""
+        breakdown: dict[str, torch.Tensor | None] | None = {} if return_breakdown else None
 
-        If ``return_breakdown=True``, returns ``(def_full, flow_full, bd)``
-        where ``bd`` is a dict with the raw per-level flow tensors at their
-        native resolution:
-          - 'phi_L1' : raw L1 output (zeros tensor if L1 disabled or alpha_l1=0)
-          - 'phi_L2' : raw L2 output (with L1 init absorbed; L2's combined flow)
-          - 'delta_L3' : mean of raw L3 head outputs across iterations (zeros
-                         if L3 disabled or alpha_l3=0), BEFORE SVF integration
+        mov_half = resize_3d(mov_full, scale_factor=0.5)
+        fix_half = resize_3d(fix_full, scale_factor=0.5)
 
-        These tensors are intended for cascade-aware regularisation (M3): each
-        is penalised with a level-specific diffusion weight w_reg_l1/l2/l3.
-        """
-        bd = {} if return_breakdown else None
+        flow_half_init, phi_l1_raw = self._run_level1(
+            mov_full=mov_full,
+            fix_full=fix_full,
+            mov_half=mov_half,
+            fix_half=fix_half,
+            alpha_l1=alpha_l1,
+        )
 
-        mov_half = F.interpolate(mov_full, scale_factor=0.5, mode="trilinear", align_corners=False)
-        fix_half = F.interpolate(fix_full, scale_factor=0.5, mode="trilinear", align_corners=False)
-
-        flow_half_init = None
-        phi_L1_raw = None  # raw L1 output at its native resolution
-
-        # Level 1
-        if self.level1 is not None and alpha_l1 > 0.0:
-            if self.l1_half_res:
-                phi_L1_raw = self.level1(mov_half, fix_half)
-                flow_half_init = phi_L1_raw * float(alpha_l1)
-            else:
-                mov_quarter = F.interpolate(mov_full, scale_factor=0.25, mode="trilinear", align_corners=False)
-                fix_quarter = F.interpolate(fix_full, scale_factor=0.25, mode="trilinear", align_corners=False)
-                phi_L1_raw = self.level1(mov_quarter, fix_quarter)
-                flow_half_init = upsample_flow(phi_L1_raw, scale_factor=2) * float(alpha_l1)
-
-        if self.l2_full_res:
-            flow_l2_init = self._upsample_to_full(flow_half_init) if flow_half_init is not None else None
-            l2_mov, l2_fix = mov_full, fix_full
-        else:
-            flow_l2_init = flow_half_init
-            l2_mov, l2_fix = mov_half, fix_half
-
-        # Level 2
-        if self.level2 is None:
-            raise RuntimeError("CTCF_CascadeA requires level2 enabled (use_level2=True).")
+        l2_mov, l2_fix, flow_l2_init = self._prepare_level2_inputs(
+            mov_full=mov_full,
+            fix_full=fix_full,
+            mov_half=mov_half,
+            fix_half=fix_half,
+            flow_half_init=flow_half_init,
+        )
 
         def_l2, flow_l2 = self.level2(
-            l2_mov, l2_fix,
+            l2_mov,
+            l2_fix,
             init_flow=flow_l2_init,
             return_all_flows=False,
         )
 
-        # Level 3
-        flow_l2_current = flow_l2
-        delta_L3_accum = None  # sum of raw L3 outputs across iterations (for breakdown)
+        delta_l3_accum: torch.Tensor | None = None
         l3_count = 0
+
         if self.level3 is not None and alpha_l3 > 0.0:
-            if self.l3_full_res or self.l2_full_res:
-                if self.l2_full_res:
-                    flow_full_cur = flow_l2   # already full-res
-                    def_full_cur = def_l2
-                else:
-                    flow_full_cur = self._upsample_to_full(flow_l2)
-                    def_full_cur = self.st_full(mov_full, flow_full_cur)
+            def_cur, flow_cur, mov_ref, fix_ref, st, is_full = self._prepare_l3_frame(
+                mov_full=mov_full,
+                fix_full=fix_full,
+                mov_half=mov_half,
+                fix_half=fix_half,
+                def_l2=def_l2,
+                flow_l2=flow_l2,
+            )
+            flow_cur, delta_l3_accum, l3_count = self._run_l3_loop(
+                def_cur=def_cur,
+                flow_cur=flow_cur,
+                mov_ref=mov_ref,
+                fix_ref=fix_ref,
+                st=st,
+                alpha_l3=alpha_l3,
+                track_breakdown=breakdown is not None,
+            )
+            flow_full = self._to_full_flow(flow_cur, already_full_res=is_full)
+        else:
+            flow_full = self._to_full_flow(flow_l2, already_full_res=self.l2_full_res)
 
-                for it in range(self.l3_iters):
-                    l3_mod = self._get_l3(it)
-                    delta_full_raw = l3_mod(def_full_cur, fix_full, flow_full_cur)
-                    if bd is not None:
-                        delta_L3_accum = delta_full_raw if delta_L3_accum is None else (delta_L3_accum + delta_full_raw)
-                        l3_count += 1
-                    delta_full = delta_full_raw * float(alpha_l3)
-                    flow_full_cur = self._apply_l3_delta(delta_full, flow_full_cur, self.st_full)
-                    if it < self.l3_iters - 1:
-                        def_full_cur = self.st_full(mov_full, flow_full_cur)
-
-                flow_full = flow_full_cur
-                def_full = self.st_full(mov_full, flow_full)
-                if bd is not None:
-                    bd['phi_L1'] = phi_L1_raw
-                    bd['phi_L2'] = flow_l2
-                    bd['delta_L3'] = (delta_L3_accum / max(1, l3_count)) if delta_L3_accum is not None else None
-                    return def_full, flow_full, bd
-                return def_full, flow_full
-            else:
-                def_cur = def_l2
-                flow_cur = flow_l2
-
-                for it in range(self.l3_iters):
-                    l3_mod = self._get_l3(it)
-                    delta_raw = l3_mod(def_cur, fix_half, flow_cur)
-                    if bd is not None:
-                        delta_L3_accum = delta_raw if delta_L3_accum is None else (delta_L3_accum + delta_raw)
-                        l3_count += 1
-                    delta = delta_raw * float(alpha_l3)
-                    flow_cur = self._apply_l3_delta(delta, flow_cur, self.st_half)
-                    if it < self.l3_iters - 1:
-                        def_cur = self.st_half(mov_half, flow_cur)
-
-                flow_l2_current = flow_cur
-
-        if self.l2_full_res: flow_full = flow_l2_current
-        else: flow_full = self._upsample_to_full(flow_l2_current)
         def_full = self.st_full(mov_full, flow_full)
 
-        if bd is not None:
-            bd['phi_L1'] = phi_L1_raw
-            bd['phi_L2'] = flow_l2
-            bd['delta_L3'] = (delta_L3_accum / max(1, l3_count)) if delta_L3_accum is not None else None
-            return def_full, flow_full, bd
-        return def_full, flow_full
+        return self._finalize(
+            def_full=def_full,
+            flow_full=flow_full,
+            breakdown=breakdown,
+            phi_l1_raw=phi_l1_raw,
+            flow_l2=flow_l2,
+            flow_l2_init=flow_l2_init,
+            delta_l3_accum=delta_l3_accum,
+            l3_count=l3_count,
+        )

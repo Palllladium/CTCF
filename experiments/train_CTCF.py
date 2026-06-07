@@ -166,9 +166,11 @@ class Runner:
 
         # M3: cascade-aware regularisation overrides flat L_reg when enabled.
         if self.use_cascade_reg:
-            level_weights = (('phi_L1', self.w_reg_l1),
-                             ('phi_L2', self.w_reg_l2),
-                             ('delta_L3', self.w_reg_l3))
+            level_weights = (
+                ("phi_l1", self.w_reg_l1),
+                ("phi_l2_residual", self.w_reg_l2),
+                ("delta_l3", self.w_reg_l3),
+            )
             L_reg = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
             for key, w in level_weights:
                 f_xy, f_yx = bd_xy.get(key), bd_yx.get(key)

@@ -80,7 +80,7 @@ class CtcfAdapter(ModelAdapter):
         l3_num_heads: Optional[int] = None,
     ) -> torch.nn.Module:
         from models.CTCF.configs import CONFIGS
-        from models.CTCF.model import CTCF_CascadeA
+        from models.CTCF.model import CTCFCascadeA
 
         cfg = deepcopy(CONFIGS[config_key])
         cfg.time_steps = int(time_steps)
@@ -104,7 +104,7 @@ class CtcfAdapter(ModelAdapter):
         if l3_full_res is not None: cfg.l3_full_res = bool(l3_full_res)
         if l3_svf is not None: cfg.l3_svf = bool(l3_svf)
 
-        model = CTCF_CascadeA(cfg)
+        model = CTCFCascadeA(cfg)
         model.cfg = cfg
         return model
 
