@@ -1,14 +1,16 @@
+from __future__ import annotations
+
 import argparse
 
 import torch
 from torch import optim
 
-from utils import setup_device
 from experiments.core.cli_args import add_common_args
 from experiments.core.data_loaders import baseline_loader_builder
-from experiments.core.train_runtime import TrainContext, run_train
 from experiments.core.model_adapters import get_model_adapter
+from experiments.core.train_runtime import TrainContext, run_train
 from models.TransMorph_DCA.configs import CONFIGS
+from utils import setup_device
 
 
 class Runner:
@@ -16,18 +18,20 @@ class Runner:
         self.args, self.device = args, device
         self.adapter = get_model_adapter("tm-dca")
 
-        self.model = self.adapter.build(time_steps=int(args.time_steps), config_key=args.config).to(device)
-        half = tuple(int(v) for v in self.model.img_size)
-        full = tuple(s * 2 for s in half)
+        self.model = self.adapter.build(time_steps=args.time_steps, config_key=args.config).to(device)
+        full = tuple(s * 2 for s in self.model.img_size)
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=0, amsgrad=True)
         self.ctx = TrainContext(device, vol_size=full, ncc_win=(9, 9, 9))
-        self.forward_flow = lambda x, y: self.adapter.forward(self.model, x, y, amp=True, pool=2)
+        self.forward_flow = self._forward_flow
 
+    @torch.no_grad()
+    def _forward_flow(self, x, y):
+        return self.adapter.forward(self.model, x, y, amp=True, pool=2)
 
     def train_step(self, batch, epoch):
         args, ctx = self.args, self.ctx
-        x, y = (batch[0], batch[1]) if args.ds == "OASIS" else batch
+        x, y = batch[0], batch[1]
         x, y = x.to(self.device).float(), y.to(self.device).float()
 
         flow = self.adapter.forward(self.model, x, y, amp=True, pool=2)
@@ -45,18 +49,38 @@ def parse_args():
     p = argparse.ArgumentParser()
     add_common_args(p)
     p.set_defaults(exp="TM_DCA")
-    
-    p.add_argument("--config", type=str, default="TransMorph-3-LVL",
-                   choices=list(CONFIGS.keys()), help="Model config key.")
-    p.add_argument("--w_ncc", type=float, default=1.0, help="NCC similarity loss weight.")
-    p.add_argument("--w_reg", type=float, default=1.0, help="Flow regularization loss weight.")
-    p.add_argument("--time_steps", type=int, default=12, help="Number of velocity integration steps.")
+
+    p.add_argument(
+        "--config",
+        type=str,
+        default="TransMorph-3-LVL",
+        choices=list(CONFIGS.keys()),
+        help="Model config key.",
+    )
+    p.add_argument(
+        "--w_ncc",
+        type=float,
+        default=1.0,
+        help="NCC similarity loss weight.",
+    )
+    p.add_argument(
+        "--w_reg",
+        type=float,
+        default=1.0,
+        help="Flow regularization loss weight.",
+    )
+    p.add_argument(
+        "--time_steps",
+        type=int,
+        default=12,
+        help="Number of velocity integration steps.",
+    )
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    device = setup_device(gpu_id=int(args.gpu), seed=0, deterministic=False)
+    device = setup_device(gpu_id=args.gpu, seed=0, deterministic=False)
     runner = Runner(args, device)
     run_train(args=args, runner=runner, build_loaders=baseline_loader_builder(args))
 

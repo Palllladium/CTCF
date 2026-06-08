@@ -16,9 +16,11 @@ from utils import NumpyType, RandomFlip, SegNorm
 def _find_split_files(train_dir: str, val_dir: str, tag: str) -> tuple[list[str], list[str]]:
     tr_files = glob.glob(os.path.join(train_dir, "*.pkl"))
     va_files = glob.glob(os.path.join(val_dir, "*.pkl"))
-    
-    if not tr_files: raise RuntimeError(f"{tag}: no *.pkl in Train dir = {train_dir}")
-    if not va_files: raise RuntimeError(f"{tag}: no *.pkl in Validation dir = {val_dir}")
+
+    if not tr_files:
+        raise RuntimeError(f"{tag}: no *.pkl in Train dir = {train_dir}")
+    if not va_files:
+        raise RuntimeError(f"{tag}: no *.pkl in Validation dir = {val_dir}")
     return tr_files, va_files
 
 

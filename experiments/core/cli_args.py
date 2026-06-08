@@ -3,6 +3,11 @@ from __future__ import annotations
 import argparse
 
 
+def optional_bool(value: int | None) -> bool | None:
+    """Map an optional 0/1 CLI flag to bool, leaving None untouched (use config default)."""
+    return None if value is None else bool(value)
+
+
 def _add_path_profile_args(p: argparse.ArgumentParser) -> None:
     p.set_defaults(paths=1)
     p.add_argument(

@@ -64,4 +64,5 @@ def select_lr_policy(runner, optimizer, epoch: int, max_epoch: int, init_lr: flo
 def save_ckpt(state: dict[str, Any], ckpt_dir: str, is_best: bool) -> None:
     """Persist `state` as last.pth and (if `is_best`) best.pth."""
     torch.save(state, os.path.join(ckpt_dir, "last.pth"))
-    if is_best: torch.save(state, os.path.join(ckpt_dir, "best.pth"))
+    if is_best:
+        torch.save(state, os.path.join(ckpt_dir, "best.pth"))

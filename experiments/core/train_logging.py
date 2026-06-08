@@ -16,13 +16,15 @@ ITER_LOG_KEYS: tuple[tuple[str, str], ...] = (
 
 def write_tb_images(writer: SummaryWriter, last_vis: dict, epoch: int) -> None:
     """Write segmentation and grid previews to TensorBoard."""
-    if not last_vis: return
+    if not last_vis:
+        return
 
     def_out = last_vis.get("def_seg")
     def_grid = last_vis.get("def_grid")
     x_vis = last_vis.get("x_seg")
     y_vis = last_vis.get("y_seg")
-    if def_out is None or def_grid is None or x_vis is None or y_vis is None: return
+    if def_out is None or def_grid is None or x_vis is None or y_vis is None:
+        return
 
     plt.switch_backend("agg")
     figures = {
@@ -47,8 +49,10 @@ def format_iter_log(
 
     extras = []
     for key, label in ITER_LOG_KEYS:
-        if key in meters: extras.append(f"{label}={meters[key].val:.4f}")
-    if extras: parts.append("| " + " ".join(extras))
+        if key in meters:
+            extras.append(f"{label}={meters[key].val:.4f}")
+    if extras:
+        parts.append("| " + " ".join(extras))
 
     parts.append(f"| lr={lr_now:.3e}")
     return " ".join(parts)
@@ -56,11 +60,14 @@ def format_iter_log(
 
 def format_metric_suffix(ndvp: float | None, sdlogj: float | None) -> str:
     parts = []
-    if ndvp is not None: parts.append(f" | ndv%={ndvp:.2f}")
-    if sdlogj is not None: parts.append(f" | sdlogj={sdlogj:.4f}")
+    if ndvp is not None:
+        parts.append(f" | ndv%={ndvp:.2f}")
+    if sdlogj is not None:
+        parts.append(f" | sdlogj={sdlogj:.4f}")
     return "".join(parts)
 
 
 def format_train_suffix(meters: dict[str, AverageMeter]) -> str:
-    if "alpha_l1" not in meters: return ""
+    if "alpha_l1" not in meters:
+        return ""
     return f" | a1={meters['alpha_l1'].val:.3f} a3={meters['alpha_l3'].val:.3f} w={meters['warm'].val:.3f}"

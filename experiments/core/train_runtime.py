@@ -93,9 +93,12 @@ def _log_val_scalars(
     epoch: int,
 ) -> None:
     val_scalars: dict[str, float] = {"val/Dice": dsc, jac_tb_tag: jacp}
-    if ndvp is not None: val_scalars["val/NDV%"] = ndvp
-    if sdlogj is not None: val_scalars["val/SDlogJ"] = sdlogj
-    for tag, value in val_scalars.items(): writer.add_scalar(tag, value, epoch)
+    if ndvp is not None:
+        val_scalars["val/NDV%"] = ndvp
+    if sdlogj is not None:
+        val_scalars["val/SDlogJ"] = sdlogj
+    for tag, value in val_scalars.items():
+        writer.add_scalar(tag, value, epoch)
 
 
 def run_train(args, runner, build_loaders=loaders_baseline) -> None:
@@ -110,7 +113,7 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
     save_ckpt_enabled = bool(args.save_ckpt)
     use_tb = bool(args.use_tb)
     ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
-    if save_ckpt_enabled: 
+    if save_ckpt_enabled:
         os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(os.path.join(paths.exp_dir, "vis"), exist_ok=True)
     writer = SummaryWriter(log_dir=paths.log_dir) if use_tb else None
@@ -238,12 +241,16 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         else:
             zero_dice_streak = 0
 
-        if writer is not None: _log_val_scalars(writer, dsc, jacp, ndvp, sdlogj, jac_tb_tag, epoch)
-        if hasattr(runner, "on_val_end"): runner.on_val_end(epoch, dsc, jacp)
-        if need_vis: write_tb_images(writer, val_res.last_vis or {}, epoch)
+        if writer is not None:
+            _log_val_scalars(writer, dsc, jacp, ndvp, sdlogj, jac_tb_tag, epoch)
+        if hasattr(runner, "on_val_end"):
+            runner.on_val_end(epoch, dsc, jacp)
+        if need_vis:
+            write_tb_images(writer, val_res.last_vis or {}, epoch)
 
         is_best = dsc > best_dsc
-        if is_best: best_dsc = dsc
+        if is_best:
+            best_dsc = dsc
 
         state = {
             "epoch": epoch,

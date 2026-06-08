@@ -53,8 +53,10 @@ def resolve_dataset_dirs(args, require_atlas: bool = False) -> tuple[str, str, s
     train_dir = paths.get("train_dir", "")
     val_dir = paths.get("val_dir", "")
 
-    if not os.path.isdir(train_dir): raise RuntimeError(f"Train dir not found: {train_dir}")
-    if not os.path.isdir(val_dir): raise RuntimeError(f"Validation dir not found: {val_dir}")
+    if not os.path.isdir(train_dir):
+        raise RuntimeError(f"Train dir not found: {train_dir}")
+    if not os.path.isdir(val_dir):
+        raise RuntimeError(f"Validation dir not found: {val_dir}")
 
     atlas_path: str | None = None
     if require_atlas:
