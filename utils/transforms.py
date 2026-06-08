@@ -1,24 +1,25 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
 
 import numpy as np
 
 
 class RandomFlip:
+    """Random per-axis flip; consistent across all members of a sequence input."""
+
     def __init__(self, axis=(1, 2, 3)):
         self.axis = tuple(axis)
 
-
     def _sample(self):
-        return tuple(bool(np.random.randint(0, 2)) for _ in self.axis)
-
+        return tuple(bool(np.random.randint(low=0, high=2)) for _ in self.axis)
 
     def _apply(self, img, flags):
         out = img
-        for do_flip, ax in zip(flags, self.axis):
+        for do_flip, ax in zip(flags, self.axis, strict=False):
             if do_flip:
                 out = np.flip(out, axis=ax)
         return out
-
 
     def __call__(self, img):
         flags = self._sample()
@@ -28,22 +29,22 @@ class RandomFlip:
 
 
 class SegNorm:
-    seg_table = np.array(
-        [
-            0, 2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 26,
-            28, 30, 31, 41, 42, 43, 44, 46, 47, 49, 50, 51, 52, 53, 54, 58, 60, 62,
-            63, 72, 77, 80, 85, 251, 252, 253, 254, 255,
-        ],
-        dtype=np.int16,
-    )
+    """Re-map FreeSurfer label IDs to a dense contiguous range; applies to segs only."""
 
+    # FreeSurfer aseg IDs kept by the protocol; index = dense remapped label.
+    seg_table = np.array([
+        0, 2, 3, 4, 5, 7, 8, 10, 11, 12, 
+        13, 14, 15, 16, 17, 18, 24, 26, 28,
+        30, 31, 41, 42, 43, 44, 46, 47, 49,
+        50, 51, 52, 53, 54, 58, 60, 62, 63,
+        72, 77, 80, 85, 251, 252, 253, 254, 255,
+    ], dtype=np.int16)  # fmt: skip
 
     def _map_seg(self, seg):
         out = np.zeros_like(seg)
         for i, lbl in enumerate(self.seg_table):
             out[seg == lbl] = i
         return out
-
 
     def __call__(self, img):
         if isinstance(img, Sequence):
@@ -55,9 +56,10 @@ class SegNorm:
 
 
 class NumpyType:
+    """Cast each element of a sequence to its matching numpy dtype."""
+
     def __init__(self, types):
         self.types = tuple(types)
-
 
     def __call__(self, img):
         if isinstance(img, Sequence):

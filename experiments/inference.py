@@ -14,8 +14,9 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from datasets import OASIS, IXI
-from experiments.core.train_runtime import PATHS, add_common_args
+from experiments.core.cli_args import add_common_args
 from experiments.core.model_adapters import get_model_adapter
+from experiments.core.path_profiles import PATHS
 from utils import (
     IXI_VOI_LABELS, OASIS_VOI_LABELS, dice_per_label, hd95_mean_labels,
     digital_jacobian_metrics, logdet_std_from_flow, mk_grid_img,

@@ -35,6 +35,7 @@ select = [
 ]
 ignore = [
     "E501",   # line too long — already handled by formatter
+    "E701",   # multiple statements on one line (colon) — short inline guards are allowed
     "B008",   # default mutable arg — acceptable in some PyTorch patterns
     "N812",   # lowercase imported as non-lowercase — torch.nn.functional as F
     "N806",   # variable in function should be lowercase — allow e1/e2/b/d1/d2 UNet convention

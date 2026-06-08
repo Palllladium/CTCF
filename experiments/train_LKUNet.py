@@ -4,7 +4,9 @@ import torch
 from torch import optim
 
 from utils import setup_device
-from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
+from experiments.core.cli_args import add_common_args
+from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.train_runtime import TrainContext, run_train
 from models.LKUNet.wrapper import LkuNetSolo
 from models.LKUNet.configs import CONFIGS
 from models.LKUNet.model import smoothloss, mse_loss, sad_loss
@@ -34,7 +36,7 @@ class Runner:
         print(f"LkuNetSolo [{args.config}] params: {n_params:,} ({n_params/1e6:.3f}M)")
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
-        self.ctx = Ctx(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
+        self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.forward_flow = self._forward_flow
 
         d, h, w = self.img_size

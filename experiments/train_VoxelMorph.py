@@ -4,7 +4,9 @@ import torch
 from torch import optim
 
 from utils import setup_device
-from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
+from experiments.core.cli_args import add_common_args
+from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.train_runtime import TrainContext, run_train
 from experiments.core.model_adapters import get_model_adapter
 from models.VoxelMorph.configs import CONFIGS
 
@@ -20,7 +22,7 @@ class Runner:
         print(f"VxmDense [{args.config}] params: {n_params:,} ({n_params/1e6:.3f}M)")
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
-        self.ctx = Ctx(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
+        self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.forward_flow = self._forward_flow
 
 

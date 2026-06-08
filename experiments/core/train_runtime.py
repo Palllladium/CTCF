@@ -1,266 +1,169 @@
-import argparse
-from functools import partial
-import glob
+from __future__ import annotations
+
 import os
 import time
 from typing import Any
-import numpy as np
-import matplotlib.pyplot as plt
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
-from torchvision import transforms
 
-from datasets import OASIS, IXI
+from experiments.core.cli_args import add_common_args
+from experiments.core.data_loaders import (
+    baseline_loader_builder,
+    ixi_flip_axes_for,
+    ixi_loaders,
+    loaders_baseline,
+    oasis_loaders,
+)
+from experiments.core.helpers import (
+    build_val_dice_fn,
+    resume_from_ckpt,
+    save_ckpt,
+    select_lr_policy,
+)
+from experiments.core.path_profiles import PATHS, print_experiment_header
+from experiments.core.train_logging import (
+    format_iter_log,
+    format_metric_suffix,
+    format_train_suffix,
+    write_tb_images,
+)
 from utils import (
-    adjust_learning_rate_poly, adjust_lr_ctcf_schedule, make_exp_dirs, attach_stdout_logger, 
-    load_checkpoint_if_exists, perf_epoch_start, perf_epoch_end, mk_grid_img, compute_fig, validate,
-    AverageMeter, RegisterModel, NCCVxm, Grad3d, NumpyType, RandomFlip, SegNorm,
-    dice_val, dice_val_subset, OASIS_VOI_LABELS, IXI_VOI_LABELS
+    AverageMeter,
+    Grad3d,
+    NCCVxm,
+    RegisterModel,
+    attach_stdout_logger,
+    make_exp_dirs,
+    mk_grid_img,
+    perf_epoch_end,
+    perf_epoch_start,
+    validate,
 )
 
-
-PATHS = {
-    1: {
-        "OASIS": {
-            "train_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/All",
-            "val_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/OASIS_L2R_2021_task03/Test",
-        },
-        "IXI": {
-            "train_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/Train",
-            "val_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/Val",
-            "test_dir": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/Test",
-            "atlas_path": "C:/Users/user/Documents/Education/MasterWork/datasets/IXI_data/atlas.pkl",
-        },
-    },
-    2: {
-        "OASIS": {
-            "train_dir": "/home/roman/P/OASIS_L2R_2021_task03/All",
-            "val_dir": "/home/roman/P/OASIS_L2R_2021_task03/Test",
-        },
-        "IXI": {
-            "train_dir": "/home/roman/P/IXI_data/Train",
-            "val_dir": "/home/roman/P/IXI_data/Val",
-            "test_dir": "/home/roman/P/IXI_data/Test",
-            "atlas_path": "/home/roman/P/IXI_data/atlas.pkl",
-        },
-    },
-    3: {
-        "OASIS": {
-            "train_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/OASIS_L2R_2021_task03/All",
-            "val_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/OASIS_L2R_2021_task03/Test",
-        },
-        "IXI": {
-            "train_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Train",
-            "val_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Val",
-            "test_dir": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/Test",
-            "atlas_path": os.environ.get("CTCF_DATA_DIR", "/data") + "/IXI_data/atlas.pkl",
-        },
-    },
-}
+__all__ = [
+    "PATHS",
+    "TrainContext",
+    "add_common_args",
+    "baseline_loader_builder",
+    "ixi_flip_axes_for",
+    "ixi_loaders",
+    "loaders_baseline",
+    "oasis_loaders",
+    "run_train",
+    "write_tb_images",
+]
 
 
-class Ctx:
-    """Shared train context with losses and spatial transformer."""
-    def __init__(self, device, *, vol_size, ncc_win=(9, 9, 9), reg_penalty="l2", interp="bilinear"):
+class TrainContext:
+    """Shared training context: similarity loss, regulariser and spatial transformer."""
+
+    def __init__(
+        self,
+        device: torch.device,
+        vol_size: tuple[int, int, int],
+        ncc_win: tuple[int, int, int] = (9, 9, 9),
+        reg_penalty: str = "l2",
+        interp: str = "bilinear",
+    ):
         self.ncc: Any = NCCVxm(win=ncc_win)
         self.reg: Any = Grad3d(penalty=reg_penalty)
-        self.reg_model: Any = RegisterModel(tuple(vol_size), mode=interp).to(device)
+        self.reg_model: Any = RegisterModel(img_size=vol_size, mode=interp).to(device)
 
 
-def add_common_args(p: argparse.ArgumentParser, *, include_synth: bool = False, mode: str = "train"):
-    """Add shared CLI args for train/infer experiment scripts."""
-    if mode not in ("train", "infer"):
-        raise ValueError(f"Unsupported mode='{mode}'. Expected 'train' or 'infer'.")
-    ds_choices = ["OASIS", "IXI", "SYNTH"] if include_synth else ["OASIS", "IXI"]
-    p.set_defaults(paths=1)
-    p.add_argument("--ds", choices=ds_choices, default="OASIS", help="Dataset key to run.")
-    p.add_argument("--1", dest="paths", action="store_const", const=1, help="Use path profile #1")
-    p.add_argument("--2", dest="paths", action="store_const", const=2, help="Use path profile #2")
-    p.add_argument("--3", dest="paths", action="store_const", const=3, help="Use path profile #3 (remote, uses CTCF_DATA_DIR env var)")
-    p.add_argument("--paths", type=int, help="Path profile id (1/2/...)")
-    p.add_argument("--gpu", type=int, default=0, help="CUDA device index.")
-    p.add_argument("--num_workers", type=int, default=8, help="DataLoader worker processes.")
-
-    if mode == "train":
-        p.add_argument("--exp", default="", help="Experiment name used for logs/results directories.")
-        p.add_argument("--max_epoch", type=int, default=400, help="Number of training epochs.")
-        p.add_argument("--batch_size", type=int, default=1, help="Training batch size.")
-        p.add_argument("--lr", type=float, default=1e-4, help="Initial learning rate.")
-        p.add_argument("--img_size", type=int, nargs=3, default=(160, 192, 224), help="Input volume size D H W.")
-        p.add_argument("--max_train_iters", type=int, default=0, help="Limit train iterations per epoch; <=0 disables limit.")
-        p.add_argument("--max_val_batches", type=int, default=0, help="Limit validation batches per epoch; <=0 disables limit.")
-        p.add_argument("--resume", default="", help="Checkpoint path to resume training from.")
-        p.add_argument("--save_ckpt", type=int, choices=[0, 1], default=1, help="Enable/disable checkpoint saving to disk.")
-        p.add_argument("--use_tb", type=int, choices=[0, 1], default=1, help="Enable/disable TensorBoard logging.")
-        p.add_argument("--tb_images_every", type=int, default=5, help="TensorBoard image logging period in epochs.")
-        p.add_argument("--quiet", type=int, choices=[0, 1], default=0, help="If 1, suppress per-iter logs from console (file only). Epoch summaries still shown.")
-    return p
+def _log_perf_scalars(writer: SummaryWriter, perf, epoch: int) -> None:
+    perf_scalars = {
+        "perf/epoch_time_sec": perf.epoch_time_sec,
+        "perf/iter_time_ms": perf.mean_iter_time_ms,
+        "perf/peak_gpu_mem_GB": perf.peak_gpu_mem_gib,
+    }
+    for tag, value in perf_scalars.items():
+        if value is None:
+            continue
+        writer.add_scalar(tag, value, epoch)
 
 
-def oasis_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=False, drop_last_val=True):
-    """Build OASIS train/val loaders for a pair of dataset classes."""
-    paths = PATHS[int(args.paths)][args.ds.upper()]
-    
-    train_dir = paths.get("train_dir", "")
-    val_dir = paths.get("val_dir", "")
-    if not os.path.isdir(train_dir): raise RuntimeError(f"Train dir not found: {train_dir}")
-    if not os.path.isdir(val_dir): raise RuntimeError(f"Validation dir not found: {val_dir}")
-
-    tr_files = glob.glob(os.path.join(train_dir, "*.pkl"))
-    va_files = glob.glob(os.path.join(val_dir, "*.pkl"))
-    if not tr_files: raise RuntimeError(f"OASIS: no *.pkl in Train dir = {train_dir}")
-    if not va_files: raise RuntimeError(f"OASIS: no *.pkl in Validation dir = {val_dir}")
-
-    tfm = transforms.Compose([NumpyType((np.float32, np.int16))])
-    tr = train_cls(tr_files, transforms=tfm)
-    va = val_cls(va_files, transforms=tfm)
-    train_loader = DataLoader(tr, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_train)
-    val_loader = DataLoader(va, batch_size=val_bs, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_val)
-    return train_loader, val_loader
+def _log_val_scalars(
+    writer: SummaryWriter,
+    dsc: float,
+    jacp: float,
+    ndvp: float | None,
+    sdlogj: float | None,
+    jac_tb_tag: str,
+    epoch: int,
+) -> None:
+    val_scalars: dict[str, float] = {"val/Dice": dsc, jac_tb_tag: jacp}
+    if ndvp is not None: val_scalars["val/NDV%"] = ndvp
+    if sdlogj is not None: val_scalars["val/SDlogJ"] = sdlogj
+    for tag, value in val_scalars.items(): writer.add_scalar(tag, value, epoch)
 
 
-def ixi_loaders(args, *, train_cls, val_cls, val_bs=1, drop_last_train=True, drop_last_val=True, flip_axes=(1, 2, 3)):
-    """Build IXI train/val loaders for a pair of dataset classes."""
-    paths = PATHS[int(args.paths)][args.ds.upper()]
+def run_train(args, runner, build_loaders=loaders_baseline) -> None:
+    """Generic AMP training loop with periodic validation and optional checkpointing."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for training.")
 
-    train_dir = paths.get("train_dir", "")
-    val_dir = paths.get("val_dir", "")
-    atlas_path = str(paths.get("atlas_path", "")).rstrip("/\\")
-    if not os.path.isdir(train_dir): raise RuntimeError(f"Train dir not found: {train_dir}")
-    if not os.path.isdir(val_dir): raise RuntimeError(f"Validation dir not found: {val_dir}")
-    if not atlas_path or not os.path.exists(atlas_path): raise RuntimeError(f"Atlas path not found: {atlas_path}")
-
-    tr_files = glob.glob(os.path.join(train_dir, "*.pkl"))
-    va_files = glob.glob(os.path.join(val_dir, "*.pkl"))
-    if not tr_files: raise RuntimeError(f"IXI: no *.pkl in Train dir = {train_dir}")
-    if not va_files: raise RuntimeError(f"IXI: no *.pkl in Validation dir = {val_dir}")
-
-    train_tfm = transforms.Compose([RandomFlip(flip_axes), NumpyType((np.float32, np.float32))])
-    val_tfm = transforms.Compose([SegNorm(), NumpyType((np.float32, np.int16))])
-    tr = train_cls(tr_files, atlas_path, transforms=train_tfm)
-    va = val_cls(va_files, atlas_path, transforms=val_tfm)
-    train_loader = DataLoader(tr, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_train)
-    val_loader = DataLoader(va, batch_size=val_bs, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=drop_last_val)
-    return train_loader, val_loader
-
-
-def loaders_baseline(args, *, ixi_flip_axes=(1, 2, 3)):
-    """Dispatch baseline data loader factory by dataset name."""
-    match args.ds:
-        case "OASIS":
-            return oasis_loaders(
-                args,
-                train_cls=OASIS.OASISBrainDataset,
-                val_cls=OASIS.OASISBrainInferDataset,
-                val_bs=1,
-                drop_last_train=False,
-                drop_last_val=True)
-        case "IXI":
-            return ixi_loaders(
-                args,
-                train_cls=IXI.IXIBrainDataset,
-                val_cls=IXI.IXIBrainInferDataset,
-                val_bs=1,
-                drop_last_train=True,
-                drop_last_val=True,
-                flip_axes=ixi_flip_axes)
-        case _:
-            raise ValueError(f"Unsupported dataset = '{args.ds}' for baseline loaders.")
-
-
-def ixi_flip_axes_for(ds):
-    """Depth-only flips for IXI; all-axis flips otherwise."""
-    return (0,) if str(ds).upper() == "IXI" else (1, 2, 3)
-
-
-def baseline_loader_builder(args):
-    """Return the baseline loader factory used by solo model trainers."""
-    return partial(loaders_baseline, ixi_flip_axes=ixi_flip_axes_for(args.ds))
-
-
-def write_tb_images(writer: SummaryWriter, last_vis: dict, epoch: int):
-    """Write segmentation and grid previews to TensorBoard."""
-    if not last_vis: return
-    def_out, def_grid, x_vis, y_vis = last_vis.get("def_seg"), last_vis.get("def_grid"), last_vis.get("x_seg"), last_vis.get("y_seg")
-    if def_out is None or def_grid is None or x_vis is None or y_vis is None: return
-   
-    plt.switch_backend("agg")
-    pred_fig, grid_fig, x_fig, tar_fig = compute_fig(def_out), compute_fig(def_grid), compute_fig(x_vis), compute_fig(y_vis)
-    writer.add_figure("Grid", grid_fig, epoch); plt.close(grid_fig)
-    writer.add_figure("Input", x_fig, epoch); plt.close(x_fig)
-    writer.add_figure("Ground truth", tar_fig, epoch); plt.close(tar_fig)
-    writer.add_figure("Prediction", pred_fig, epoch); plt.close(pred_fig)
-
-
-def run_train(*, args, runner, build_loaders=loaders_baseline):
-    """Run generic AMP training loop with periodic validation and optional checkpointing."""
-    assert torch.cuda.is_available(), "CUDA required"
     device = runner.device
     paths = make_exp_dirs(args.exp or "EXP")
-    attach_stdout_logger(paths.log_dir, quiet=bool(int(getattr(args, 'quiet', 0))))
+    attach_stdout_logger(paths.log_dir, quiet=bool(args.quiet))
+
+    save_ckpt_enabled = bool(args.save_ckpt)
+    use_tb = bool(args.use_tb)
     ckpt_dir = os.path.join(paths.exp_dir, "ckpt")
-    save_ckpt = bool(int(args.save_ckpt))
-    use_tb = bool(int(args.use_tb))
-    if save_ckpt:
+    if save_ckpt_enabled: 
         os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(os.path.join(paths.exp_dir, "vis"), exist_ok=True)
     writer = SummaryWriter(log_dir=paths.log_dir) if use_tb else None
 
     train_loader, val_loader = build_loaders(args)
-    max_train_iters = int(args.max_train_iters)
-    max_val_batches = int(args.max_val_batches)
-    max_val_batches = None if max_val_batches <= 0 else max_val_batches
+    max_train_iters = args.max_train_iters
+    raw_max_val = args.max_val_batches
+    max_val_batches = None if raw_max_val <= 0 else raw_max_val
     scaler = torch.amp.GradScaler("cuda")
     train_total = len(train_loader) if max_train_iters <= 0 else min(len(train_loader), max_train_iters)
 
     ds_key = args.ds.upper()
     jac_name = "j<=0%"
     jac_tb_tag = "val/J<=0%"
-    
-    if ds_key == "SYNTH": val_dice_fn = lambda p, t: dice_val(p, t, int(getattr(args, "synth_num_labels", 36)))
-    elif ds_key == "IXI": val_dice_fn = lambda p, t: dice_val_subset(p, t, labels=IXI_VOI_LABELS)
-    else: val_dice_fn = lambda p, t: dice_val_subset(p, t, labels=OASIS_VOI_LABELS)
+    val_dice_fn = build_val_dice_fn(args, ds_key)
 
-    epoch_start, best_dsc = 0, -1.0
-    if args.resume:
-        ckpt = load_checkpoint_if_exists(args.resume, model=runner.model, optimizer=runner.optimizer, map_location=device)
-        if ckpt is not None:
-            epoch_start = int(ckpt.get("epoch", -1)) + 1
-            best_dsc = float(ckpt.get("best_dsc", best_dsc))
-            if ckpt.get("scaler"): scaler.load_state_dict(ckpt["scaler"])
-            print(f">>> Resumed from {args.resume} @ epoch {epoch_start}, best={best_dsc:.4f}")
+    epoch_start, best_dsc = resume_from_ckpt(
+        args,
+        runner,
+        scaler,
+        device,
+        best_dsc_init=-1.0,
+    )
+    print_experiment_header(args, ds_key)
 
-    print(f">>> Experiment: {args.exp} | ds={args.ds} | paths={args.paths}")
-    if args.ds.upper() in ("OASIS", "IXI"):
-        p = PATHS[int(args.paths)][args.ds.upper()]
-        print(f"    Train dir = {p['train_dir']}")
-        print(f"    Val dir   = {p['val_dir']}")
-        if args.ds.upper() == "IXI":
-            atlas_path = str(p["atlas_path"]).rstrip("/\\")
-            print(f"    Atlas     = {atlas_path}")
-
-    nan_streak = 0
     nan_streak_limit = 3
+    zero_dice_streak_limit = 3
+    nan_streak = 0
     zero_dice_streak = 0
-    zero_dice_limit = 3
 
-    for epoch in range(epoch_start, int(args.max_epoch)):
+    for epoch in range(epoch_start, args.max_epoch):
         runner.model.train()
         t0 = perf_epoch_start()
 
-        if getattr(runner, "lr_policy", "") == "ctcf": lr_now = adjust_lr_ctcf_schedule(runner.optimizer, epoch, args.max_epoch, args.lr)
-        else: lr_now = adjust_learning_rate_poly(runner.optimizer, epoch, int(args.max_epoch), args.lr)
-        if writer is not None: writer.add_scalar("LR", lr_now, epoch)
+        lr_now = select_lr_policy(
+            runner,
+            runner.optimizer,
+            epoch,
+            args.max_epoch,
+            args.lr,
+        )
+        if writer is not None:
+            writer.add_scalar("LR", lr_now, epoch)
 
-        meters, iter_time_sum = {}, 0.0
+        meters: dict[str, AverageMeter] = {}
+        iter_time_sum = 0.0
         train_iters_done = 0
         print(f"Training Starts (epoch {epoch:03d})")
 
         for it, batch in enumerate(train_loader, start=1):
             if max_train_iters > 0 and it > max_train_iters:
                 break
+
             t_it = time.perf_counter()
             runner.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
@@ -268,9 +171,13 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
 
             if not torch.isfinite(loss):
                 nan_streak += 1
-                print(f"WARNING: non-finite loss at epoch {epoch} iter {it} (streak {nan_streak}/{nan_streak_limit})")
+                print(
+                    f"WARNING: non-finite loss at epoch {epoch} iter {it} (streak {nan_streak}/{nan_streak_limit})",
+                )
                 if nan_streak >= nan_streak_limit:
-                    raise RuntimeError(f"ABORT: {nan_streak_limit} consecutive non-finite losses. Check model/hyperparams.")
+                    raise RuntimeError(
+                        f"ABORT: {nan_streak_limit} consecutive non-finite losses. Check model/hyperparams.",
+                    )
                 runner.optimizer.zero_grad(set_to_none=True)
                 continue
             nan_streak = 0
@@ -283,22 +190,11 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 for k, v in logs.items():
                     meters.setdefault(k, AverageMeter()).update(float(v), 1)
 
-            iter_time_sum += (time.perf_counter() - t_it)
+            iter_time_sum += time.perf_counter() - t_it
             train_iters_done += 1
 
             if it % 10 == 0 and meters:
-                main = "all" if "all" in meters else next(iter(meters.keys()))
-                msg = f"Iter {it:4d} / {train_total:4d} | {main}(avg)={meters[main].avg:.4f}"
-
-                if "ncc" in meters:  msg += f" | ncc={meters['ncc'].val:.4f}"
-                if "reg" in meters:  msg += f" reg={meters['reg'].val:.4f}"
-                if "icon" in meters: msg += f" icon={meters['icon'].val:.4f}"
-                if "jac" in meters:  msg += f" jac={meters['jac'].val:.4f}"
-                if "aux" in meters:  msg += f" aux={meters['aux'].val:.4f}"
-                if "dice_tr" in meters: msg += f" dice_tr={meters['dice_tr'].val:.4f}"
-
-                msg += f" | lr={lr_now:.3e}"
-                print(msg)
+                print(format_iter_log(meters, it, train_total, lr_now))
 
         if writer is not None:
             for k, m in meters.items():
@@ -306,18 +202,16 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
 
         perf = perf_epoch_end(t0, iters=train_iters_done, iter_time_sum=iter_time_sum)
         if writer is not None:
-            writer.add_scalar("perf/epoch_time_sec", perf.epoch_time_sec, epoch)
-            writer.add_scalar("perf/iter_time_ms", perf.mean_iter_time_ms, epoch)
-            writer.add_scalar("perf/peak_gpu_mem_GB", perf.peak_gpu_mem_gib, epoch)
+            _log_perf_scalars(writer, perf, epoch)
 
         runner.model.eval()
-        need_vis = bool(writer is not None and args.tb_images_every and (epoch % int(args.tb_images_every) == 0))
+        need_vis = writer is not None and args.tb_images_every and epoch % args.tb_images_every == 0
         with torch.no_grad():
             val_res = validate(
                 model=runner.model,
                 val_loader=val_loader,
                 device=device,
-                forward_flow_fn=lambda x, y: runner.forward_flow(x, y),
+                forward_flow_fn=runner.forward_flow,
                 dice_fn=val_dice_fn,
                 register_model_cls=RegisterModel,
                 mk_grid_img_fn=mk_grid_img if need_vis else None,
@@ -327,33 +221,29 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
                 ds=args.ds,
             )
 
-        dsc, jacp = float(val_res.dsc), float(val_res.jac_nonpos_percent)
-        ndvp = None if val_res.ndv_percent is None else float(val_res.ndv_percent)
-        sdlogj = None if val_res.sdlogj is None else float(val_res.sdlogj)
+        dsc = val_res.dsc
+        jacp = val_res.jac_nonpos_percent
+        ndvp = val_res.ndv_percent
+        sdlogj = val_res.sdlogj
 
         if dsc < 1e-6:
             zero_dice_streak += 1
-            print(f"WARNING: val_dice~0 at epoch {epoch} (streak {zero_dice_streak}/{zero_dice_limit})")
-            if zero_dice_streak >= zero_dice_limit:
-                raise RuntimeError(f"ABORT: val_dice~0 for {zero_dice_limit} consecutive epochs. Model is not learning.")
+            print(
+                f"WARNING: val_dice~0 at epoch {epoch} (streak {zero_dice_streak}/{zero_dice_streak_limit})",
+            )
+            if zero_dice_streak >= zero_dice_streak_limit:
+                raise RuntimeError(
+                    f"ABORT: val_dice~0 for {zero_dice_streak_limit} consecutive epochs. Model is not learning.",
+                )
         else:
             zero_dice_streak = 0
 
-        if writer is not None:
-            writer.add_scalar("val/Dice", dsc, epoch)
-            writer.add_scalar(jac_tb_tag, jacp, epoch)
-            if ndvp is not None: writer.add_scalar("val/NDV%", ndvp, epoch)
-            if sdlogj is not None: writer.add_scalar("val/SDlogJ", sdlogj, epoch)
-
-        if hasattr(runner, "on_val_end"):
-            runner.on_val_end(epoch, dsc, jacp)
-
-        if writer is not None and args.tb_images_every and (epoch % int(args.tb_images_every) == 0):
-            write_tb_images(writer, val_res.last_vis or {}, epoch)
+        if writer is not None: _log_val_scalars(writer, dsc, jacp, ndvp, sdlogj, jac_tb_tag, epoch)
+        if hasattr(runner, "on_val_end"): runner.on_val_end(epoch, dsc, jacp)
+        if need_vis: write_tb_images(writer, val_res.last_vis or {}, epoch)
 
         is_best = dsc > best_dsc
-        if is_best:
-            best_dsc = dsc
+        if is_best: best_dsc = dsc
 
         state = {
             "epoch": epoch,
@@ -362,27 +252,21 @@ def run_train(*, args, runner, build_loaders=loaders_baseline):
             "best_dsc": best_dsc,
             "scaler": scaler.state_dict(),
         }
+        if save_ckpt_enabled:
+            save_ckpt(state, ckpt_dir, is_best)
 
-        if save_ckpt:
-            torch.save(state, os.path.join(ckpt_dir, "last.pth"))
-            if is_best:
-                torch.save(state, os.path.join(ckpt_dir, "best.pth"))
-
-        metric_suffix = ""
-        if ndvp is not None: metric_suffix += f" | ndv%={ndvp:.2f}"
-        if sdlogj is not None: metric_suffix += f" | sdlogj={sdlogj:.4f}"
-        
-        train_suffix = ""
-        if "main" in meters: train_suffix += f" | train_main={meters['main'].avg:.4f}"
-        if "aux" in meters: train_suffix += f" train_aux={meters['aux'].avg:.4f}"
-        if "alpha_l1" in meters: train_suffix += f" | a1={meters['alpha_l1'].val:.3f} a3={meters['alpha_l3'].val:.3f} w={meters['warm'].val:.3f}"
-        
-        print(f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | {jac_name}={jacp:.2f}{metric_suffix}{train_suffix}")
+        metric_suffix = format_metric_suffix(ndvp, sdlogj)
+        train_suffix = format_train_suffix(meters)
         peak_mem = "n/a" if perf.peak_gpu_mem_gib is None else f"{perf.peak_gpu_mem_gib:.2f}GB"
-        print(f"[perf  {epoch:03d}] epoch={perf.epoch_time_sec:.2f}s iter={perf.mean_iter_time_ms:.1f}ms peak={peak_mem}")
 
-    # Final summary (always visible, even in quiet mode)
-    print(f">>> Training complete: {int(args.max_epoch)} epochs, best_dice={best_dsc:.4f}")
+        print(
+            f"[epoch {epoch:03d}] val_dice={dsc:.4f} best={best_dsc:.4f} | "
+            f"{jac_name}={jacp:.2f}{metric_suffix}{train_suffix}",
+        )
+        print(
+            f"[perf  {epoch:03d}] epoch={perf.epoch_time_sec:.2f}s iter={perf.mean_iter_time_ms:.1f}ms peak={peak_mem}",
+        )
 
+    print(f">>> Training complete: {args.max_epoch} epochs, best_dice={best_dsc:.4f}")
     if writer is not None:
         writer.close()

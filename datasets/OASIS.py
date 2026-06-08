@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 
 import numpy as np
@@ -8,12 +10,13 @@ from utils import pkload
 
 
 class OASISBrainDataset(Dataset):
+    """OASIS training pairs: random src/tar from the same split, with segmentation."""
+
     def __init__(self, data_path, transforms):
         self.paths = list(data_path)
         self.transforms = transforms
         if len(self.paths) < 2:
             raise RuntimeError("OASISBrainDataset requires at least 2 samples.")
-
 
     def __getitem__(self, index):
         src_path = self.paths[index]
@@ -31,22 +34,23 @@ class OASISBrainDataset(Dataset):
         x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])
         y, y_seg = self.transforms([y, y_seg])
+
         x = torch.from_numpy(np.ascontiguousarray(x)).float()
         y = torch.from_numpy(np.ascontiguousarray(y)).float()
         x_seg = torch.from_numpy(np.ascontiguousarray(x_seg)).long()
         y_seg = torch.from_numpy(np.ascontiguousarray(y_seg)).long()
         return x, y, x_seg, y_seg
 
-
     def __len__(self):
         return len(self.paths)
 
 
 class OASISBrainInferDataset(Dataset):
+    """OASIS validation/test pairs: pre-paired (x, y, x_seg, y_seg) tuples on disk."""
+
     def __init__(self, data_path, transforms):
         self.paths = list(data_path)
         self.transforms = transforms
-
 
     def __getitem__(self, index):
         x, y, x_seg, y_seg = pkload(self.paths[index])
@@ -54,12 +58,12 @@ class OASISBrainInferDataset(Dataset):
         x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])
         y, y_seg = self.transforms([y, y_seg])
+
         x = torch.from_numpy(np.ascontiguousarray(x)).float()
         y = torch.from_numpy(np.ascontiguousarray(y)).float()
         x_seg = torch.from_numpy(np.ascontiguousarray(x_seg)).long()
         y_seg = torch.from_numpy(np.ascontiguousarray(y_seg)).long()
         return x, y, x_seg, y_seg
-
 
     def __len__(self):
         return len(self.paths)

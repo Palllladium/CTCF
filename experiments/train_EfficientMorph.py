@@ -4,7 +4,9 @@ import torch
 from torch import optim
 
 from utils import setup_device, Grad3d
-from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
+from experiments.core.cli_args import add_common_args
+from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.train_runtime import TrainContext, run_train
 from models.EfficientMorph.wrapper import EfficientMorphSolo
 from models.EfficientMorph.configs import CONFIGS
 
@@ -49,7 +51,7 @@ class Runner:
         print(f"EfficientMorphSolo [{args.config}] params: {n_params:,} ({n_params/1e6:.3f}M)")
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
-        self.ctx = Ctx(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
+        self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.forward_flow = self._forward_flow
 
         self._ncc_gauss = _build_ncc_gauss(win=9, device=str(device))

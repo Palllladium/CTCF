@@ -4,7 +4,9 @@ import torch
 from torch import optim
 
 from utils import setup_device
-from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
+from experiments.core.cli_args import add_common_args
+from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.train_runtime import TrainContext, run_train
 from experiments.core.model_adapters import get_model_adapter
 from models.TransMorph_DCA.configs import CONFIGS
 
@@ -19,7 +21,7 @@ class Runner:
         full = tuple(s * 2 for s in half)
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=0, amsgrad=True)
-        self.ctx = Ctx(device, vol_size=full, ncc_win=(9, 9, 9))
+        self.ctx = TrainContext(device, vol_size=full, ncc_win=(9, 9, 9))
         self.forward_flow = lambda x, y: self.adapter.forward(self.model, x, y, amp=True, pool=2)
 
 

@@ -5,8 +5,10 @@ import torch
 from torch import optim
 
 from datasets.synthetic import build_synth_loaders
+from experiments.core.cli_args import add_common_args
+from experiments.core.data_loaders import baseline_loader_builder
 from experiments.core.model_adapters import get_model_adapter
-from experiments.core.train_runtime import Ctx, add_common_args, baseline_loader_builder, run_train
+from experiments.core.train_runtime import TrainContext, run_train
 from utils import RegisterModel, ctcf_schedule, dice_val, icon_loss, neg_jacobian_penalty, setup_device, DareDiffusion, elastic_loss
 from models.CTCF.configs import CONFIGS
 
@@ -52,7 +54,7 @@ class Runner:
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
         self.img_size = tuple(int(v) for v in self.model.img_size_full)
-        self.ctx = Ctx(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
+        self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"

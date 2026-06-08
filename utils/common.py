@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pickle
 
 import numpy as np
@@ -12,17 +14,15 @@ class AverageMeter:
     def __init__(self):
         self.reset()
 
-
     def reset(self):
         self.val = 0.0
         self.avg = 0.0
         self.sum = 0.0
         self.count = 0
-        self.vals = []
+        self.vals: list[float] = []
         self.std = 0.0
 
-
-    def update(self, val, n: int = 1):
+    def update(self, val: float, n: int = 1):
         val = float(val)
         self.val = val
         self.sum += val * n

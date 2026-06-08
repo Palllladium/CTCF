@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import glob
 import os
 import random
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,27 +16,31 @@ from torch import optim
 
 
 class Logger:
-    """Tee stdout to a log file. In quiet mode only epoch summaries go to terminal."""
+    """Tee stdout to a log file. In quiet mode only epoch summaries reach the terminal."""
 
-    # Lines matching these prefixes are always printed to terminal even in quiet mode
-    _ECHO_PREFIXES = ("[epoch", "[perf", ">>> ", "WARNING", "ABORT", "Traceback", "Error", "Training Starts")
+    _ECHO_PREFIXES = (
+        "[epoch",
+        "[perf",
+        ">>> ",
+        "WARNING",
+        "ABORT",
+        "Traceback",
+        "Error",
+        "Training Starts",
+    )
 
     def __init__(self, log_dir: str, filename: str = "logfile.log", quiet: bool = False):
         self.terminal = sys.stdout
         self.quiet = quiet
-        self._quiet_buf = ""  # buffer for incomplete lines in quiet mode
+        self._quiet_buf = ""
         os.makedirs(log_dir, exist_ok=True)
-        self.log = open(os.path.join(log_dir, filename), "a", encoding="utf-8", buffering=1)
-
+        self.log = open(os.path.join(log_dir, filename), "a", encoding="utf-8", buffering=1)  # noqa: SIM115
 
     def write(self, message: str):
         self.log.write(message)
         if not self.quiet:
             self.terminal.write(message)
             return
-        # Quiet mode: buffer until we have complete lines.
-        # Python's print() sends text and '\n' as separate write() calls,
-        # so we must reassemble before filtering.
         self._quiet_buf += message
         while "\n" in self._quiet_buf:
             line, self._quiet_buf = self._quiet_buf.split("\n", 1)
@@ -42,15 +48,18 @@ class Logger:
             if any(stripped.startswith(p) for p in self._ECHO_PREFIXES):
                 self.terminal.write(line + "\n")
 
-
     def flush(self):
         self.terminal.flush()
         self.log.flush()
 
 
-def attach_stdout_logger(log_dir: str, filename: str = "logfile.log",
-                         mirror_stderr: bool = True, quiet: bool = False) -> Logger:
-    logger = Logger(log_dir, filename=filename, quiet=quiet)
+def attach_stdout_logger(
+    log_dir: str,
+    filename: str = "logfile.log",
+    mirror_stderr: bool = True,
+    quiet: bool = False,
+) -> Logger:
+    logger = Logger(log_dir=log_dir, filename=filename, quiet=quiet)
     sys.stdout = logger
     if mirror_stderr:
         sys.stderr = logger
@@ -63,7 +72,6 @@ def setup_device(gpu_id: int = 0, seed: int = 0, deterministic: bool = False) ->
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    if torch.cuda.is_available():
         gpu_count = torch.cuda.device_count()
         if gpu_id < 0 or gpu_id >= gpu_count:
             raise ValueError(f"gpu_id={gpu_id} is out of range (available: 0..{gpu_count - 1})")
@@ -99,9 +107,16 @@ def make_exp_dirs(exp_name: str) -> ExperimentPaths:
     return ExperimentPaths(exp_dir=exp_dir, log_dir=log_dir)
 
 
-def adjust_learning_rate_poly(optimizer: optim.Optimizer, epoch: int, max_epochs: int, init_lr: float, power: float = 0.9) -> float:
-    max_epochs = max(1, int(max_epochs))
-    lr = float(np.round(init_lr * np.power(1 - (int(epoch) / max_epochs), power), 8))
+def adjust_learning_rate_poly(
+    optimizer: optim.Optimizer,
+    epoch: int,
+    max_epochs: int,
+    init_lr: float,
+    power: float = 0.9,
+) -> float:
+    """Polynomial LR decay; lr = init_lr * (1 - epoch/max_epochs)^power."""
+    max_epochs = max(1, max_epochs)
+    lr = float(np.round(init_lr * np.power(1 - (epoch / max_epochs), power), 8))
     for pg in optimizer.param_groups:
         pg["lr"] = lr
     return lr
@@ -112,59 +127,60 @@ def adjust_lr_ctcf_schedule(
     epoch: int,
     max_epochs: int,
     init_lr: float,
-    *,
     power: float = 0.9,
     min_lr: float = 2e-5,
     warm_end_frac: float = 0.15,
 ) -> float:
-    e = int(epoch)
-    me = max(1, int(max_epochs))
-    warm_end = max(1, int(round(float(warm_end_frac) * me)))
+    """Plateau LR for the cascade warmup window, then poly decay clamped at min_lr."""
+    me = max(1, max_epochs)
+    warm_end = max(1, round(warm_end_frac * me))
 
-    if e < warm_end:
-        lr = float(init_lr)
+    if epoch < warm_end:
+        lr = init_lr
     else:
-        t = float(e - warm_end) / float(max(1, me - warm_end))
+        t = (epoch - warm_end) / max(1, me - warm_end)
         t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
-        lr = float(init_lr * np.power(1.0 - t, float(power)))
+        lr = init_lr * np.power(1.0 - t, power)
 
-    lr = float(max(lr, float(min_lr)))
+    lr = float(max(lr, min_lr))
     for pg in optimizer.param_groups:
         pg["lr"] = lr
     return lr
 
 
-def ctcf_schedule(epoch: int, max_epoch: int):
-    max_epoch = max(1, int(max_epoch))
-    e = int(epoch)
+def ctcf_schedule(epoch: int, max_epoch: int) -> tuple[float, float, float]:
+    """Smoothstep ramp for (alpha_l1, alpha_l3, warm), zero before 5% and one after 15%."""
+    max_epoch = max(1, max_epoch)
 
-    def clamp01(x):
-        return 0.0 if x <= 0.0 else 1.0 if x >= 1.0 else float(x)
+    def clamp01(x: float) -> float:
+        if x <= 0.0: return 0.0
+        if x >= 1.0: return 1.0
+        return x
 
-    def ramp(p):
+    def ramp(p: float) -> float:
         p = clamp01(p)
         return p * p * (3.0 - 2.0 * p)
 
     s0 = max(1, int(0.05 * max_epoch))
     s1 = max(s0 + 1, int(0.15 * max_epoch))
 
-    if e < s0:
-        v = 0.0
-    elif e >= s1:
-        v = 1.0
-    else:
-        v = ramp((e - s0) / float(s1 - s0))
+    if epoch < s0: v = 0.0
+    elif epoch >= s1: v = 1.0
+    else: v = ramp((epoch - s0) / (s1 - s0))
 
-    alpha = float(v)
-    warm = float(v)
-    return alpha, alpha, warm
+    return v, v, v
 
 
-def save_checkpoint(state: Dict[str, Any], save_dir: str, filename: str, max_model_num: int = 8) -> None:
+def save_checkpoint(
+    state: dict[str, Any],
+    save_dir: str,
+    filename: str,
+    max_model_num: int = 8,
+) -> None:
     os.makedirs(save_dir, exist_ok=True)
     torch.save(state, os.path.join(save_dir, filename))
     models = natsorted(glob.glob(os.path.join(save_dir, "*")))
-    while len(models) > int(max_model_num):
+    while len(models) > max_model_num:
         os.remove(models[0])
         models = natsorted(glob.glob(os.path.join(save_dir, "*")))
 
@@ -172,9 +188,9 @@ def save_checkpoint(state: Dict[str, Any], save_dir: str, filename: str, max_mod
 def load_checkpoint_if_exists(
     ckpt_path: str,
     model: torch.nn.Module,
-    optimizer: Optional[optim.Optimizer] = None,
+    optimizer: optim.Optimizer | None = None,
     map_location: str | torch.device = "cpu",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     if not ckpt_path or not os.path.exists(ckpt_path):
         return None
     ckpt = torch.load(ckpt_path, map_location=map_location)
@@ -187,7 +203,7 @@ def load_checkpoint_if_exists(
             f"  ckpt: {ckpt_path}\n"
             "  likely cause: changed architecture/config (e.g. time_steps, levels, channels).\n"
             "  action: use a matching checkpoint or start without --resume.\n"
-            f"  details: {e}"
+            f"  details: {e}",
         ) from e
 
     if optimizer is not None and isinstance(ckpt, dict) and "optimizer" in ckpt:
@@ -199,17 +215,19 @@ def load_checkpoint_if_exists(
                 f"  ckpt: {ckpt_path}\n"
                 "  likely cause: changed model params or optimizer setup.\n"
                 "  action: use matching checkpoint or remove --resume.\n"
-                f"  details: {e}"
+                f"  details: {e}",
             ) from e
 
-    return ckpt if isinstance(ckpt, dict) else {"state_dict": state_dict}
+    if isinstance(ckpt, dict):
+        return ckpt
+    return {"state_dict": state_dict}
 
 
 @dataclass(frozen=True)
 class PerfInfo:
     epoch_time_sec: float
     mean_iter_time_ms: float
-    peak_gpu_mem_gib: Optional[float]
+    peak_gpu_mem_gib: float | None
 
 
 def perf_epoch_start() -> float:
@@ -220,18 +238,25 @@ def perf_epoch_start() -> float:
 
 def perf_epoch_end(t0: float, iters: int, iter_time_sum: float) -> PerfInfo:
     epoch_time = time.perf_counter() - t0
-    iter_ms = (iter_time_sum / max(1, int(iters))) * 1000.0
-    peak = torch.cuda.max_memory_reserved() / (1024 ** 3) if torch.cuda.is_available() else None
+    iter_ms = (iter_time_sum / max(1, iters)) * 1000.0
+    peak = None
+    if torch.cuda.is_available():
+        peak = torch.cuda.max_memory_reserved() / (1024**3)
     return PerfInfo(epoch_time_sec=epoch_time, mean_iter_time_ms=iter_ms, peak_gpu_mem_gib=peak)
 
 
 def compute_fig(img: torch.Tensor) -> plt.Figure:
+    """Render a 4x4 grid of axial slices around z=48 as a matplotlib figure."""
+    grid_rows, grid_cols = 4, 4
+    n_slices = grid_rows * grid_cols
+
     arr = img.detach().float().cpu().numpy()[0, 0]
-    z0 = min(48, max(0, arr.shape[0] - 16))
-    arr = arr[z0:z0 + 16]
+    z0 = min(48, max(0, arr.shape[0] - n_slices))
+    arr = arr[z0 : z0 + n_slices]
+
     fig = plt.figure(figsize=(12, 12), dpi=180)
     for i in range(arr.shape[0]):
-        plt.subplot(4, 4, i + 1)
+        plt.subplot(grid_rows, grid_cols, i + 1)
         plt.axis("off")
         plt.imshow(arr[i], cmap="gray")
     fig.subplots_adjust(wspace=0, hspace=0)
@@ -239,19 +264,17 @@ def compute_fig(img: torch.Tensor) -> plt.Figure:
 
 
 def mk_grid_img(flow: torch.Tensor, grid_step: int = 8, line_thickness: int = 1) -> torch.Tensor:
-    if flow.dim() == 5 and flow.shape[1] in (2, 3):
-        d, h, w = map(int, flow.shape[-3:])
-        device = flow.device
-    elif flow.dim() == 5 and flow.shape[-1] in (2, 3):
-        d, h, w = map(int, flow.shape[1:4])
-        device = flow.device
-    else:
-        raise ValueError(f"Unsupported flow shape: {tuple(flow.shape)}")
-    grid_step = max(1, int(grid_step))
-    line_thickness = max(1, int(line_thickness))
+    """Build a [1,1,D,H,W] grid image matching the spatial extents of a flow."""
+    if flow.dim() == 5 and flow.shape[1] in (2, 3): d, h, w = map(int, flow.shape[-3:])
+    elif flow.dim() == 5 and flow.shape[-1] in (2, 3): d, h, w = map(int, flow.shape[1:4])
+    else: raise ValueError(f"Unsupported flow shape: {tuple(flow.shape)}")
+
+    device = flow.device
+    grid_step = max(1, grid_step)
+    line_thickness = max(1, line_thickness)
     grid_img = torch.zeros((1, 1, d, h, w), dtype=torch.float32, device=device)
     for j in range(0, h, grid_step):
-        grid_img[:, :, :, j:min(h, j + line_thickness), :] = 1.0
+        grid_img[:, :, :, j : min(h, j + line_thickness), :] = 1.0
     for i in range(0, w, grid_step):
-        grid_img[:, :, :, :, i:min(w, i + line_thickness)] = 1.0
+        grid_img[:, :, :, :, i : min(w, i + line_thickness)] = 1.0
     return grid_img
