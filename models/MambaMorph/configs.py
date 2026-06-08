@@ -4,6 +4,7 @@
 upstream default (176, 208, 192). The encoder uses 3 stages with patch_size=4,
 which divides cleanly: 160/4=40, 192/4=48, 224/4=56.
 """
+
 import ml_collections
 
 

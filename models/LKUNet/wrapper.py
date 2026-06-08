@@ -1,23 +1,23 @@
-"""LKU-Net wrappers for standalone and CTCF-cascade use."""
+from __future__ import annotations
 
 from copy import deepcopy
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from models.LKUNet.configs import CONFIGS as _CFG_REGISTRY
-from models.LKUNet.model import UNet, SpatialTransform
+from models.LKUNet.model import SpatialTransform, UNet
 from utils.field import compose_flows
 from utils.spatial import SpatialTransformer
 
 
 class LkuNetSolo(nn.Module):
     """LKU-Net standalone registration network (UNet + SpatialTransform)."""
+
     def __init__(self, vol_size, in_channel=2, n_classes=3, start_channel=32):
         super().__init__()
         self.unet = UNet(in_channel=in_channel, n_classes=n_classes, start_channel=start_channel)
         self.transform = SpatialTransform(vol_size)
-
 
     def forward(self, mov, fix):
         flow = self.unet(mov, fix)
@@ -34,18 +34,17 @@ class LkuNetCascadeL2(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        config_key = str(getattr(config, "lku_config", "LKU-8"))
+        config_key = getattr(config, "lku_config", "LKU-8")
         if config_key not in _CFG_REGISTRY:
-            raise KeyError(f"Unknown LKU-Net config '{config_key}'. "
-                           f"Available: {list(_CFG_REGISTRY.keys())}")
+            raise KeyError(f"Unknown LKU-Net config '{config_key}'. Available: {list(_CFG_REGISTRY.keys())}")
 
         cfg = deepcopy(_CFG_REGISTRY[config_key])
         self.config_key = config_key
-        self.vol_size = tuple(int(v) for v in getattr(config, "img_size", cfg.img_size))
+        self.vol_size = tuple(getattr(config, "img_size", cfg.img_size))
         self.unet = UNet(
-            in_channel=int(cfg.in_channel),
-            n_classes=int(cfg.n_classes),
-            start_channel=int(cfg.start_channel),
+            in_channel=cfg.in_channel,
+            n_classes=cfg.n_classes,
+            start_channel=cfg.start_channel,
         )
         self.spatial_transform = SpatialTransformer(self.vol_size)
 
@@ -54,8 +53,7 @@ class LkuNetCascadeL2(nn.Module):
             [(d - 1) / 2.0, (h - 1) / 2.0, (w - 1) / 2.0],
             dtype=torch.float32,
         ).view(1, 3, 1, 1, 1)
-        self.register_buffer("flow_scale", scale, persistent=False)
-
+        self.register_buffer(name="flow_scale", tensor=scale, persistent=False)
 
     def forward(
         self,
@@ -64,10 +62,15 @@ class LkuNetCascadeL2(nn.Module):
         init_flow=None,
         return_all_flows: bool = False,
     ):
-        mov_warped = self.spatial_transform(mov, init_flow) if init_flow is not None else mov
+        mov_warped = mov
+        if init_flow is not None:
+            mov_warped = self.spatial_transform(mov, init_flow)
+
         flow_norm = self.unet(mov_warped, fix)
         flow_pred = flow_norm * self.flow_scale.to(device=flow_norm.device, dtype=flow_norm.dtype)
 
-        flow_total = compose_flows(flow_pred, init_flow) if init_flow is not None else flow_pred
+        flow_total = flow_pred
+        if init_flow is not None:
+            flow_total = compose_flows(flow_pred, init_flow)
         warped = self.spatial_transform(mov, flow_total)
         return warped, flow_total

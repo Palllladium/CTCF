@@ -44,13 +44,21 @@ ignore = [
 "__init__.py" = ["F401"]                    # re-exports without __all__
 "experiments/**/*.py" = ["E402"]             # sys.path manipulation before imports in entry scripts
 "experiments/train_*.py" = ["N999"]          # CamelCase model-name suffix; module path is the CLI invocation contract
-"models/TransMorph_DCA/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]  # vendored upstream code — touch minimally
+# Fully vendored baselines (no first-party wrapper) — touch minimally
+"models/TransMorph_DCA/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/UTSRMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
-"models/EfficientMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
-"models/LKUNet/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
-"models/MambaMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
-"models/VMambaMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
-"models/VoxelMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
+# Vendored backbone cores — touch minimally (our wrapper.py gets the full standard)
+"models/EfficientMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/LKUNet/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/MambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VMambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VoxelMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+# Config registries — mostly upstream-derived hyperparameter data; format-only, relaxed lint
+"models/EfficientMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/LKUNet/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/MambaMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VMambaMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VoxelMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["models", "experiments", "utils", "datasets", "tools"]
