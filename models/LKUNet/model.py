@@ -1,21 +1,26 @@
-"""
-LKU-Net: U-Net with Large-Kernel encoder blocks (Jia et al., WBIR 2022 / arxiv 2208.04939).
+"""LKU-Net: a U-Net with Large-Kernel parallel-convolution encoder blocks; predicts
+bounded normalized-grid flow (Softsign output).
 
-Original source: https://github.com/xi-jia/LKU-Net (LKU-Net_3D_OASIS/LKU-Net-Full-Resolution).
-This port keeps the architecture intact, removes hardcoded .cuda() calls so the
-module works on any device, and registers SpatialTransform's grids as buffers
-to avoid re-creating them on every forward pass.
+Source:  https://github.com/xi-jia/LKU-Net
+Authors: Xi Jia, Joseph Bartlett, Tianyang Zhang, Wenqi Lu, Zhaowen Qiu, Jinming Duan
+Paper:   Jia et al., "U-Net vs Transformer: Is U-Net Outdated in Medical Image
+         Registration?", WBIR 2022 (arXiv:2208.04939); #1 on Learn2Reg 2021 OASIS
+License: none declared by the upstream authors
+
+This port keeps the architecture intact, removes hardcoded .cuda() calls so the module
+works on any device, and registers SpatialTransform's grids as buffers to avoid
+re-creating them on every forward pass.
 
 Key differences from VoxelMorph:
-- LK_encoder block: parallel 3x3x3 + 5x5x5 + 1x1x1 conv summed with input residual
-- 4-level encoder/decoder (uses all skip connections in full-res variant)
-- Output flow uses Softsign activation (bounded to [-1, 1])
-- Flow is in normalized grid coordinates (compatible with grid_sample directly),
-  NOT voxel units - this differs from VoxelMorph/CTCF convention.
+  - LK_encoder block: parallel 3x3x3 + 5x5x5 + 1x1x1 conv summed with input residual.
+  - 4-level encoder/decoder (uses all skip connections in the full-res variant).
+  - Output flow uses Softsign (bounded to [-1, 1]) in NORMALIZED grid coordinates
+    (grid_sample-ready), NOT voxel units - differs from the VoxelMorph/CTCF convention.
 
-Model output convention: flow tensor (B, 3, D, H, W), channel-first.
-SpatialTransform expects flow permuted to (B, D, H, W, 3) before warping.
+Output convention: flow (B, 3, D, H, W), channel-first; SpatialTransform expects it
+permuted to (B, D, H, W, 3) before warping.
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,19 +28,19 @@ import torch.nn.functional as F
 
 class LK_encoder(nn.Module):
     """Large-kernel encoder block: parallel 3x3x3 + KxKxK + 1x1x1 + residual."""
+
     def __init__(self, in_channels, out_channels, kernel_size=5, stride=1, padding=2, bias=False):
         super().__init__()
         self.layer_regularKernel = nn.Conv3d(in_channels, out_channels, 3, stride=1, padding=1, bias=bias)
-        self.layer_largeKernel = nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
+        self.layer_largeKernel = nn.Conv3d(
+            in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias
+        )
         self.layer_oneKernel = nn.Conv3d(in_channels, out_channels, 1, stride=1, padding=0, bias=bias)
         self.layer_nonlinearity = nn.PReLU()
 
     def forward(self, inputs):
         outputs = (
-            self.layer_regularKernel(inputs)
-            + self.layer_largeKernel(inputs)
-            + self.layer_oneKernel(inputs)
-            + inputs
+            self.layer_regularKernel(inputs) + self.layer_largeKernel(inputs) + self.layer_oneKernel(inputs) + inputs
         )
         return self.layer_nonlinearity(outputs)
 
@@ -48,6 +53,7 @@ class UNet(nn.Module):
         n_classes: output channels (3 for displacement field).
         start_channel: base channel count. Paper uses 32 for full-res OASIS (~2M params).
     """
+
     def __init__(self, in_channel=2, n_classes=3, start_channel=32):
         super().__init__()
         self.in_channel = in_channel
@@ -82,7 +88,6 @@ class UNet(nn.Module):
         self.up3 = self._decoder(sc * 2, sc * 2)
         self.up4 = self._decoder(sc * 2, sc * 2)
 
-
     @staticmethod
     def _encoder(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False):
         return nn.Sequential(
@@ -90,15 +95,20 @@ class UNet(nn.Module):
             nn.PReLU(),
         )
 
-
     @staticmethod
     def _decoder(in_channels, out_channels, kernel_size=2, stride=2, padding=0, output_padding=0, bias=True):
         return nn.Sequential(
-            nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride,
-                               padding=padding, output_padding=output_padding, bias=bias),
+            nn.ConvTranspose3d(
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride=stride,
+                padding=padding,
+                output_padding=output_padding,
+                bias=bias,
+            ),
             nn.PReLU(),
         )
-
 
     @staticmethod
     def _outputs(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False):
@@ -107,7 +117,6 @@ class UNet(nn.Module):
             nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias),
             nn.Softsign(),
         )
-
 
     def forward(self, x, y):
         x_in = torch.cat((x, y), 1)
@@ -152,11 +161,14 @@ class SpatialTransform(nn.Module):
     The grid sampling positions are constructed as `grid + flow` directly,
     where grid is built from `linspace(-1, 1, ...)`.
     """
+
     def __init__(self, vol_size):
         super().__init__()
         d, h, w = vol_size
         grid_d, grid_h, grid_w = torch.meshgrid(
-            torch.linspace(-1, 1, d), torch.linspace(-1, 1, h), torch.linspace(-1, 1, w),
+            torch.linspace(-1, 1, d),
+            torch.linspace(-1, 1, h),
+            torch.linspace(-1, 1, w),
             indexing="ij",
         )
         # Stored as buffers so they follow .to(device) and don't allocate per forward.

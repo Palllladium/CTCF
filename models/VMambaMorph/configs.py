@@ -1,10 +1,3 @@
-"""VMambaMorph configuration registry.
-
-`img_size` is set to (160, 192, 224) — our protocol — instead of the upstream
-(176, 208, 192). With patch_size=4 and 3 encoder stages, spatial sizes are:
-40x48x56 -> 20x24x28 -> 10x12x14 (cleanly divisible by 2 each time).
-"""
-
 import ml_collections
 
 

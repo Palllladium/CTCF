@@ -1,14 +1,27 @@
+"""EfficientMorph: parameter-efficient transformer for 3D image registration, using
+planar/axial attention and patch merging to cut the cost of full 3D self-attention.
+
+Source:  https://github.com/mahimoksha/Efficient_Morph_Registration
+Authors: Abu Zahid Bin Aziz, Mokshagna Sai Teja Karanam, Tushar Kataria, Shireen Y. Elhabian
+Paper:   Aziz et al., "EfficientMorph: Parameter-Efficient Transformer-Based Architecture
+         for 3D Image Registration", WACV 2025 (arXiv:2403.11026)
+License: none declared by the upstream authors
+
+The attention/patch-merging blocks are adapted from the TransMorph project; consumed by
+the CTCF wrapper via the `EfficientMorph` class (models/EfficientMorph/wrapper.py).
+"""
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath, trunc_normal_, to_3tuple
-from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
-import numpy as np
+import torch.utils.checkpoint as checkpoint
+from timm.models.layers import DropPath, to_3tuple, trunc_normal_
+from torch.distributions.normal import Normal
 
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -16,7 +29,6 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
-
 
     def forward(self, x):
         x = self.fc1(x)
@@ -28,7 +40,7 @@ class Mlp(nn.Module):
 
 
 class EfficientTransformerBlock(nn.Module):
-    r""" Efficient Transformer Block.
+    r"""Efficient Transformer Block.
     Args:
         dim (int): Number of input channels.
         num_heads (int): Number of attention heads.
@@ -41,9 +53,24 @@ class EfficientTransformerBlock(nn.Module):
         act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
-    def __init__(self, dim, num_heads,
-                 mlp_ratio=4., qkv_bias=True, qk_scale=None, rpe=True, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm,proj_drop=0., axial_dims = '12',downsample_dims = (40,48,56)):
+
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        rpe=True,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        proj_drop=0.0,
+        axial_dims="12",
+        downsample_dims=(40, 48, 56),
+    ):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -59,7 +86,7 @@ class EfficientTransformerBlock(nn.Module):
         # trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
@@ -69,13 +96,15 @@ class EfficientTransformerBlock(nn.Module):
         self.T = None
 
         head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.scale = qk_scale or head_dim**-0.5
 
-        self.axial_dim_1, self.axial_dim_2 = int(self.axial_dims[0]),int(self.axial_dims[1])
-        if self.axial_dim_1 in [1, 2] and self.axial_dim_2 in [1, 2]: self.extra_dim  =3
-        elif self.axial_dim_1 in [2, 3] and self.axial_dim_2 in [2, 3]: self.extra_dim  =1
-        else: self.extra_dim = 2
-    
+        self.axial_dim_1, self.axial_dim_2 = int(self.axial_dims[0]), int(self.axial_dims[1])
+        if self.axial_dim_1 in [1, 2] and self.axial_dim_2 in [1, 2]:
+            self.extra_dim = 3
+        elif self.axial_dim_1 in [2, 3] and self.axial_dim_2 in [2, 3]:
+            self.extra_dim = 1
+        else:
+            self.extra_dim = 2
 
     def forward(self, x, mask_matrix):
         H, W, T = self.H, self.W, self.T
@@ -86,14 +115,28 @@ class EfficientTransformerBlock(nn.Module):
         x = self.norm1(x)
         x = x.view(B, H, W, T, C)
 
-        x = x.permute(0,self.extra_dim, self.axial_dim_1, self.axial_dim_2, 4).contiguous().view(x.shape[0]*x.shape[self.extra_dim], x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2] , x.shape[4])
+        x = (
+            x.permute(0, self.extra_dim, self.axial_dim_1, self.axial_dim_2, 4)
+            .contiguous()
+            .view(
+                x.shape[0] * x.shape[self.extra_dim], 
+                x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2],
+                 x.shape[4]
+            )
+        )
 
-        B_, N, C = x.shape #(B, axial_dim_1*axial_dim_2, C*extra_dim) #1,1920,5376
-        qkv = self.qkv(x).permute(1,0,2).contiguous().reshape(1,N,3,self.num_heads, (x.shape[0]* (C//self.num_heads))).permute(2, 0, 3, 1, 4)
+        B_, N, C = x.shape  # (B, axial_dim_1*axial_dim_2, C*extra_dim) #1,1920,5376
+        qkv = (
+            self.qkv(x)
+            .permute(1, 0, 2)
+            .contiguous()
+            .reshape(1, N, 3, self.num_heads, (x.shape[0] * (C // self.num_heads)))
+            .permute(2, 0, 3, 1, 4)
+        )
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
+        attn = q @ k.transpose(-2, -1)
 
         attn = self.softmax(attn)
         attn = self.attn_drop(attn)
@@ -111,17 +154,17 @@ class EfficientTransformerBlock(nn.Module):
 
 
 class PatchMerging(nn.Module):
-    r""" Patch Merging Layer.
+    r"""Patch Merging Layer.
     Args:
         dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
+
     def __init__(self, dim, norm_layer=nn.LayerNorm, reduce_factor=2):
         super().__init__()
         self.dim = dim
-        self.reduction = nn.Linear(8 * dim, (8//reduce_factor) * dim, bias=False)
+        self.reduction = nn.Linear(8 * dim, (8 // reduce_factor) * dim, bias=False)
         self.norm = norm_layer(8 * dim)
-
 
     def forward(self, x, H, W, T):
         """
@@ -156,7 +199,7 @@ class PatchMerging(nn.Module):
 
 
 class BasicLayer(nn.Module):
-    """ A basic Efficient Transformer layer for one stage.
+    """A basic Efficient Transformer layer for one stage.
     Args:
         dim (int): Number of feature channels
         depth (int): Depths of this stage.
@@ -171,48 +214,56 @@ class BasicLayer(nn.Module):
         downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
-    def __init__(self,
-                 dim,
-                 depth,
-                 num_heads,
-                 mlp_ratio=4.,
-                 qkv_bias=True,
-                 qk_scale=None,
-                 rpe=True,
-                 drop=0.,
-                 attn_drop=0.,
-                 drop_path=0.,
-                 norm_layer=nn.LayerNorm,
-                 downsample=None,
-                 use_checkpoint=False,
-                 pat_merg_rf=2,axial = ('12','23'),):
+
+    def __init__(
+        self,
+        dim,
+        depth,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        rpe=True,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        norm_layer=nn.LayerNorm,
+        downsample=None,
+        use_checkpoint=False,
+        pat_merg_rf=2,
+        axial=("12", "23"),
+    ):
         super().__init__()
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.pat_merg_rf = pat_merg_rf
-        # build blocks
-        self.blocks = nn.ModuleList([
-            EfficientTransformerBlock(
-                dim=dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                qk_scale=qk_scale,
-                rpe=rpe,
-                drop=drop,
-                attn_drop=attn_drop,
-                drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                norm_layer=norm_layer,
-                axial_dims = axial[i],)
-            for i in range(depth)])
 
-        # patch merging layer
-        if downsample is not None: self.downsample = downsample(dim=dim, norm_layer=norm_layer, reduce_factor=self.pat_merg_rf)
-        else: self.downsample = None
+        self.blocks = nn.ModuleList(
+            [
+                EfficientTransformerBlock(
+                    dim=dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    rpe=rpe,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                    norm_layer=norm_layer,
+                    axial_dims=axial[i],
+                )
+                for i in range(depth)
+            ]
+        )
 
+        if downsample is not None:
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer, reduce_factor=self.pat_merg_rf)
+        else:
+            self.downsample = None
 
     def forward(self, x, H, W, T):
-        """ Forward function.
+        """Forward function.
         Args:
             x: Input feature, tensor size (B, H*W*T, C).
             H, W: Spatial resolution of the input feature.
@@ -232,13 +283,14 @@ class BasicLayer(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
+    """Image to Patch Embedding
     Args:
         patch_size (int): Patch token size. Default: 4.
         in_chans (int): Number of input image channels. Default: 3.
         embed_dim (int): Number of linear projection output channels. Default: 96.
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
+
     def __init__(self, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
         patch_size = to_3tuple(patch_size)
@@ -255,7 +307,6 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         """Forward function."""
-        # padding
         _, _, H, W, T = x.size()
         if T % self.patch_size[2] != 0:
             x = nnf.pad(x, (0, self.patch_size[2] - T % self.patch_size[2]))
@@ -273,37 +324,18 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class SinusoidalPositionEmbedding(nn.Module):
-    '''
-    Rotary Position Embedding
-    '''
-    def __init__(self,):
-        super(SinusoidalPositionEmbedding, self).__init__()
-
-
-    def forward(self, x):
-        batch_sz, n_patches, hidden = x.shape
-        position_ids = torch.arange(0, n_patches, device=x.device).float()
-        indices = torch.arange(0, hidden//2, device=x.device).float()
-        indices = torch.pow(10000.0, -2 * indices / hidden)
-        embeddings = torch.einsum('b,d->bd', position_ids, indices)
-        embeddings = torch.stack([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
-        embeddings = torch.reshape(embeddings, (1, n_patches, hidden))
-        return embeddings
-
 class SinPositionalEncoding3D(nn.Module):
     def __init__(self, channels):
         """
         :param channels: The last dimension of the tensor you want to apply pos emb to.
         """
         super(SinPositionalEncoding3D, self).__init__()
-        channels = int(np.ceil(channels/6)*2)
+        channels = int(np.ceil(channels / 6) * 2)
         if channels % 2:
             channels += 1
         self.channels = channels
-        inv_freq = 1. / (10000 ** (torch.arange(0, channels, 2).float() / channels))
-        self.register_buffer('inv_freq', inv_freq, persistent=False)
-
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, channels, 2).float() / channels))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, tensor):
         """
@@ -323,38 +355,41 @@ class SinPositionalEncoding3D(nn.Module):
         emb_x = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()), dim=-1).unsqueeze(1).unsqueeze(1)
         emb_y = torch.cat((sin_inp_y.sin(), sin_inp_y.cos()), dim=-1).unsqueeze(1)
         emb_z = torch.cat((sin_inp_z.sin(), sin_inp_z.cos()), dim=-1)
-        emb = torch.zeros((x,y,z,self.channels*3),device=tensor.device).type(tensor.type())
-        emb[:,:,:,:self.channels] = emb_x
-        emb[:,:,:,self.channels:2*self.channels] = emb_y
-        emb[:,:,:,2*self.channels:] = emb_z
-        emb = emb[None,:,:,:,:orig_ch].repeat(batch_size, 1, 1, 1, 1)
+        emb = torch.zeros((x, y, z, self.channels * 3), device=tensor.device).type(tensor.type())
+        emb[:, :, :, : self.channels] = emb_x
+        emb[:, :, :, self.channels : 2 * self.channels] = emb_y
+        emb[:, :, :, 2 * self.channels :] = emb_z
+        emb = emb[None, :, :, :, :orig_ch].repeat(batch_size, 1, 1, 1, 1)
         return emb.permute(0, 4, 1, 2, 3)
 
 
 class EfficientTransformer(nn.Module):
-    def __init__(self, pretrain_img_size=224,
-                 patch_size=4,
-                 in_chans=3,
-                 embed_dim=96,
-                 depths=[2, 2, 6, 2],
-                 num_heads=[3, 6, 12, 24],
-                 mlp_ratio=4.,
-                 qkv_bias=True,
-                 qk_scale=None,
-                 drop_rate=0.,
-                 attn_drop_rate=0.,
-                 drop_path_rate=0.2,
-                 norm_layer=nn.LayerNorm,
-                 ape=False,
-                 spe=False,
-                 rpe=True,
-                 patch_norm=True,
-                 out_indices=(0, 1, 2, 3),
-                 frozen_stages=-1,
-                 use_checkpoint=False,
-                 pat_merg_rf=2,
-                 axial_dims = (('12','23'),('31','12'),('23','31','12','23'),('31','12')),
-                 downsampled_dims = ((40,48,56),(20,24,28),(10,12,14),(5,6,7)),):
+    def __init__(
+        self,
+        pretrain_img_size=224,
+        patch_size=4,
+        in_chans=3,
+        embed_dim=96,
+        depths=[2, 2, 6, 2],
+        num_heads=[3, 6, 12, 24],
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        drop_path_rate=0.2,
+        norm_layer=nn.LayerNorm,
+        ape=False,
+        spe=False,
+        rpe=True,
+        patch_norm=True,
+        out_indices=(0, 1, 2, 3),
+        frozen_stages=-1,
+        use_checkpoint=False,
+        pat_merg_rf=2,
+        axial_dims=(("12", "23"), ("31", "12"), ("23", "31", "12", "23"), ("31", "12")),
+        downsampled_dims=((40, 48, 56), (20, 24, 28), (10, 12, 14), (5, 6, 7)),
+    ):
         super().__init__()
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
@@ -367,58 +402,63 @@ class EfficientTransformer(nn.Module):
         self.frozen_stages = frozen_stages
         self.axial_dims = axial_dims
         self.downsampled_dims = downsampled_dims
-        # split image into non-overlapping patches
         self.p_s = patch_size
         self.patch_embed = PatchEmbed(
-            patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
-            norm_layer=norm_layer if self.patch_norm else None)
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None,
+        )
 
-        # absolute position embedding
         if self.ape:
             pretrain_img_size = to_3tuple(self.pretrain_img_size)
             patch_size = to_3tuple(patch_size)
-            patches_resolution = [pretrain_img_size[0] // patch_size[0], pretrain_img_size[1] // patch_size[1], pretrain_img_size[2] // patch_size[2]]
+            patches_resolution = [
+                pretrain_img_size[0] // patch_size[0],
+                pretrain_img_size[1] // patch_size[1],
+                pretrain_img_size[2] // patch_size[2],
+            ]
 
             self.absolute_pos_embed = nn.Parameter(
-                torch.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1], patches_resolution[2]))
-            trunc_normal_(self.absolute_pos_embed, std=.02)
+                torch.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1], patches_resolution[2])
+            )
+            trunc_normal_(self.absolute_pos_embed, std=0.02)
         elif self.spe:
             self.pos_embd = SinPositionalEncoding3D(embed_dim)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        # stochastic depth
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
 
-        # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
-                                depth=depths[i_layer],
-                                num_heads=num_heads[i_layer],
-                                mlp_ratio=mlp_ratio,
-                                qkv_bias=qkv_bias,
-                                rpe = rpe,
-                                qk_scale=qk_scale,
-                                drop=drop_rate,
-                                attn_drop=attn_drop_rate,
-                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                                norm_layer=norm_layer,
-                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                                use_checkpoint=use_checkpoint,
-                               pat_merg_rf=pat_merg_rf,axial = axial_dims[i_layer])
+            layer = BasicLayer(
+                dim=int(embed_dim * 2**i_layer),
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                rpe=rpe,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
+                norm_layer=norm_layer,
+                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                use_checkpoint=use_checkpoint,
+                pat_merg_rf=pat_merg_rf,
+                axial=axial_dims[i_layer],
+            )
             self.layers.append(layer)
 
-        num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
+        num_features = [int(embed_dim * 2**i) for i in range(self.num_layers)]
         self.num_features = num_features
 
-        # add a norm layer for each output
         for i_layer in out_indices:
             layer = norm_layer(num_features[i_layer])
-            layer_name = f'norm{i_layer}'
+            layer_name = f"norm{i_layer}"
             self.add_module(layer_name, layer)
 
         self._freeze_stages()
-
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -437,7 +477,6 @@ class EfficientTransformer(nn.Module):
                 for param in m.parameters():
                     param.requires_grad = False
 
-
     def init_weights(self, pretrained=None):
         """Initialize the weights in backbone.
         Args:
@@ -447,7 +486,7 @@ class EfficientTransformer(nn.Module):
 
         def _init_weights(m):
             if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=.02)
+                trunc_normal_(m.weight, std=0.02)
                 if isinstance(m, nn.Linear) and m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
@@ -459,8 +498,7 @@ class EfficientTransformer(nn.Module):
         elif pretrained is None:
             self.apply(_init_weights)
         else:
-            raise TypeError('pretrained must be a str or None')
-
+            raise TypeError("pretrained must be a str or None")
 
     def forward(self, x):
         """Forward function."""
@@ -468,8 +506,7 @@ class EfficientTransformer(nn.Module):
         Wh, Ww, Wt = x.size(2), x.size(3), x.size(4)
 
         if self.ape:
-            # interpolate the position embedding to the corresponding size
-            absolute_pos_embed = nnf.interpolate(self.absolute_pos_embed, size=(Wh, Ww, Wt), mode='trilinear')
+            absolute_pos_embed = nnf.interpolate(self.absolute_pos_embed, size=(Wh, Ww, Wt), mode="trilinear")
             x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww*Wt C
         elif self.spe:
             x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
@@ -482,13 +519,12 @@ class EfficientTransformer(nn.Module):
             layer = self.layers[i]
             x_out, H, W, T, x, Wh, Ww, Wt = layer(x, Wh, Ww, Wt)
             if i in self.out_indices:
-                norm_layer = getattr(self, f'norm{i}')
+                norm_layer = getattr(self, f"norm{i}")
                 x_out = norm_layer(x_out)
 
                 out = x_out.view(-1, H, W, T, self.num_features[i]).permute(0, 4, 1, 2, 3).contiguous()
                 outs.append(out)
         return outs
-
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""
@@ -498,13 +534,13 @@ class EfficientTransformer(nn.Module):
 
 class Conv3dReLU(nn.Sequential):
     def __init__(
-            self,
-            in_channels,
-            out_channels,
-            kernel_size,
-            padding=0,
-            stride=1,
-            use_batchnorm=True,
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        padding=0,
+        stride=1,
+        use_batchnorm=True,
     ):
         conv = nn.Conv3d(
             in_channels,
@@ -515,19 +551,21 @@ class Conv3dReLU(nn.Sequential):
             bias=False,
         )
         relu = nn.LeakyReLU(inplace=True)
-        if not use_batchnorm: nm = nn.InstanceNorm3d(out_channels)
-        else: nm = nn.BatchNorm3d(out_channels)
+        if not use_batchnorm:
+            nm = nn.InstanceNorm3d(out_channels)
+        else:
+            nm = nn.BatchNorm3d(out_channels)
 
         super(Conv3dReLU, self).__init__(conv, nm, relu)
 
 
 class DecoderBlock(nn.Module):
     def __init__(
-            self,
-            in_channels,
-            out_channels,
-            skip_channels=0,
-            use_batchnorm=True,
+        self,
+        in_channels,
+        out_channels,
+        skip_channels=0,
+        use_batchnorm=True,
     ):
         super().__init__()
         self.conv1 = Conv3dReLU(
@@ -544,7 +582,7 @@ class DecoderBlock(nn.Module):
             padding=1,
             use_batchnorm=use_batchnorm,
         )
-        self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
+        self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
 
     def forward(self, x, skip=None):
         x = self.up(x)
@@ -568,7 +606,8 @@ class SpatialTransformer(nn.Module):
     N-D Spatial Transformer
     Obtained from https://github.com/voxelmorph/voxelmorph
     """
-    def __init__(self, size, mode='bilinear'):
+
+    def __init__(self, size, mode="bilinear"):
         super().__init__()
 
         self.mode = mode
@@ -578,7 +617,7 @@ class SpatialTransformer(nn.Module):
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
-        self.register_buffer('grid', grid)
+        self.register_buffer("grid", grid)
 
     def forward(self, src, flow):
         # new locations
@@ -600,9 +639,9 @@ class SpatialTransformer(nn.Module):
 
 class EfficientMorph(nn.Module):
     def __init__(self, config):
-        '''
+        """
         EfficientMorph Model
-        '''
+        """
         super(EfficientMorph, self).__init__()
         if_convskip = config.if_convskip
         self.if_convskip = if_convskip
@@ -610,28 +649,33 @@ class EfficientMorph(nn.Module):
         self.if_transskip = if_transskip
         embed_dim = config.embed_dim
         self.patch_size = config.patch_size
-        self.transformer = EfficientTransformer(patch_size=config.patch_size,
-                                           in_chans=config.in_chans,
-                                           embed_dim=config.embed_dim,
-                                           depths=config.depths,
-                                           num_heads=config.num_heads,
-                                           mlp_ratio=config.mlp_ratio,
-                                           qkv_bias=config.qkv_bias,
-                                           drop_rate=config.drop_rate,
-                                           drop_path_rate=config.drop_path_rate,
-                                           ape=config.ape,
-                                           spe=config.spe,
-                                           rpe=config.rpe,
-                                           patch_norm=config.patch_norm,
-                                           use_checkpoint=config.use_checkpoint,
-                                           out_indices=config.out_indices,
-                                           pat_merg_rf=config.pat_merg_rf,
-                                           axial_dims = config.axial,
-                                           downsampled_dims = config.ds_dims,
-                                           )
-        self.up1 = DecoderBlock(embed_dim*2, embed_dim, skip_channels=embed_dim if if_transskip else 0, use_batchnorm=False)  # 384, 40, 40, 64
-        self.up2 = DecoderBlock(embed_dim, config.reg_head_chan, skip_channels=embed_dim//2 if if_convskip else 0, use_batchnorm=False)  # 384, 80, 80, 128
-        self.c1 = Conv3dReLU(2, embed_dim//2, 3, 1, use_batchnorm=False)
+        self.transformer = EfficientTransformer(
+            patch_size=config.patch_size,
+            in_chans=config.in_chans,
+            embed_dim=config.embed_dim,
+            depths=config.depths,
+            num_heads=config.num_heads,
+            mlp_ratio=config.mlp_ratio,
+            qkv_bias=config.qkv_bias,
+            drop_rate=config.drop_rate,
+            drop_path_rate=config.drop_path_rate,
+            ape=config.ape,
+            spe=config.spe,
+            rpe=config.rpe,
+            patch_norm=config.patch_norm,
+            use_checkpoint=config.use_checkpoint,
+            out_indices=config.out_indices,
+            pat_merg_rf=config.pat_merg_rf,
+            axial_dims=config.axial,
+            downsampled_dims=config.ds_dims,
+        )
+        self.up1 = DecoderBlock(
+            embed_dim * 2, embed_dim, skip_channels=embed_dim if if_transskip else 0, use_batchnorm=False
+        )  # 384, 40, 40, 64
+        self.up2 = DecoderBlock(
+            embed_dim, config.reg_head_chan, skip_channels=embed_dim // 2 if if_convskip else 0, use_batchnorm=False
+        )  # 384, 80, 80, 128
+        self.c1 = Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False)
         self.c2 = Conv3dReLU(2, config.reg_head_chan, 3, 1, use_batchnorm=False)
         self.reg_head = RegistrationHead(
             in_channels=config.reg_head_chan,
@@ -640,7 +684,6 @@ class EfficientMorph(nn.Module):
         )
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-
 
     def forward(self, x):
         source = x[:, 0:1, :, :]
@@ -656,13 +699,11 @@ class EfficientMorph(nn.Module):
         if self.if_transskip:
             f3 = out_feats[-2]
         else:
-            f1 = None
-            f2 = None
             f3 = None
         x = self.up1(out_feats[-1], f3)
         x = self.up2(x, f4)
         flow = self.reg_head(x)
         if self.patch_size == 4:
-            flow = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)(flow)
+            flow = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)(flow)
         out = self.spatial_trans(source, flow)
         return out, flow

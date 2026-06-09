@@ -1,27 +1,33 @@
-"""
-MambaMorph: Mamba-based Framework for Medical Image Registration (Guo et al., 2024).
+"""MambaMorph: a Mamba-based U-Net for deformable registration; a Mamba selective-scan
+block replaces transformer self-attention in the encoder.
 
-Self-contained port of the original repository at
-https://github.com/Guo-Stone/MambaMorph (mambamorph/torch/), with the dependency
-graph collapsed and the following targeted fixes:
-  - removed hardcoded sys.path append to author's local voxelmorph-dev clone
-  - removed `.cuda()` hardcoding in `SinPositionalEncoding3D` and `MambaMorph.__init__`
-  - registered `inv_freq` as a buffer so positional encoding follows .to(device)
-  - dropped MambaMorphFeat / MambaMorphOri-with-FeatureExtractor (MR-CT specific);
-    we keep only `MambaMorph` (with VecInt diffeomorphic integration) and
-    `MambaMorphOri` (no integration) for brain MRI-only training.
+Source:  https://github.com/Guo-Stone/MambaMorph
+Authors: Yinuo Wang, Tao Guo, Weimin Yuan, Shihao Shu, Cai Meng, Xiangzhi Bai
+Paper:   Wang et al., "Mamba-based deformable medical image registration with an
+         annotated brain MR-CT dataset", 2025 (arXiv:2401.13934)
+License: MIT (Copyright (c) 2024 Guo-Stone)
 
-Requires `mamba_ssm` to be installed in the active Python environment;
-see tools/install_mamba.sh for the recommended install path.
+Self-contained port of mambamorph/torch/, with the dependency graph collapsed and:
+  - removed the hardcoded sys.path append to the author's local voxelmorph-dev clone;
+  - removed `.cuda()` hardcoding in `SinPositionalEncoding3D` and `MambaMorph.__init__`;
+  - registered `inv_freq` as a buffer so positional encoding follows .to(device);
+  - dropped the MR-CT-specific feature-extractor variants; kept only `MambaMorph`
+    (VecInt diffeomorphic integration) and `MambaMorphOri` (no integration).
+
+Protocol note: configs set img_size = (160, 192, 224) (our protocol) instead of the
+upstream (176, 208, 192); with patch_size=4 and 3 encoder stages this divides cleanly
+(160/4=40, 192/4=48, 224/4=56).
+
+Requires `mamba_ssm` in the active environment (see tools/install_mamba.sh).
 """
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as nnf
-from timm.models.layers import trunc_normal_, to_3tuple
-from torch.distributions.normal import Normal
-
 from mamba_ssm import Mamba
+from timm.models.layers import to_3tuple, trunc_normal_
+from torch.distributions.normal import Normal
 
 
 class PatchEmbed(nn.Module):
@@ -77,9 +83,9 @@ class SinPositionalEncoding3D(nn.Module):
         emb_y = torch.cat((sin_y.sin(), sin_y.cos()), dim=-1).unsqueeze(1)
         emb_z = torch.cat((sin_z.sin(), sin_z.cos()), dim=-1)
         emb = torch.zeros((x, y, z, self.channels * 3), device=device, dtype=tensor.dtype)
-        emb[..., :self.channels] = emb_x
-        emb[..., self.channels:2 * self.channels] = emb_y
-        emb[..., 2 * self.channels:] = emb_z
+        emb[..., : self.channels] = emb_x
+        emb[..., self.channels : 2 * self.channels] = emb_y
+        emb[..., 2 * self.channels :] = emb_z
         emb = emb[None, ..., :orig_ch].repeat(bs, 1, 1, 1, 1)
         return emb.permute(0, 4, 1, 2, 3)
 
@@ -90,7 +96,6 @@ class PatchMerging(nn.Module):
         self.dim = dim
         self.reduction = nn.Linear(8 * dim, (8 // reduce_factor) * dim, bias=False)
         self.norm = norm_layer(8 * dim)
-
 
     def forward(self, x, H, W, T):
         B, L, C = x.shape
@@ -121,8 +126,7 @@ class MambaLayer(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
         self.downsample = (
-            downsample(dim=dim, norm_layer=nn.LayerNorm, reduce_factor=4)
-            if downsample is not None else None
+            downsample(dim=dim, norm_layer=nn.LayerNorm, reduce_factor=4) if downsample is not None else None
         )
 
     def forward(self, x, H, W, T):
@@ -139,12 +143,25 @@ class MambaLayer(nn.Module):
 
 
 class MambaBlock(nn.Module):
-    def __init__(self, patch_size=4, in_chans=2, embed_dim=96,
-                 depths=(2, 2, 4), drop_rate=0.0, norm_layer=nn.LayerNorm,
-                 ape=False, spe=False, rpe=True, patch_norm=True,
-                 out_indices=(0, 1, 2), frozen_stages=-1,
-                 d_state=16, d_conv=4, expand=2,
-                 pretrain_img_size=224):
+    def __init__(
+        self,
+        patch_size=4,
+        in_chans=2,
+        embed_dim=96,
+        depths=(2, 2, 4),
+        drop_rate=0.0,
+        norm_layer=nn.LayerNorm,
+        ape=False,
+        spe=False,
+        rpe=True,
+        patch_norm=True,
+        out_indices=(0, 1, 2),
+        frozen_stages=-1,
+        d_state=16,
+        d_conv=4,
+        expand=2,
+        pretrain_img_size=224,
+    ):
         super().__init__()
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
@@ -156,7 +173,9 @@ class MambaBlock(nn.Module):
         self.frozen_stages = frozen_stages
 
         self.patch_embed = PatchEmbed(
-            patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
             norm_layer=norm_layer if patch_norm else None,
         )
 
@@ -164,9 +183,7 @@ class MambaBlock(nn.Module):
             ps3 = to_3tuple(patch_size)
             ts3 = to_3tuple(pretrain_img_size)
             res = [ts3[i] // ps3[i] for i in range(3)]
-            self.absolute_pos_embed = nn.Parameter(
-                torch.zeros(1, embed_dim, res[0], res[1], res[2])
-            )
+            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, embed_dim, res[0], res[1], res[2]))
             trunc_normal_(self.absolute_pos_embed, std=0.02)
         elif spe:
             self.pos_embd = SinPositionalEncoding3D(embed_dim)
@@ -174,27 +191,30 @@ class MambaBlock(nn.Module):
 
         self.layers = nn.ModuleList()
         for i in range(self.num_layers):
-            self.layers.append(MambaLayer(
-                dim=int(embed_dim * 2 ** i),
-                d_state=d_state, d_conv=d_conv, expand=expand,
-                downsample=PatchMerging if (i < self.num_layers - 1) else None,
-            ))
+            self.layers.append(
+                MambaLayer(
+                    dim=int(embed_dim * 2**i),
+                    d_state=d_state,
+                    d_conv=d_conv,
+                    expand=expand,
+                    downsample=PatchMerging if (i < self.num_layers - 1) else None,
+                )
+            )
 
-        self.num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
+        self.num_features = [int(embed_dim * 2**i) for i in range(self.num_layers)]
         for i in out_indices:
             self.add_module(f"norm{i}", norm_layer(self.num_features[i]))
-
 
     def forward(self, x):
         x = self.patch_embed(x)
         Wh, Ww, Wt = x.size(2), x.size(3), x.size(4)
         if self.ape:
-            absolute_pos_embed = nnf.interpolate(
-                self.absolute_pos_embed, size=(Wh, Ww, Wt), mode="trilinear"
-            )
+            absolute_pos_embed = nnf.interpolate(self.absolute_pos_embed, size=(Wh, Ww, Wt), mode="trilinear")
             x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)
-        elif self.spe: x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
-        else: x = x.flatten(2).transpose(1, 2)
+        elif self.spe:
+            x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
+        else:
+            x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
 
         outs = []
@@ -210,8 +230,7 @@ class MambaBlock(nn.Module):
 
 class Conv3dReLU(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size, padding=0, stride=1, use_batchnorm=True):
-        conv = nn.Conv3d(in_channels, out_channels, kernel_size,
-                         stride=stride, padding=padding, bias=False)
+        conv = nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=False)
         nm = nn.BatchNorm3d(out_channels) if use_batchnorm else nn.InstanceNorm3d(out_channels)
         super().__init__(conv, nm, nn.LeakyReLU(inplace=True))
 
@@ -219,12 +238,11 @@ class Conv3dReLU(nn.Sequential):
 class DecoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels, skip_channels=0, use_batchnorm=True):
         super().__init__()
-        self.conv1 = Conv3dReLU(in_channels + skip_channels, out_channels,
-                                kernel_size=3, padding=1, use_batchnorm=use_batchnorm)
-        self.conv2 = Conv3dReLU(out_channels, out_channels,
-                                kernel_size=3, padding=1, use_batchnorm=use_batchnorm)
+        self.conv1 = Conv3dReLU(
+            in_channels + skip_channels, out_channels, kernel_size=3, padding=1, use_batchnorm=use_batchnorm
+        )
+        self.conv2 = Conv3dReLU(out_channels, out_channels, kernel_size=3, padding=1, use_batchnorm=use_batchnorm)
         self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
-
 
     def forward(self, x, skip=None):
         x = self.up(x)
@@ -245,6 +263,7 @@ class RegistrationHead(nn.Sequential):
 
 class SpatialTransformer(nn.Module):
     """N-D Spatial Transformer (voxel-unit flow), buffer-backed grid."""
+
     def __init__(self, size, mode="bilinear"):
         super().__init__()
         self.mode = mode
@@ -266,13 +285,13 @@ class SpatialTransformer(nn.Module):
 
 class VecInt(nn.Module):
     """Scaling-and-squaring velocity field integration."""
+
     def __init__(self, inshape, nsteps=7):
         super().__init__()
         assert nsteps >= 0
         self.nsteps = nsteps
-        self.scale = 1.0 / (2 ** nsteps)
+        self.scale = 1.0 / (2**nsteps)
         self.transformer = SpatialTransformer(inshape)
-
 
     def forward(self, vec):
         vec = vec * self.scale
@@ -283,6 +302,7 @@ class VecInt(nn.Module):
 
 class MambaMorph(nn.Module):
     """Diffeomorphic MambaMorph (with VecInt integration of the predicted velocity)."""
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -291,32 +311,41 @@ class MambaMorph(nn.Module):
         embed_dim = config.embed_dim
 
         self.transformer = MambaBlock(
-            patch_size=config.patch_size, in_chans=config.in_chans,
-            embed_dim=embed_dim, depths=config.depths,
-            drop_rate=config.drop_rate, ape=config.ape, spe=config.spe,
-            rpe=config.rpe, patch_norm=config.patch_norm,
+            patch_size=config.patch_size,
+            in_chans=config.in_chans,
+            embed_dim=embed_dim,
+            depths=config.depths,
+            drop_rate=config.drop_rate,
+            ape=config.ape,
+            spe=config.spe,
+            rpe=config.rpe,
+            patch_norm=config.patch_norm,
             out_indices=config.out_indices,
-            d_state=config.d_state, d_conv=config.d_conv, expand=config.expand,
+            d_state=config.d_state,
+            d_conv=config.d_conv,
+            expand=config.expand,
         )
-        self.up1 = DecoderBlock(embed_dim * 4, embed_dim * 2,
-                                skip_channels=embed_dim * 2 if self.if_transskip else 0,
-                                use_batchnorm=False)
-        self.up2 = DecoderBlock(embed_dim * 2, embed_dim,
-                                skip_channels=embed_dim if self.if_transskip else 0,
-                                use_batchnorm=False)
-        self.up3 = DecoderBlock(embed_dim, embed_dim // 2,
-                                skip_channels=embed_dim // 2 if self.if_convskip else 0,
-                                use_batchnorm=False)
-        self.up4 = DecoderBlock(embed_dim // 2, config.reg_head_chan,
-                                skip_channels=config.reg_head_chan if self.if_convskip else 0,
-                                use_batchnorm=False)
+        self.up1 = DecoderBlock(
+            embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if self.if_transskip else 0, use_batchnorm=False
+        )
+        self.up2 = DecoderBlock(
+            embed_dim * 2, embed_dim, skip_channels=embed_dim if self.if_transskip else 0, use_batchnorm=False
+        )
+        self.up3 = DecoderBlock(
+            embed_dim, embed_dim // 2, skip_channels=embed_dim // 2 if self.if_convskip else 0, use_batchnorm=False
+        )
+        self.up4 = DecoderBlock(
+            embed_dim // 2,
+            config.reg_head_chan,
+            skip_channels=config.reg_head_chan if self.if_convskip else 0,
+            use_batchnorm=False,
+        )
         self.c1 = Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False)
         self.c2 = Conv3dReLU(2, config.reg_head_chan, 3, 1, use_batchnorm=False)
         self.reg_head = RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3)
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
         self.integrate = VecInt(config.img_size, nsteps=7)
-
 
     def forward(self, source, target, return_pos_flow=True):
         x = torch.cat([source, target], dim=1)
@@ -343,6 +372,7 @@ class MambaMorph(nn.Module):
 
 class MambaMorphOri(nn.Module):
     """Non-diffeomorphic MambaMorph (direct displacement, no VecInt)."""
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -351,31 +381,40 @@ class MambaMorphOri(nn.Module):
         embed_dim = config.embed_dim
 
         self.transformer = MambaBlock(
-            patch_size=config.patch_size, in_chans=config.in_chans,
-            embed_dim=embed_dim, depths=config.depths,
-            drop_rate=config.drop_rate, ape=config.ape, spe=config.spe,
-            rpe=config.rpe, patch_norm=config.patch_norm,
+            patch_size=config.patch_size,
+            in_chans=config.in_chans,
+            embed_dim=embed_dim,
+            depths=config.depths,
+            drop_rate=config.drop_rate,
+            ape=config.ape,
+            spe=config.spe,
+            rpe=config.rpe,
+            patch_norm=config.patch_norm,
             out_indices=config.out_indices,
-            d_state=config.d_state, d_conv=config.d_conv, expand=config.expand,
+            d_state=config.d_state,
+            d_conv=config.d_conv,
+            expand=config.expand,
         )
-        self.up1 = DecoderBlock(embed_dim * 4, embed_dim * 2,
-                                skip_channels=embed_dim * 2 if self.if_transskip else 0,
-                                use_batchnorm=False)
-        self.up2 = DecoderBlock(embed_dim * 2, embed_dim,
-                                skip_channels=embed_dim if self.if_transskip else 0,
-                                use_batchnorm=False)
-        self.up3 = DecoderBlock(embed_dim, embed_dim // 2,
-                                skip_channels=embed_dim // 2 if self.if_convskip else 0,
-                                use_batchnorm=False)
-        self.up4 = DecoderBlock(embed_dim // 2, config.reg_head_chan,
-                                skip_channels=config.reg_head_chan if self.if_convskip else 0,
-                                use_batchnorm=False)
+        self.up1 = DecoderBlock(
+            embed_dim * 4, embed_dim * 2, skip_channels=embed_dim * 2 if self.if_transskip else 0, use_batchnorm=False
+        )
+        self.up2 = DecoderBlock(
+            embed_dim * 2, embed_dim, skip_channels=embed_dim if self.if_transskip else 0, use_batchnorm=False
+        )
+        self.up3 = DecoderBlock(
+            embed_dim, embed_dim // 2, skip_channels=embed_dim // 2 if self.if_convskip else 0, use_batchnorm=False
+        )
+        self.up4 = DecoderBlock(
+            embed_dim // 2,
+            config.reg_head_chan,
+            skip_channels=config.reg_head_chan if self.if_convskip else 0,
+            use_batchnorm=False,
+        )
         self.c1 = Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False)
         self.c2 = Conv3dReLU(2, config.reg_head_chan, 3, 1, use_batchnorm=False)
         self.reg_head = RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3)
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
-
 
     def forward(self, source, target):
         x = torch.cat([source, target], dim=1)

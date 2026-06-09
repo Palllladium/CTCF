@@ -1,16 +1,7 @@
-"""MambaMorph configuration registry.
-
-`img_size` is overridden to (160, 192, 224) — our protocol — instead of the
-upstream default (176, 208, 192). The encoder uses 3 stages with patch_size=4,
-which divides cleanly: 160/4=40, 192/4=48, 224/4=56.
-"""
-
 import ml_collections
 
 
 def get_3DMambaMorph_config():
-    """Default MambaMorph config (matches the upstream `get_3DMambaMorph_config`
-    except for `img_size`, retargeted to our protocol)."""
     cfg = ml_collections.ConfigDict()
     cfg.if_transskip = True
     cfg.if_convskip = True
