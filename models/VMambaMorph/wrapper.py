@@ -54,9 +54,7 @@ class VMambaMorphCascadeL2(nn.Module):
         init_flow=None,
         return_all_flows: bool = False,
     ):
-        mov_warped = mov
-        if init_flow is not None:
-            mov_warped = self.spatial_transform(mov, init_flow)
+        mov_warped = self.spatial_transform(mov, init_flow) if init_flow is not None else mov
         out = self.model(mov_warped, fix)
         flow_pred = out["pos_flow"]
 

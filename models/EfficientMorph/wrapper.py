@@ -62,17 +62,12 @@ class EffMorphCascadeL2(nn.Module):
         init_flow=None,
         return_all_flows: bool = False,
     ):
-        mov_warped = mov
-        if init_flow is not None:
-            mov_warped = self.spatial_transform(mov, init_flow)
+        mov_warped = self.spatial_transform(mov, init_flow) if init_flow is not None else mov
 
         x_in = torch.cat([mov_warped, fix], dim=1)
         _, flow_pred = self.model(x_in)
 
-        if init_flow is not None: 
-            flow_total = compose_flows(flow_pred, init_flow)
-        else: 
-            flow_total = flow_pred
+        flow_total = compose_flows(flow_pred, init_flow) if init_flow is not None else flow_pred
         warped = self.spatial_transform(mov, flow_total)
 
         return warped, flow_total

@@ -62,15 +62,11 @@ class LkuNetCascadeL2(nn.Module):
         init_flow=None,
         return_all_flows: bool = False,
     ):
-        mov_warped = mov
-        if init_flow is not None:
-            mov_warped = self.spatial_transform(mov, init_flow)
+        mov_warped = self.spatial_transform(mov, init_flow) if init_flow is not None else mov
 
         flow_norm = self.unet(mov_warped, fix)
         flow_pred = flow_norm * self.flow_scale.to(device=flow_norm.device, dtype=flow_norm.dtype)
 
-        flow_total = flow_pred
-        if init_flow is not None:
-            flow_total = compose_flows(flow_pred, init_flow)
+        flow_total = compose_flows(flow_pred, init_flow) if init_flow is not None else flow_pred
         warped = self.spatial_transform(mov, flow_total)
         return warped, flow_total

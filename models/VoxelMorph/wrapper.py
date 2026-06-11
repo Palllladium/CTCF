@@ -75,16 +75,12 @@ class VxmDenseHalf(nn.Module):
         l1_feat=None,
         return_features: bool = False,
     ):
-        mov_warped = mov_half
-        if init_flow is not None:
-            mov_warped = self.spatial_transform(mov_half, init_flow)
+        mov_warped = self.spatial_transform(mov_half, init_flow) if init_flow is not None else mov_half
 
         _, disp = self.vxm(mov_warped, fix_half)
 
         # Compose flows: total(x) = disp(x) + init(x + disp(x))
-        flow_total = disp
-        if init_flow is not None:
-            flow_total = disp + self.spatial_transform(init_flow, disp)
+        flow_total = (disp + self.spatial_transform(init_flow, disp)) if init_flow is not None else disp
 
         def_half = self.spatial_transform(mov_half, flow_total)
         out = (def_half, flow_total)
