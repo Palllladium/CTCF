@@ -1,60 +1,51 @@
-[project]
-name = "ctcf"
-version = "1.0.1"
-description = "Cascade Transformer for Coarse-to-Fine — unsupervised deformable 3D brain MRI registration."
-requires-python = ">=3.10"
-
 [tool.ruff]
 line-length = 120
 target-version = "py310"
 extend-exclude = [
     "logs",
     "results",
-    "__pycache__",
+    "tools/archive",
+    "tools/paper",
 ]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-docstring-code-format = false
 
 [tool.ruff.lint]
 select = [
-    "E",      # pycodestyle errors
-    "W",      # pycodestyle warnings
-    "F",      # pyflakes
-    "I",      # isort
-    "B",      # flake8-bugbear
-    "UP",     # pyupgrade (modern Python syntax)
-    "SIM",    # flake8-simplify
-    "RUF",    # ruff-specific
-    "N",      # pep8-naming
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "RUF",
+    "N",
 ]
 ignore = [
-    "E501",   # line too long — already handled by formatter
-    "E701",   # multiple statements on one line (colon) — short inline guards are allowed
-    "B008",   # default mutable arg — acceptable in some PyTorch patterns
-    "N812",   # lowercase imported as non-lowercase — torch.nn.functional as F
-    "N806",   # variable in function should be lowercase — allow e1/e2/b/d1/d2 UNet convention
-    "N803",   # argument name should be lowercase — allow K, N as math constants
-    "SIM108", # use ternary — sometimes block if/else is clearer
+    "E501",   # handled by the formatter
+    "E701",   # allow short inline guards
+    "B008",   # allow selected PyTorch argparse/config default patterns
+    "N812",   # torch.nn.functional as F
+    "N803",   # allow math-style names such as K, N
+    "N806",   # allow UNet/cascade names such as e1, d2, phi_l1
+    "SIM108", # keep explicit if/else blocks when clearer
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"__init__.py" = ["F401"]                    # re-exports without __all__
-"experiments/**/*.py" = ["E402"]             # sys.path manipulation before imports in entry scripts
-"experiments/train_*.py" = ["N999"]          # CamelCase model-name suffix; module path is the CLI invocation contract
-"tools/analysis/aggregate_results.py" = ["RUF001", "RUF002", "RUF003"]  # emits Russian-language paper tables (intentional Cyrillic)
-# Fully vendored baselines (no first-party wrapper) — touch minimally
+"__init__.py" = ["F401"]
+"experiments/**/*.py" = ["E402"]
+"experiments/train_*.py" = ["N999"]
+"tools/analysis/aggregate_results.py" = ["RUF001", "RUF002", "RUF003"]
+
+# Upstream or vendored model code: format it, but avoid broad style churn.
 "models/TransMorph_DCA/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/UTSRMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
-# Vendored backbone cores — touch minimally (our wrapper.py gets the full standard)
 "models/EfficientMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/LKUNet/model.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/MambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/VMambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/VoxelMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
-# Config registries — mostly upstream-derived hyperparameter data; format-only, relaxed lint
+
+# Config registries are mostly upstream-derived hyperparameter data.
 "models/EfficientMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/LKUNet/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/MambaMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
@@ -64,26 +55,3 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["models", "experiments", "utils", "datasets", "tools"]
 combine-as-imports = true
-
-[tool.ruff.lint.pep8-naming]
-extend-ignore-names = ["e1", "e2", "d1", "d2", "f0", "f1", "f2", "phi_*", "delta_*"]
-
-[tool.mypy]
-python_version = "3.10"
-ignore_missing_imports = true
-disallow_untyped_defs = false
-check_untyped_defs = false
-warn_unused_ignores = true
-warn_redundant_casts = true
-warn_unreachable = true
-exclude = [
-    "logs/",
-    "results/",
-    "models/TransMorph_DCA/",
-    "models/UTSRMorph/",
-    "models/EfficientMorph/",
-    "models/LKUNet/",
-    "models/MambaMorph/",
-    "models/VMambaMorph/",
-    "models/VoxelMorph/",
-]
