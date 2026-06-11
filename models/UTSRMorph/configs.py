@@ -1,30 +1,5 @@
 import ml_collections
 
-'''
-********************************************************
-                   Swin Transformer
-********************************************************
-if_transskip (bool): Enable skip connections from Transformer Blocks
-if_convskip (bool): Enable skip connections from Convolutional Blocks
-patch_size (int | tuple(int)): Patch size. Default: 4
-in_chans (int): Number of input image channels. Default: 2 (for moving and fixed images)
-embed_dim (int): Patch embedding dimension. Default: 96
-depths (tuple(int)): Depth of each Swin Transformer layer.
-num_heads (tuple(int)): Number of attention heads in different layers.
-window_size (tuple(int)): Image size should be divisible by window size.
-mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
-pat_merg_rf (int): Embed_dim reduction factor in patch merging, e.g., N*C->N/4*C if set to four. Default: 4.
-qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
-drop_rate (float): Dropout rate. Default: 0
-drop_path_rate (float): Stochastic depth rate. Default: 0.1
-ape (bool): Enable learnable position embedding. Default: False
-spe (bool): Enable sinusoidal position embedding. Default: False
-patch_norm (bool): If True, add normalization after patch embedding. Default: True
-use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
-out_indices (tuple(int)): Indices of Transformer blocks to output features. Default: (0, 1, 2, 3)
-reg_head_chan (int): Number of channels in the registration head (i.e., the final convolutional layer)
-img_size (int | tuple(int)): Input image size, e.g., (160, 192, 224)
-'''
 
 def get_UTSRMorph_config():
     config = ml_collections.ConfigDict()

@@ -117,9 +117,12 @@ def digital_jacobian_metrics(flow: torch.Tensor, mask: torch.Tensor) -> tuple[fl
     if mask is None:
         raise ValueError("digital_jacobian_metrics requires x_seg mask.")
 
-    if mask.dim() == 5: mask_np = mask.detach().cpu().numpy()[0, 0]
-    elif mask.dim() == 4: mask_np = mask.detach().cpu().numpy()[0]
-    else: raise ValueError(f"Expected mask shape [1,1,D,H,W] or [1,D,H,W], got {tuple(mask.shape)}.")
+    if mask.dim() == 5:
+        mask_np = mask.detach().cpu().numpy()[0, 0]
+    elif mask.dim() == 4:
+        mask_np = mask.detach().cpu().numpy()[0]
+    else:
+        raise ValueError(f"Expected mask shape [1,1,D,H,W] or [1,D,H,W], got {tuple(mask.shape)}.")
 
     disp = flow.detach().float().cpu().numpy()[0]
     d, h, w = disp.shape[1:]
@@ -130,8 +133,10 @@ def digital_jacobian_metrics(flow: torch.Tensor, mask: torch.Tensor) -> tuple[fl
         def fd(arr: np.ndarray, axis: int, mode: str) -> np.ndarray:
             n = arr.shape[axis]
             idx = np.arange(n)
-            if mode == "+": return np.take(arr, np.clip(idx + 1, 0, n - 1), axis=axis) - arr
-            if mode == "-": return arr - np.take(arr, np.clip(idx - 1, 0, n - 1), axis=axis)
+            if mode == "+":
+                return np.take(arr, np.clip(idx + 1, 0, n - 1), axis=axis) - arr
+            if mode == "-":
+                return arr - np.take(arr, np.clip(idx - 1, 0, n - 1), axis=axis)
             return 0.5 * (
                 np.take(arr, np.clip(idx + 1, 0, n - 1), axis=axis)
                 - np.take(arr, np.clip(idx - 1, 0, n - 1), axis=axis)

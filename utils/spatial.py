@@ -20,8 +20,10 @@ class SpatialTransformer(nn.Module):
         shape = flow.shape[2:]
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2.0 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
-        if len(shape) == 2: new_locs = new_locs.permute(0, 2, 3, 1)[..., [1, 0]]
-        elif len(shape) == 3: new_locs = new_locs.permute(0, 2, 3, 4, 1)[..., [2, 1, 0]]
+        if len(shape) == 2:
+            new_locs = new_locs.permute(0, 2, 3, 1)[..., [1, 0]]
+        elif len(shape) == 3:
+            new_locs = new_locs.permute(0, 2, 3, 4, 1)[..., [2, 1, 0]]
         # Project-wide convention: align_corners=False with (shape-1) normalization. Identity
         # flow lands half a voxel off; training absorbs it and all checkpoints depend on it.
         return F.grid_sample(src, new_locs, align_corners=False, mode=self.mode)

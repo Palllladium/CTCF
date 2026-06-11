@@ -153,8 +153,10 @@ def ctcf_schedule(epoch: int, max_epoch: int) -> tuple[float, float, float]:
     max_epoch = max(1, max_epoch)
 
     def clamp01(x: float) -> float:
-        if x <= 0.0: return 0.0
-        if x >= 1.0: return 1.0
+        if x <= 0.0:
+            return 0.0
+        if x >= 1.0:
+            return 1.0
         return x
 
     def ramp(p: float) -> float:
@@ -164,9 +166,12 @@ def ctcf_schedule(epoch: int, max_epoch: int) -> tuple[float, float, float]:
     s0 = max(1, int(0.05 * max_epoch))
     s1 = max(s0 + 1, int(0.15 * max_epoch))
 
-    if epoch < s0: v = 0.0
-    elif epoch >= s1: v = 1.0
-    else: v = ramp((epoch - s0) / (s1 - s0))
+    if epoch < s0:
+        v = 0.0
+    elif epoch >= s1:
+        v = 1.0
+    else:
+        v = ramp((epoch - s0) / (s1 - s0))
 
     return v, v, v
 
@@ -265,9 +270,12 @@ def compute_fig(img: torch.Tensor) -> plt.Figure:
 
 def mk_grid_img(flow: torch.Tensor, grid_step: int = 8, line_thickness: int = 1) -> torch.Tensor:
     """Build a [1,1,D,H,W] grid image matching the spatial extents of a flow."""
-    if flow.dim() == 5 and flow.shape[1] in (2, 3): d, h, w = map(int, flow.shape[-3:])
-    elif flow.dim() == 5 and flow.shape[-1] in (2, 3): d, h, w = map(int, flow.shape[1:4])
-    else: raise ValueError(f"Unsupported flow shape: {tuple(flow.shape)}")
+    if flow.dim() == 5 and flow.shape[1] in (2, 3):
+        d, h, w = map(int, flow.shape[-3:])
+    elif flow.dim() == 5 and flow.shape[-1] in (2, 3):
+        d, h, w = map(int, flow.shape[1:4])
+    else:
+        raise ValueError(f"Unsupported flow shape: {tuple(flow.shape)}")
 
     device = flow.device
     grid_step = max(1, grid_step)

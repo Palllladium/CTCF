@@ -8,8 +8,8 @@ import torch
 
 from .common import AverageMeter
 from .field import (
-    digital_jacobian_metrics, 
-    jacobian_nonpositive_percent, 
+    digital_jacobian_metrics,
+    jacobian_nonpositive_percent,
     logdet_std_from_flow,
 )
 
