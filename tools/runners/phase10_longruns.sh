@@ -1,23 +1,6 @@
 #!/usr/bin/env bash
 # Phase 10 — Paper 2 finalization longruns (500 epochs).
 #
-# Strategy:
-#   - Mamba SVF on both datasets = headline (best Pareto from Phase 9)
-#   - LKU-8 SVF on both datasets = CNN-family convergence baseline
-#   - VxM unified SVF on both datasets = lightweight CNN, unified protocol (NEW)
-#   - Mamba NoSVF OASIS = ablation point (pure-Dice ceiling)
-#
-# Excluded vs earlier plan:
-#   - LKU-32 (Δ_cascade ≈ 0 on OASIS, no significant Fold gain on IXI — confirmed F1)
-#   - VMamba (Pareto-dominated by Mamba)
-#   - Mamba NoSVF IXI (Fold WORSE than Paper 1 on IXI per stat-tests; not viable)
-#   - EfficientMorph (deferred to full Paper 2 backbone matrix, 100ep only)
-#
-# Resume strategy:
-#   All Phase 9 ckpts live in results/<EXP_NAME>/ckpt/last.pth.
-#   Phase 10 runs use --resume to continue from 100ep ckpts (saves ~80% compute).
-#   ONLY VxM unified runs from scratch (new config, no existing ckpt).
-#
 # VxM Unified note: new config (full-res L2, L3 base_ch=32) goes directly to longrun
 # without intermediate 100ep verification (VxM compact; cheaper to commit to 500ep).
 #

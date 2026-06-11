@@ -1,11 +1,6 @@
 """
 Unified statistics tool: paired Wilcoxon + Hodges-Lehmann estimator + 95% CI.
 
-Replaces three previous scripts:
-  - compute_stats.py              → mode 'paper1'
-  - compute_stats_cross.py        → mode 'cross'
-  - compute_stats_sedm_vs_paper1.py → mode 'sedm_vs_paper1'
-
 Usage:
     # Paper 1 baselines (CTCF Swin-DCA vs TM-DCA vs UTSRMorph)
     python tools/analysis/compute_stats.py paper1 [--infer-root results/infer]
@@ -28,18 +23,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm, wilcoxon
 
-
-# ---------------------------------------------------------------------------
-# Shared utility — Hodges-Lehmann + Wilcoxon
-# ---------------------------------------------------------------------------
 
 def hodges_lehmann_paired(x, y, alpha=0.05):
     """Paired HL estimator with Walsh-CI and Wilcoxon p-value.
@@ -64,7 +53,6 @@ def hodges_lehmann_paired(x, y, alpha=0.05):
     except Exception:
         stat, pval, method = float("nan"), float("nan"), "n/a"
 
-    # Normal-approx CI for rank
     z = norm.ppf(1 - alpha / 2)
     mu_T = n * (n + 1) / 4
     sigma_T = np.sqrt(n * (n + 1) * (2 * n + 1) / 24)
@@ -99,10 +87,6 @@ def _print_pair_result(metric: str, res: dict):
     print(f"      Wilcoxon p = {res['p_wilcoxon']:.4e}  (N={res['n']}, method={res['method']})")
 
 
-# ---------------------------------------------------------------------------
-# Mode 1: Paper 1 baselines (CTCF Swin-DCA vs TM-DCA vs UTSRMorph)
-# ---------------------------------------------------------------------------
-
 def cmd_paper1(args):
     infer_root = Path(args.infer_root)
 
@@ -112,7 +96,7 @@ def cmd_paper1(args):
 
     for ds, metrics in (
         ("OASIS", ["dice_mean", "hd95_mean", "sdlogj"]),
-        ("IXI",   ["dice_mean", "hd95_mean", "j_leq0_percent"]),
+        ("IXI", ["dice_mean", "hd95_mean", "j_leq0_percent"]),
     ):
         print(f"\n### {ds}")
         ctcf = _try_per_case(infer_root, ds, "ctcf")
@@ -132,14 +116,10 @@ def cmd_paper1(args):
                 _print_pair_result(metric, res)
 
 
-# ---------------------------------------------------------------------------
-# Mode 2: Cross-dataset (manifest-driven)
-# ---------------------------------------------------------------------------
-
 METRICS_CROSS = ["dice_mean", "hd95_mean", "sdlogj", "j_leq0_percent", "ndv_percent", "time_sec"]
 PAIRWISE_METRICS_BY_DS = {
     "OASIS": ["dice_mean", "hd95_mean", "sdlogj"],
-    "IXI":   ["dice_mean", "hd95_mean", "j_leq0_percent"],
+    "IXI": ["dice_mean", "hd95_mean", "j_leq0_percent"],
 }
 
 
@@ -209,7 +189,8 @@ def cmd_cross(args):
             for m in METRICS_CROSS:
                 entry = metrics.get(m)
                 if entry is None:
-                    means.append(""); stds.append("")
+                    means.append("")
+                    stds.append("")
                 else:
                     means.append(f"{float(entry['mean']):.6f}")
                     stds.append(f"{float(entry['std']):.6f}")
@@ -226,7 +207,9 @@ def cmd_cross(args):
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f); w.writerow(header); w.writerows(rows_out)
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows_out)
     print(f"[SAVED] {out_path}")
 
     # Short console table
@@ -235,19 +218,38 @@ def cmd_cross(args):
     for row in rows_out:
         model, ckpt_ds, eval_ds, direction = row[:4]
         dice, hd95, sdlogj, jleq0 = row[5], row[6], row[7], row[8]
+
         def fmt(x):
             try:
                 return f"{float(x):.4f}"
             except (ValueError, TypeError):
                 return "-"
-        print(f"{model:<10} {ckpt_ds:<6} {eval_ds:<6} {direction:<6} {fmt(dice):<8} {fmt(hd95):<8} {fmt(sdlogj):<8} {fmt(jleq0):<8}")
 
-    # Pairwise within each (ckpt_ds, eval_ds)
-    pairwise_path = Path(args.pairwise_out) if args.pairwise_out else out_path.with_name(out_path.stem + "_pairwise.csv")
-    pairwise_header = ["ckpt_ds", "eval_ds", "direction", "metric", "model_a", "model_b", "n", "hl", "ci_lo", "ci_hi", "p_wilcoxon", "method"]
+        print(
+            f"{model:<10} {ckpt_ds:<6} {eval_ds:<6} {direction:<6} "
+            f"{fmt(dice):<8} {fmt(hd95):<8} {fmt(sdlogj):<8} {fmt(jleq0):<8}"
+        )
+
+    pairwise_path = (
+        Path(args.pairwise_out) if args.pairwise_out else out_path.with_name(out_path.stem + "_pairwise.csv")
+    )
+    pairwise_header = [
+        "ckpt_ds",
+        "eval_ds",
+        "direction",
+        "metric",
+        "model_a",
+        "model_b",
+        "n",
+        "hl",
+        "ci_lo",
+        "ci_hi",
+        "p_wilcoxon",
+        "method",
+    ]
     pairwise_rows = []
 
-    cells = sorted({(ckpt_ds, eval_ds) for (_, ckpt_ds, eval_ds) in per_case_index.keys()})
+    cells = sorted({(ckpt_ds, eval_ds) for (_, ckpt_ds, eval_ds) in per_case_index})
     print("\nPairwise comparisons (CTCF vs baselines):")
     for ckpt_ds, eval_ds in cells:
         ctcf_rows = per_case_index.get(("ctcf", ckpt_ds, eval_ds))
@@ -273,58 +275,65 @@ def cmd_cross(args):
                 res = hodges_lehmann_paired(xs, ys)
                 if res is None:
                     continue
-                pairwise_rows.append([
-                    ckpt_ds, eval_ds, direction, metric, "ctcf", baseline,
-                    res["n"], f"{res['hl']:+.6f}", f"{res['ci_lo']:+.6f}", f"{res['ci_hi']:+.6f}",
-                    f"{res['p_wilcoxon']:.3e}", res["method"],
-                ])
-                print(f"  [{ckpt_ds}->{eval_ds}] {metric:<14} ctcf vs {baseline:<10} HL={res['hl']:+.5f}  CI=[{res['ci_lo']:+.5f}, {res['ci_hi']:+.5f}]  p={res['p_wilcoxon']:.3e}  n={res['n']}")
+                pairwise_rows.append(
+                    [
+                        ckpt_ds,
+                        eval_ds,
+                        direction,
+                        metric,
+                        "ctcf",
+                        baseline,
+                        res["n"],
+                        f"{res['hl']:+.6f}",
+                        f"{res['ci_lo']:+.6f}",
+                        f"{res['ci_hi']:+.6f}",
+                        f"{res['p_wilcoxon']:.3e}",
+                        res["method"],
+                    ]
+                )
+                print(
+                    f"  [{ckpt_ds}->{eval_ds}] {metric:<14} ctcf vs {baseline:<10} "
+                    f"HL={res['hl']:+.5f}  CI=[{res['ci_lo']:+.5f}, {res['ci_hi']:+.5f}]  "
+                    f"p={res['p_wilcoxon']:.3e}  n={res['n']}"
+                )
 
     if pairwise_rows:
         with open(pairwise_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f); w.writerow(pairwise_header); w.writerows(pairwise_rows)
+            w = csv.writer(f)
+            w.writerow(pairwise_header)
+            w.writerows(pairwise_rows)
         print(f"\n[SAVED] {pairwise_path}")
     else:
         print("\n[WARN] No pairwise stats produced (per_case.csv missing or case_id mismatch).")
 
 
-# ---------------------------------------------------------------------------
-# Mode 3: SEDM cascades vs Paper 1 CTCF Swin-DCA cascade
-# ---------------------------------------------------------------------------
-
 SEDM_OASIS_CONFIGS = [
-    # ---- 100ep matrix (Phase 9 + SEDM gap-closers) ----
-    ("P9_CASC_VXM_SVF_OASIS",          "VxM SVF (100ep, legacy cfg)"),
-    ("SEDM_CASC_VXM_NOSVF_OASIS",      "VxM NoSVF (100ep)"),
-    ("P8_CASC_LKU8_FIXSCHED_OASIS",    "LKU-8 NoSVF fixsched (100ep)"),
-    ("P9_CASC_LKU8_SVF_OASIS",         "LKU-8 SVF (100ep)"),
-    ("P8_CASC_LKU32_SVF_OASIS",        "LKU-32 SVF (100ep)"),
-    ("P7_CASC_MAMBA_SVF_OASIS",        "Mamba SVF (100ep)"),
-    ("SEDM_CASC_MAMBA_NOSVF_OASIS",    "Mamba NoSVF (100ep)"),
-    ("P7_CASC_VMAMBA_SVF_OASIS",       "VMamba SVF (100ep)"),
-    # ---- 500ep longruns (Phase 10) ----
+    ("P9_CASC_VXM_SVF_OASIS", "VxM SVF (100ep, legacy cfg)"),
+    ("SEDM_CASC_VXM_NOSVF_OASIS", "VxM NoSVF (100ep)"),
+    ("P8_CASC_LKU8_FIXSCHED_OASIS", "LKU-8 NoSVF fixsched (100ep)"),
+    ("P9_CASC_LKU8_SVF_OASIS", "LKU-8 SVF (100ep)"),
+    ("P8_CASC_LKU32_SVF_OASIS", "LKU-32 SVF (100ep)"),
+    ("P7_CASC_MAMBA_SVF_OASIS", "Mamba SVF (100ep)"),
+    ("SEDM_CASC_MAMBA_NOSVF_OASIS", "Mamba NoSVF (100ep)"),
+    ("P7_CASC_VMAMBA_SVF_OASIS", "VMamba SVF (100ep)"),
     ("P10_LONGRUN_VXM_UNIFIED_SVF_OASIS", "VxM Unified SVF (500ep)"),
-    ("P10_LONGRUN_LKU8_SVF_OASIS",        "LKU-8 SVF (500ep)"),
-    ("P10_LONGRUN_MAMBA_SVF_OASIS",       "Mamba SVF (500ep)"),
-    ("P10_LONGRUN_MAMBA_NOSVF_OASIS",     "Mamba NoSVF (500ep)"),
-    # ---- Cross-dataset zero-shot (Mamba SVF headline) ----
-    ("P10_CROSS_MAMBA_SVF_IXI_TO_OASIS",  "Mamba SVF cross (IXI→OASIS, 500ep)"),
+    ("P10_LONGRUN_LKU8_SVF_OASIS", "LKU-8 SVF (500ep)"),
+    ("P10_LONGRUN_MAMBA_SVF_OASIS", "Mamba SVF (500ep)"),
+    ("P10_LONGRUN_MAMBA_NOSVF_OASIS", "Mamba NoSVF (500ep)"),
+    ("P10_CROSS_MAMBA_SVF_IXI_TO_OASIS", "Mamba SVF cross (IXI→OASIS, 500ep)"),
 ]
 SEDM_IXI_CONFIGS = [
-    # ---- 100ep matrix ----
-    ("P9_CASC_VXM_SVF_IXI",            "VxM SVF (100ep, legacy cfg)"),
-    ("SEDM_CASC_VXM_NOSVF_IXI",        "VxM NoSVF (100ep)"),
-    ("P9_CASC_LKU8_SVF_IXI",           "LKU-8 SVF (100ep)"),
-    ("SEDM_CASC_LKU8_NOSVF_IXI",       "LKU-8 NoSVF (100ep)"),
-    ("P8_CASC_LKU32_SVF_IXI",          "LKU-32 SVF (100ep)"),
-    ("P8_CASC_MAMBA_SVF_IXI",          "Mamba SVF (100ep)"),
-    ("SEDM_CASC_MAMBA_NOSVF_IXI",      "Mamba NoSVF (100ep)"),
-    ("P9_CASC_VMAMBA_SVF_IXI",         "VMamba SVF (100ep)"),
-    # ---- 500ep longruns (Phase 10) ----
-    ("P10_LONGRUN_VXM_UNIFIED_SVF_IXI",  "VxM Unified SVF (500ep)"),
-    ("P10_LONGRUN_LKU8_SVF_IXI",         "LKU-8 SVF (500ep)"),
-    ("P10_LONGRUN_MAMBA_SVF_IXI",        "Mamba SVF (500ep)"),
-    # ---- Cross-dataset zero-shot ----
+    ("P9_CASC_VXM_SVF_IXI", "VxM SVF (100ep, legacy cfg)"),
+    ("SEDM_CASC_VXM_NOSVF_IXI", "VxM NoSVF (100ep)"),
+    ("P9_CASC_LKU8_SVF_IXI", "LKU-8 SVF (100ep)"),
+    ("SEDM_CASC_LKU8_NOSVF_IXI", "LKU-8 NoSVF (100ep)"),
+    ("P8_CASC_LKU32_SVF_IXI", "LKU-32 SVF (100ep)"),
+    ("P8_CASC_MAMBA_SVF_IXI", "Mamba SVF (100ep)"),
+    ("SEDM_CASC_MAMBA_NOSVF_IXI", "Mamba NoSVF (100ep)"),
+    ("P9_CASC_VMAMBA_SVF_IXI", "VMamba SVF (100ep)"),
+    ("P10_LONGRUN_VXM_UNIFIED_SVF_IXI", "VxM Unified SVF (500ep)"),
+    ("P10_LONGRUN_LKU8_SVF_IXI", "LKU-8 SVF (500ep)"),
+    ("P10_LONGRUN_MAMBA_SVF_IXI", "Mamba SVF (500ep)"),
     ("P10_CROSS_MAMBA_SVF_OASIS_TO_IXI", "Mamba SVF cross (OASIS→IXI, 500ep)"),
 ]
 
@@ -377,10 +386,6 @@ def cmd_sedm_vs_paper1(args):
         df = pd.read_csv(sedm_path)
         _compare_sedm(df, p1_ixi, metrics_ixi, label, "Paper 1 CTCF Swin-DCA")
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1].strip())

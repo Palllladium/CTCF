@@ -123,9 +123,8 @@ if [ "${SKIP_AGGREGATE}" != "1" ]; then
     echo "==========================================="
     echo ">> Aggregating with Phase 10 data"
     echo "==========================================="
-    "${PYBIN}" tools/analysis/aggregate_sedm_results.py \
+    "${PYBIN}" tools/analysis/aggregate_results.py \
         --inference-dir "${OUT}/inference" \
-        --complexity "${OUT}/complexity.csv" \
         --output-dir "${OUT}/summary"
 fi
 

@@ -44,6 +44,7 @@ ignore = [
 "__init__.py" = ["F401"]                    # re-exports without __all__
 "experiments/**/*.py" = ["E402"]             # sys.path manipulation before imports in entry scripts
 "experiments/train_*.py" = ["N999"]          # CamelCase model-name suffix; module path is the CLI invocation contract
+"tools/analysis/aggregate_results.py" = ["RUF001", "RUF002", "RUF003"]  # emits Russian-language paper tables (intentional Cyrillic)
 # Fully vendored baselines (no first-party wrapper) — touch minimally
 "models/TransMorph_DCA/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/UTSRMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]

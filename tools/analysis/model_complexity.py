@@ -1,6 +1,5 @@
 """
 Model complexity report for the paper: params, FLOPs, peak VRAM, inference throughput.
-
 Reports one line per model/configuration at the OASIS/IXI input shape (160, 192, 224).
 
 Usage:
@@ -15,6 +14,8 @@ Notes:
   - Throughput averages `iters` forward passes after `warmup` warmup passes.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -26,44 +27,99 @@ import torch.nn.functional as F
 
 from experiments.core.model_adapters import get_model_adapter
 
-
 MODELS = [
-    # Earlier paper lineup.
     {"role": "mdpi", "label": "CTCF-CascadeA", "model": "ctcf", "config": "CTCF-CascadeA"},
     {"role": "mdpi", "label": "TransMorph-3-LVL", "model": "tm-dca", "config": "TransMorph-3-LVL"},
     {"role": "mdpi", "label": "UTSRMorph-Large", "model": "utsrmorph", "config": "UTSRMorph-Large"},
     {"role": "mdpi", "label": "UTSRMorph-IXI-Large", "model": "utsrmorph", "config": "UTSRMorph-IXI-Large"},
-
-    # Standalone backbones considered for SEDM.
     {"role": "standalone", "label": "LKU-4", "model": "lkunet", "config": "LKU-4"},
     {"role": "standalone", "label": "LKU-8", "model": "lkunet", "config": "LKU-8"},
-    {"role": "standalone", "label": "EfficientMorph_2x3_2_hires", "model": "efficientmorph", "config": "EfficientMorph_2x3_2_hires"},
+    {
+        "role": "standalone",
+        "label": "EfficientMorph_2x3_2_hires",
+        "model": "efficientmorph",
+        "config": "EfficientMorph_2x3_2_hires",
+    },
     {"role": "standalone", "label": "MambaMorph", "model": "mambamorph", "config": "MambaMorph"},
     {"role": "standalone", "label": "VMambaMorph", "model": "vmambamorph", "config": "VMambaMorph"},
-
-    # SEDM Level-2-only controls through the CTCF adapter.
     {"role": "sedm_l2_only", "label": "CTCF-VM-solo", "model": "ctcf", "config": "CTCF-VM-solo"},
     {"role": "sedm_l2_only", "label": "CTCF-LKU8-solo", "model": "ctcf", "config": "CTCF-LKU8-solo"},
     {"role": "sedm_l2_only", "label": "CTCF-LKU32-solo", "model": "ctcf", "config": "CTCF-LKU32-solo"},
     {"role": "sedm_l2_only", "label": "CTCF-Mamba-solo", "model": "ctcf", "config": "CTCF-Mamba-solo"},
     {"role": "sedm_l2_only", "label": "CTCF-VMamba-solo", "model": "ctcf", "config": "CTCF-VMamba-solo"},
-
-    # SEDM cascades. SVF changes runtime/VRAM but not parameter count, so keep both
-    # variants where they are part of the experiment matrix or a planned gap run.
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VM-SVF", "model": "ctcf", "config": "CTCF-CascadeA-VM", "l3_svf": True},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VM-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-VM", "l3_svf": False},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU8-SVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU8", "l3_svf": True},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU8-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU8", "l3_svf": False},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU32-SVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU32", "l3_svf": True},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-LKU32-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-LKU32", "l3_svf": False},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-Mamba-SVF", "model": "ctcf", "config": "CTCF-CascadeA-Mamba", "l3_svf": True},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-Mamba-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-Mamba", "l3_svf": False},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VMamba-SVF", "model": "ctcf", "config": "CTCF-CascadeA-VMamba", "l3_svf": True},
-    {"role": "sedm_cascade", "label": "CTCF-CascadeA-VMamba-NoSVF", "model": "ctcf", "config": "CTCF-CascadeA-VMamba", "l3_svf": False},
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-VM-SVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-VM",
+        "l3_svf": True,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-VM-NoSVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-VM",
+        "l3_svf": False,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-LKU8-SVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-LKU8",
+        "l3_svf": True,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-LKU8-NoSVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-LKU8",
+        "l3_svf": False,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-LKU32-SVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-LKU32",
+        "l3_svf": True,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-LKU32-NoSVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-LKU32",
+        "l3_svf": False,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-Mamba-SVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-Mamba",
+        "l3_svf": True,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-Mamba-NoSVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-Mamba",
+        "l3_svf": False,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-VMamba-SVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-VMamba",
+        "l3_svf": True,
+    },
+    {
+        "role": "sedm_cascade",
+        "label": "CTCF-CascadeA-VMamba-NoSVF",
+        "model": "ctcf",
+        "config": "CTCF-CascadeA-VMamba",
+        "l3_svf": False,
+    },
 ]
 
 INPUT_SHAPE = (1, 1, 160, 192, 224)
-
 # Models whose forward returns (warped, flow) directly via forward(mov, fix).
 # Used by both try_flops and the inference path of the adapter.
 _PAIR_OUTPUT_MODELS = {"lkunet", "efficientmorph", "mambamorph", "vmambamorph"}
@@ -86,6 +142,7 @@ def svf_label(value) -> str:
 class _FlopWrapped(torch.nn.Module):
     """Adapter-agnostic wrapper that exposes a forward(mov, fix) -> flow signature
     so FLOPs counters (thop / fvcore) see a single, well-defined forward path."""
+
     def __init__(self, inner: torch.nn.Module, name: str):
         super().__init__()
         self.inner = inner
@@ -116,6 +173,7 @@ def try_flops(model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, model_na
 
     try:
         from thop import profile  # type: ignore
+
         macs, _ = profile(wrapped, inputs=(x, y), verbose=False)
         return f"{2.0 * macs / 1e9:.2f}"
     except Exception:
@@ -123,11 +181,8 @@ def try_flops(model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor, model_na
 
     try:
         from fvcore.nn import FlopCountAnalysis  # type: ignore
-        f = (
-            FlopCountAnalysis(wrapped, (x, y))
-            .unsupported_ops_warnings(False)
-            .uncalled_modules_warnings(False)
-        )
+
+        f = FlopCountAnalysis(wrapped, (x, y)).unsupported_ops_warnings(False).uncalled_modules_warnings(False)
         return f"{f.total() / 1e9:.2f}"
     except Exception:
         return "n/a"
@@ -140,7 +195,7 @@ def measure_peak_vram(adapter, model, x, y, device) -> float:
     with torch.no_grad():
         _ = adapter.forward(model, x, y)
     torch.cuda.synchronize(device)
-    return torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+    return torch.cuda.max_memory_allocated(device) / (1024**3)
 
 
 def measure_throughput(adapter, model, x, y, device, warmup: int, iters: int) -> tuple[float, float]:
@@ -172,9 +227,17 @@ def main() -> None:
     torch.cuda.set_device(device)
 
     header = [
-        "role", "label", "model", "config", "l3_svf",
-        "params_M", "params_trainable_M", "gflops",
-        "peak_vram_GB", "sec_per_pair", "pairs_per_sec",
+        "role",
+        "label",
+        "model",
+        "config",
+        "l3_svf",
+        "params_M",
+        "params_trainable_M",
+        "gflops",
+        "peak_vram_GB",
+        "sec_per_pair",
+        "pairs_per_sec",
     ]
     rows = []
 
@@ -198,15 +261,26 @@ def main() -> None:
             model = adapter.build(**build_kwargs).to(device).eval()
         except Exception as exc:
             print(f"  BUILD FAILED: {type(exc).__name__}: {exc}")
-            rows.append([
-                role, label, model_name, config_key, svf_label(l3_svf),
-                "n/a", "n/a", "n/a", "n/a", "n/a", "n/a",
-            ])
+            rows.append(
+                [
+                    role,
+                    label,
+                    model_name,
+                    config_key,
+                    svf_label(l3_svf),
+                    "n/a",
+                    "n/a",
+                    "n/a",
+                    "n/a",
+                    "n/a",
+                    "n/a",
+                ]
+            )
             continue
 
         total, trainable = count_params(model)
-        print(f"  params total    : {total/1e6:.2f} M")
-        print(f"  params trainable: {trainable/1e6:.2f} M")
+        print(f"  params total    : {total / 1e6:.2f} M")
+        print(f"  params trainable: {trainable / 1e6:.2f} M")
 
         x = y = None
         try:
@@ -224,11 +298,21 @@ def main() -> None:
             print(f"  pairs/sec       : {pairs_per_sec:.2f}")
         except Exception as exc:
             print(f"  MEASURE FAILED: {type(exc).__name__}: {exc}")
-            rows.append([
-                role, label, model_name, config_key, svf_label(l3_svf),
-                f"{total/1e6:.2f}", f"{trainable/1e6:.2f}",
-                "n/a", "n/a", "n/a", "n/a",
-            ])
+            rows.append(
+                [
+                    role,
+                    label,
+                    model_name,
+                    config_key,
+                    svf_label(l3_svf),
+                    f"{total / 1e6:.2f}",
+                    f"{trainable / 1e6:.2f}",
+                    "n/a",
+                    "n/a",
+                    "n/a",
+                    "n/a",
+                ]
+            )
             del model
             if x is not None:
                 del x
@@ -237,12 +321,21 @@ def main() -> None:
             torch.cuda.empty_cache()
             continue
 
-        rows.append([
-            role, label, model_name, config_key, svf_label(l3_svf),
-            f"{total/1e6:.2f}", f"{trainable/1e6:.2f}",
-            gflops, f"{peak_gb:.2f}",
-            f"{sec_per_pair:.4f}", f"{pairs_per_sec:.2f}",
-        ])
+        rows.append(
+            [
+                role,
+                label,
+                model_name,
+                config_key,
+                svf_label(l3_svf),
+                f"{total / 1e6:.2f}",
+                f"{trainable / 1e6:.2f}",
+                gflops,
+                f"{peak_gb:.2f}",
+                f"{sec_per_pair:.4f}",
+                f"{pairs_per_sec:.2f}",
+            ]
+        )
 
         del model, x, y
         torch.cuda.empty_cache()
@@ -257,7 +350,7 @@ def main() -> None:
 
     json_path = out_path.with_suffix(".json")
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump([dict(zip(header, r)) for r in rows], f, indent=2)
+        json.dump([dict(zip(header, r, strict=False)) for r in rows], f, indent=2)
     print(f"[SAVED] {json_path}")
 
 

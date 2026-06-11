@@ -1,5 +1,11 @@
 # CTCF: Cascade Transformer for Coarse-to-Fine Unsupervised Medical Image Registration
 
+> **Status (June 2026):** This is the published **v1.0.0** code for the CTCF paper; the
+> results below are stable. Active development continues on a feature branch — the cascade
+> is being generalized into a backbone-pluggable framework (VoxelMorph, LKU-Net, MambaMorph,
+> VMambaMorph, EfficientMorph) and the codebase is undergoing a refactor. Some file paths in
+> this README may differ from the current tree until the next tagged release.
+
 A three-level coarse-to-fine cascade framework for unsupervised deformable 3D medical image registration.
 
 **Paper (preprint):** [CTCF: A Three-Level Coarse-to-Fine Cascade for Unsupervised Deformable Medical Image Registration](https://doi.org/10.20944/preprints202604.0580.v1) — Preprints.org, 2026.

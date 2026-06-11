@@ -2,15 +2,6 @@
 # Phase 11 — first batch: ablation sweep over 4 architectural / training-time
 # improvements on the Mamba SVF cascade base (currently the Paper 2 headline).
 #
-# All runs are 100ep on OASIS only — strategy decided 2026-06-04:
-#   - 100ep gives reliable RANKING of improvements (OASIS is near-converged at
-#     100ep for ranking purposes; full-saturation 500ep requires Phase 11.1
-#     after stack lock).
-#   - OASIS chosen because atlas-pair N=19 test is robust + IXI was already
-#     shown plateau-saturated past 100ep (Phase 10 finding).
-#   - Mamba SVF chosen as base because it is the Paper 2 headline and the
-#     announced Paper 3 starting configuration.
-#
 # Four experiments:
 #   A. L3 capacity scaling      (--l3_base_ch 64)
 #   B. M1 Multi-head L3         (--l3_num_heads K, K ∈ {2,4,8})
@@ -20,8 +11,6 @@
 # Each run is fresh (no --resume): architectural changes (A, B) break ckpt
 # compatibility; training-time changes (C, D) require fresh comparison to
 # isolate the contribution of the new mechanism.
-#
-# Total: 11 short runs × ~7-8h ≈ 80-90h GPU ≈ 3.5 days continuous on 96GB GPU.
 #
 # Usage:
 #   conda activate ctcf
@@ -205,7 +194,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Inference on each P11_* ckpt (re-use tools/runners/phase10_inference.sh"
 echo "     pattern; add P11_* entries)."
-echo "  2. Aggregate to results/SEDM/summary/ — extend aggregate_sedm_results.py CONFIGS."
+echo "  2. Aggregate to results/SEDM/summary/ — extend aggregate_results.py CONFIGS."
 echo "  3. Rank improvements by Dice gain vs baseline (Mamba SVF Phase 10 OASIS 0.8314)."
 echo "  4. Lock the best stack -> Phase 11.1 = stack longruns 500ep."
 echo "==================================================================="
