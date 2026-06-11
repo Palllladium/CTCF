@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from datasets import IXI, OASIS
-from experiments.core.cli_args import optional_bool
+from experiments.core.cli_ctcf import ctcf_overrides_from_args
 from experiments.core.inference_metrics import metric_profile_for, write_results
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import get_dataset_paths
@@ -69,12 +69,7 @@ def build_infer_model(args, device):
             model = adapter.build(
                 time_steps=args.time_steps,
                 config_key=args.ctcf_config,
-                l3_iters=args.ctcf_l3_iters,
-                l3_unshared=optional_bool(args.ctcf_l3_unshared),
-                l1_half_res=optional_bool(args.ctcf_l1_half_res),
-                l2_full_res=optional_bool(args.ctcf_l2_full_res),
-                l3_full_res=optional_bool(args.ctcf_l3_full_res),
-                l3_svf=optional_bool(args.ctcf_l3_svf),
+                **ctcf_overrides_from_args(args, prefix="ctcf_"),
             )
         case "voxelmorph": model = adapter.build(config_key=args.vxm_config)
         case "lkunet": model = adapter.build(config_key=args.lku_config)

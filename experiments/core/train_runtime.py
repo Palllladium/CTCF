@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from experiments.core.cli_args import add_common_args
+from experiments.core.cli_common import add_common_args
 from experiments.core.data_loaders import (
     baseline_loader_builder,
     ixi_flip_axes_for,

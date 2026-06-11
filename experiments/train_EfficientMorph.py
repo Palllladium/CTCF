@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import optim
 
-from experiments.core.cli_args import add_common_args
+from experiments.core.cli_common import add_common_args
 from experiments.core.data_loaders import baseline_loader_builder
 from experiments.core.train_runtime import TrainContext, run_train
 from models.EfficientMorph.configs import CONFIGS

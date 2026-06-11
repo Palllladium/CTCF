@@ -7,11 +7,11 @@ import torch
 from torch import optim
 
 from datasets.synthetic import build_synth_loaders
-from experiments.core.cli_args import add_common_args, optional_bool
+from experiments.core.cli_common import add_common_args
+from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
 from experiments.core.data_loaders import baseline_loader_builder
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.train_runtime import TrainContext, run_train
-from models.CTCF.configs import CONFIGS
 from utils import (
     DareDiffusion,
     RegisterModel,
@@ -45,16 +45,7 @@ class Runner:
             use_checkpoint=bool(args.use_checkpoint),
             synth_img_size=synth_img_size,
             synth_dwin=synth_dwin,
-            l1_base_ch=args.l1_base_ch,
-            l3_base_ch=args.l3_base_ch,
-            l3_error_mode=args.l3_error_mode,
-            l3_iters=args.l3_iters,
-            l3_unshared=optional_bool(args.l3_unshared),
-            l1_half_res=optional_bool(args.l1_half_res),
-            l2_full_res=optional_bool(args.l2_full_res),
-            l3_full_res=optional_bool(args.l3_full_res),
-            l3_svf=optional_bool(args.l3_svf),
-            l3_num_heads=args.l3_num_heads,
+            **ctcf_overrides_from_args(args),
         ).to(device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
@@ -226,273 +217,11 @@ class Runner:
         return loss, logs
 
 
-def _add_model_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--config",
-        type=str,
-        default="CTCF-CascadeA",
-        choices=list(CONFIGS.keys()),
-        help="Model config key.",
-    )
-    p.add_argument(
-        "--time_steps",
-        type=int,
-        default=6,
-        help="Number of velocity integration steps.",
-    )
-    p.add_argument(
-        "--schedule_max_epoch",
-        type=int,
-        default=0,
-        help="If >0, uses this epoch horizon for CTCF stage schedule (alpha/warm), independent of --max_epoch.",
-    )
-    p.add_argument(
-        "--use_checkpoint",
-        type=int,
-        choices=[0, 1],
-        default=1,
-        help="Enable gradient checkpointing in Swin blocks.",
-    )
-
-
-def _add_loss_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--w_ncc",
-        type=float,
-        default=1.0,
-        help="NCC similarity loss weight.",
-    )
-    p.add_argument(
-        "--w_reg",
-        type=float,
-        default=None,
-        help="Flow regularization loss weight (auto: IXI=4.0, others=1.0).",
-    )
-    p.add_argument(
-        "--w_icon",
-        type=float,
-        default=0.05,
-        help="ICON loss base weight.",
-    )
-    p.add_argument(
-        "--w_jac",
-        type=float,
-        default=0.005,
-        help="Negative Jacobian penalty base weight.",
-    )
-    p.add_argument(
-        "--icon_mode",
-        type=str,
-        choices=["l1", "l2"],
-        default="l1",
-        help="ICON loss norm: l1 (default) or l2.",
-    )
-
-
-def _add_cascade_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--l1_from_start",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help="If 1, alpha_l1=1.0 from epoch 0 (skip schedule).",
-    )
-    p.add_argument(
-        "--disable_l1",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help="If 1, force alpha_l1=0 (disable Level 1 coarse flow).",
-    )
-    p.add_argument(
-        "--disable_l3",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help="If 1, force alpha_l3=0 (disable Level 3 refiner).",
-    )
-    p.add_argument(
-        "--l1_base_ch",
-        type=int,
-        default=None,
-        help="L1 coarse net base channels (default: config value, typically 16).",
-    )
-    p.add_argument(
-        "--l3_base_ch",
-        type=int,
-        default=None,
-        help="L3 refiner base channels (default: config value, typically 16).",
-    )
-    p.add_argument(
-        "--l3_error_mode",
-        type=str,
-        choices=["absdiff", "gradmag", "ncc"],
-        default=None,
-        help="L3 error map mode.",
-    )
-    p.add_argument(
-        "--l3_iters",
-        type=int,
-        default=None,
-        help="Number of L3 refinement iterations (default: 1).",
-    )
-    p.add_argument(
-        "--l3_unshared",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Override config: use separate L3 weights per iteration (requires l3_iters>1).",
-    )
-    p.add_argument(
-        "--l1_half_res",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Override config: run L1 at half-res instead of quarter-res.",
-    )
-    p.add_argument(
-        "--l2_full_res",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Override config: run L2 at full-res.",
-    )
-    p.add_argument(
-        "--l3_full_res",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Override config: run L3 at full-res.",
-    )
-    p.add_argument(
-        "--l3_svf",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Override config: integrate L3 delta as SVF via scaling-and-squaring.",
-    )
-    p.add_argument(
-        "--l3_num_heads",
-        type=int,
-        default=None,
-        help="M1 Multi-head L3: number of parallel flow heads with per-voxel learned routing (default: config value, normally 1 = single-head).",
-    )
-
-
-def _add_mechanism_args(p: argparse.ArgumentParser) -> None:
-    # M2: EMA self-distillation
-    p.add_argument(
-        "--ema_decay",
-        type=float,
-        default=0.0,
-        help="M2 EMA self-distillation: teacher decay rate (e.g., 0.999). 0 = disabled.",
-    )
-    p.add_argument(
-        "--ema_lambda",
-        type=float,
-        default=0.0,
-        help="M2 EMA self-distillation: weight on student-teacher flow L1 consistency loss. 0 = disabled.",
-    )
-
-    # M3: cascade-aware regularization
-    p.add_argument(
-        "--w_reg_l1",
-        type=float,
-        default=None,
-        help="M3 cascade-aware reg: diffusion weight on the raw L1 flow (phi_l1). If any of w_reg_l1/l2/l3 set, replaces uniform w_reg.",
-    )
-    p.add_argument(
-        "--w_reg_l2",
-        type=float,
-        default=None,
-        help="M3 cascade-aware reg: diffusion weight on the L2 residual flow (phi_l2_residual; post-L1-init removed).",
-    )
-    p.add_argument(
-        "--w_reg_l3",
-        type=float,
-        default=None,
-        help="M3 cascade-aware reg: diffusion weight on the mean L3 delta (delta_l3; raw, before SVF).",
-    )
-
-
-def _add_reg_mode_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--reg_mode",
-        type=str,
-        choices=["diffusion", "dare", "elastic"],
-        default="diffusion",
-        help="Regularization mode: diffusion (default Grad3d), dare (DARE-minimal), elastic (Navier-Cauchy).",
-    )
-    p.add_argument(
-        "--dare_beta",
-        type=float,
-        default=1.0,
-        help="DARE beta: controls adaptive weighting strength.",
-    )
-    p.add_argument(
-        "--elastic_mu",
-        type=float,
-        default=1.0,
-        help="ElasticMorph mu (shear modulus).",
-    )
-    p.add_argument(
-        "--elastic_lam",
-        type=float,
-        default=1.0,
-        help="ElasticMorph lambda (Lame first parameter).",
-    )
-
-
-def _add_synth_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--synth_train_samples",
-        type=int,
-        default=256,
-        help="Number of synthetic training pairs.",
-    )
-    p.add_argument(
-        "--synth_val_samples",
-        type=int,
-        default=32,
-        help="Number of synthetic validation pairs.",
-    )
-    p.add_argument(
-        "--synth_num_labels",
-        type=int,
-        default=36,
-        help="Number of synthetic segmentation labels.",
-    )
-    p.add_argument(
-        "--synth_vol_size",
-        type=int,
-        nargs=3,
-        default=(96, 96, 96),
-        help="Synthetic volume size D H W (each must be divisible by 32).",
-    )
-    p.add_argument(
-        "--synth_flow_max_disp",
-        type=float,
-        default=6.0,
-        help="Max synthetic displacement amplitude in voxels.",
-    )
-    p.add_argument(
-        "--synth_seed",
-        type=int,
-        default=123,
-        help="Base seed for synthetic pair generation.",
-    )
-
-
 def parse_args():
     p = argparse.ArgumentParser()
     add_common_args(p, include_synth=True)
     p.set_defaults(exp="CTCF")
-    _add_model_args(p)
-    _add_loss_args(p)
-    _add_cascade_args(p)
-    _add_mechanism_args(p)
-    _add_reg_mode_args(p)
-    _add_synth_args(p)
+    add_ctcf_train_args(p)
     return p.parse_args()
 
 
