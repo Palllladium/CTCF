@@ -128,8 +128,6 @@ class Runner:
 
     def train_step(self, batch, epoch):
         args, ctx = self.args, self.ctx
-
-        # M2: refresh EMA teacher from last-step student weights (no-op if disabled).
         self._ema_update()
 
         if self.is_synth:
@@ -171,7 +169,6 @@ class Runner:
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
 
-        # M3: cascade-aware regularisation overrides flat L_reg when enabled.
         if self.use_cascade_reg:
             level_weights = (
                 ("phi_l1", self.w_reg_l1),
@@ -194,7 +191,6 @@ class Runner:
         else:
             L_reg = 0.5 * (ctx.reg(flow_xy) + ctx.reg(flow_yx)) * args.w_reg
 
-        # M2: EMA consistency on flow (student vs teacher), warm-ramped with ICON/Jac.
         L_ema = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
         if self.use_ema and self.teacher is not None:
             with torch.no_grad():

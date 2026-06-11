@@ -120,8 +120,8 @@ class EfficientTransformerBlock(nn.Module):
             .contiguous()
             .view(
                 x.shape[0] * x.shape[self.extra_dim], 
-                x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2],
-                 x.shape[4]
+                x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2], 
+                x.shape[4],
             )
         )
 
