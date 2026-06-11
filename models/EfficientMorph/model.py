@@ -119,8 +119,8 @@ class EfficientTransformerBlock(nn.Module):
             x.permute(0, self.extra_dim, self.axial_dim_1, self.axial_dim_2, 4)
             .contiguous()
             .view(
-                x.shape[0] * x.shape[self.extra_dim], 
-                x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2], 
+                x.shape[0] * x.shape[self.extra_dim],
+                x.shape[self.axial_dim_1] * x.shape[self.axial_dim_2],
                 x.shape[4],
             )
         )
