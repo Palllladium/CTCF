@@ -375,7 +375,7 @@ def _add_cascade_args(p: argparse.ArgumentParser) -> None:
         "--l3_num_heads",
         type=int,
         default=None,
-        help="M1 Multi-head L3: number of parallel flow heads with per-voxel learned routing (default: 1 = single-head).",
+        help="M1 Multi-head L3: number of parallel flow heads with per-voxel learned routing (default: config value, normally 1 = single-head).",
     )
 
 
@@ -399,19 +399,19 @@ def _add_mechanism_args(p: argparse.ArgumentParser) -> None:
         "--w_reg_l1",
         type=float,
         default=None,
-        help="M3 cascade-aware reg: diffusion weight on raw L1 flow. If any of w_reg_l1/l2/l3 set, replaces uniform w_reg.",
+        help="M3 cascade-aware reg: diffusion weight on the raw L1 flow (phi_l1). If any of w_reg_l1/l2/l3 set, replaces uniform w_reg.",
     )
     p.add_argument(
         "--w_reg_l2",
         type=float,
         default=None,
-        help="M3 cascade-aware reg: diffusion weight on raw L2 flow.",
+        help="M3 cascade-aware reg: diffusion weight on the L2 residual flow (phi_l2_residual; post-L1-init removed).",
     )
     p.add_argument(
         "--w_reg_l3",
         type=float,
         default=None,
-        help="M3 cascade-aware reg: diffusion weight on mean L3 delta (raw, before SVF).",
+        help="M3 cascade-aware reg: diffusion weight on the mean L3 delta (delta_l3; raw, before SVF).",
     )
 
 

@@ -15,9 +15,9 @@
 #
 # Usage:
 #   conda activate ctcf
-#   bash tools/phase9_matrix_and_inference.sh                  # both stages
-#   SKIP_STAGE1=1 bash tools/phase9_matrix_and_inference.sh    # inference only
-#   SKIP_STAGE2=1 bash tools/phase9_matrix_and_inference.sh    # training only
+#   bash tools/runners/phase9_matrix_and_inference.sh                  # both stages
+#   SKIP_STAGE1=1 bash tools/runners/phase9_matrix_and_inference.sh    # inference only
+#   SKIP_STAGE2=1 bash tools/runners/phase9_matrix_and_inference.sh    # training only
 
 set -e
 

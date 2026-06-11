@@ -10,8 +10,8 @@
 #   results/infer/cross_dataset_summary.csv  (aggregated final table)
 #
 # Usage:
-#   bash tools/cross_dataset_eval.sh --paths-profile 3 --gpu 0
-#   bash tools/cross_dataset_eval.sh --paths-profile 2 --gpu 0 --dry-run
+#   bash tools/runners/cross_dataset_inference.sh --paths-profile 3 --gpu 0
+#   bash tools/runners/cross_dataset_inference.sh --paths-profile 2 --gpu 0 --dry-run
 #
 # Checkpoint resolution:
 #   1) Each experiment is associated with a *folder* under $RESULTS_ROOT.
@@ -19,8 +19,9 @@
 #   3) Either the folder name (EXP_*) or the full checkpoint path (CKPT_*) may
 #      be overridden via env vars; CKPT_* wins when both are set.
 #
-# Defaults are set to the advisor's layout:
-#   RESULTS_ROOT=/home/roman/P/CTCF/results
+# Defaults assume checkpoints under ./results/<EXP_*>/; override RESULTS_ROOT and any
+# EXP_* name via env vars or flags:
+#   RESULTS_ROOT=results
 #   EXP_CTCF_OASIS=CTCF_UPD_OASIS_E500
 #   EXP_CTCF_IXI=CTCF_IXI_TUNED
 #   EXP_TMDCA_OASIS=TM_DCA_unsup_OASIS
@@ -35,7 +36,7 @@ PATHS_PROFILE=1
 GPU=0
 DRY_RUN=0
 SKIP_EXISTING=0
-RESULTS_ROOT_DEFAULT="/home/roman/P/CTCF/results"
+RESULTS_ROOT_DEFAULT="results"
 PREFER_DEFAULT="best"   # best | last
 
 while [[ $# -gt 0 ]]; do
@@ -57,7 +58,7 @@ cd "$WORK_DIR"
 RESULTS_ROOT="${RESULTS_ROOT:-$RESULTS_ROOT_DEFAULT}"
 PREFER="${PREFER:-$PREFER_DEFAULT}"
 
-# Experiment folder defaults match advisor's layout on /home/roman/P/CTCF/results/
+# Experiment folder defaults (override any via the env vars below).
 EXP_CTCF_OASIS="${EXP_CTCF_OASIS:-CTCF_UPD_OASIS_E500}"
 EXP_CTCF_IXI="${EXP_CTCF_IXI:-CTCF_IXI_TUNED}"
 EXP_TMDCA_OASIS="${EXP_TMDCA_OASIS:-TM_DCA_unsup_OASIS}"
@@ -164,7 +165,7 @@ if [ "$MISSING" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   echo "         UTSR OASIS  -> \$EXP_UTSR_OASIS   (default: $EXP_UTSR_OASIS)"
   echo "         UTSR IXI    -> \$EXP_UTSR_IXI     (default: $EXP_UTSR_IXI)"
   echo "       Override any of them via env vars, e.g.:"
-  echo "         EXP_TMDCA_OASIS=TM_DCA_OASIS_actual_name bash tools/cross_dataset_eval.sh ..."
+  echo "         EXP_TMDCA_OASIS=TM_DCA_OASIS_actual_name bash tools/runners/cross_dataset_inference.sh ..."
   echo "       Or pass a full path via CKPT_TMDCA_OASIS=/abs/path/best.pth"
   exit 1
 fi

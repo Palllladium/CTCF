@@ -664,9 +664,8 @@ def write_cascade_delta_table(stats_by_exp, output_dir: Path):
         slot = pairs.setdefault(key, {})
         if cfg["group"] == "L2-only":
             slot["L2"] = s
-        elif cfg["group"] == "cascade" and cfg.get("svf", "OFF") == "ON":
-            slot["cascade"] = s
-        elif cfg["group"] == "cascade" and "cascade" not in slot:
+        # Prefer the SVF-canonical cascade; else keep the first cascade seen.
+        elif cfg["group"] == "cascade" and (cfg.get("svf", "OFF") == "ON" or "cascade" not in slot):
             slot["cascade"] = s
 
     md = [
