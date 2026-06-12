@@ -71,6 +71,7 @@ class CTCFCascadeA(nn.Module):
             "base_ch": config.level3_base_ch,
             "error_mode": config.level3_error_mode,
             "num_heads": config.level3_num_heads,
+            "corr_mode": config.level3_corr_mode,
         }
 
         self.level1 = None

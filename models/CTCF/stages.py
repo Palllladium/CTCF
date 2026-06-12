@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.CTCF.blocks import CAB, ResidualContext3D, SRUpBlock3D
+from models.CTCF.blocks import CAB, CostVolume3D, ResidualContext3D, SRUpBlock3D
 from models.TransMorph_DCA.model import (
     Conv3dReLU,
     RegistrationHead,
@@ -313,14 +313,22 @@ class FlowRefiner3D(nn.Module):
         base_ch: int = 16,
         error_mode: str = "absdiff",
         num_heads: int = 1,
+        corr_mode: str = "none",
     ):
         super().__init__()
 
         self.error_mode = error_mode
         self.num_heads = max(1, num_heads)
         c = base_ch
-        in_ch = 6  # mov_warp(1) + fix(1) + err(1) + flow(3)
         flow_ch = 3  # x, y, z displacement components
+
+        self.cost_volume = None
+        corr_ch = 0
+        if corr_mode != "none":
+            self.cost_volume = CostVolume3D(corr_mode)
+            corr_ch = self.cost_volume.extra_channels
+
+        in_ch = 6 + corr_ch  # mov_warp(1) + fix(1) + err(1) + flow(3) + cost-volume(corr_ch)
 
         self.enc1 = ConvBlock(in_ch=in_ch, out_ch=c)
         self.pool1 = nn.AvgPool3d(kernel_size=2)
@@ -449,7 +457,10 @@ class FlowRefiner3D(nn.Module):
         flow: torch.Tensor,
     ) -> torch.Tensor:
         err = self._error_map(mov_warp, fix)
-        x = torch.cat([mov_warp, fix, err, flow], dim=1)
+        parts = [mov_warp, fix, err, flow]
+        if self.cost_volume is not None:
+            parts.append(self.cost_volume(mov_warp, fix))
+        x = torch.cat(parts, dim=1)
 
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))

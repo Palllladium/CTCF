@@ -8,6 +8,7 @@ from models.CTCF.configs import CONFIGS
 _INT_OVERRIDES = ("l1_base_ch", "l3_base_ch", "l3_iters", "l3_num_heads")
 _BOOL_OVERRIDES = ("l3_unshared", "l1_half_res", "l2_full_res", "l3_full_res", "l3_svf")
 _ERROR_MODE_CHOICES = ("absdiff", "gradmag", "ncc")
+_CORR_MODE_CHOICES = ("none", "hadamard", "corr", "corr_feat")
 
 _OVERRIDE_HELP = {
     "l1_base_ch": "L1 coarse-net base channels (default: config value).",
@@ -15,6 +16,7 @@ _OVERRIDE_HELP = {
     "l3_iters": "Number of L3 refinement iterations (default: config value, typically 1).",
     "l3_num_heads": "M1 multi-head L3: parallel flow heads with per-voxel routing (default: config value).",
     "l3_error_mode": "L3 error-map mode.",
+    "l3_corr_mode": "L3 correspondence cost-volume injected before the flow head (none/hadamard/corr/corr_feat).",
     "l3_unshared": "use separate L3 weights per iteration (requires l3_iters>1).",
     "l1_half_res": "run L1 at half-res instead of quarter-res.",
     "l2_full_res": "run L2 at full-res.",
@@ -22,7 +24,7 @@ _OVERRIDE_HELP = {
     "l3_svf": "integrate L3 delta as SVF via scaling-and-squaring.",
 }
 
-CTCF_OVERRIDE_KEYS = (*_INT_OVERRIDES, "l3_error_mode", *_BOOL_OVERRIDES)
+CTCF_OVERRIDE_KEYS = (*_INT_OVERRIDES, "l3_error_mode", "l3_corr_mode", *_BOOL_OVERRIDES)
 
 
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
@@ -140,6 +142,13 @@ def add_ctcf_override_args(p: argparse.ArgumentParser, prefix: str = "") -> None
         choices=list(_ERROR_MODE_CHOICES),
         default=None,
         help=_OVERRIDE_HELP["l3_error_mode"],
+    )
+    group.add_argument(
+        f"--{prefix}l3_corr_mode",
+        type=str,
+        choices=list(_CORR_MODE_CHOICES),
+        default=None,
+        help=_OVERRIDE_HELP["l3_corr_mode"],
     )
     for name in _BOOL_OVERRIDES:
         group.add_argument(
@@ -260,6 +269,7 @@ def add_ctcf_synth_args(p: argparse.ArgumentParser) -> None:
 def ctcf_overrides_from_args(args: argparse.Namespace, prefix: str = "") -> dict:
     overrides = {name: getattr(args, f"{prefix}{name}") for name in _INT_OVERRIDES}
     overrides["l3_error_mode"] = getattr(args, f"{prefix}l3_error_mode")
+    overrides["l3_corr_mode"] = getattr(args, f"{prefix}l3_corr_mode")
     for name in _BOOL_OVERRIDES:
         overrides[name] = optional_bool(getattr(args, f"{prefix}{name}"))
     return overrides

@@ -6,6 +6,12 @@ extend-exclude = [
     "results",
     "tools/archive",
     "tools/paper",
+    # verbatim upstream baseline code
+    "models/CorrMLP/networks.py",
+    "models/SACB/SACB1.py",
+    "models/SACB/model.py",
+    "models/SACB/nn_util.py",
+    "models/SACB/utils.py",
 ]
 
 [tool.ruff.lint]

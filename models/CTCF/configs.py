@@ -44,6 +44,7 @@ def get_ctcf_config() -> ml_collections.ConfigDict:
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
     c.level3_num_heads = 1
+    c.level3_corr_mode = "none"
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -74,6 +75,7 @@ def _unified_cascade_base(
     c.level3_base_ch = 32
     c.level3_error_mode = "ncc"
     c.level3_num_heads = 1
+    c.level3_corr_mode = "none"
 
     c.l3_iters = 1
     c.l3_unshared = False
@@ -105,6 +107,7 @@ def get_ctcf_vm_legacy_config(use_cascade: bool = True) -> ml_collections.Config
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
     c.level3_num_heads = 1
+    c.level3_corr_mode = "none"
 
     c.l3_iters = 1
     c.l3_unshared = False

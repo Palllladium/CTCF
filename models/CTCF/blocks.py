@@ -148,6 +148,62 @@ class ResidualContext3D(nn.Module):
         return x + self.scale * y
 
 
+class CostVolume3D(nn.Module):
+    """Explicit correspondence features between two single-channel volumes (moving-warped
+    and fixed), concatenated into the L3 refiner input. Gives the cascade an explicit
+    feature-matching signal that the pluggable L2 backbone never computes.
+
+    Modes (extra channels in parentheses, D3 = (2*max_disp+1)^3 = 27 for max_disp=1):
+      - "hadamard"  (2):  EOIR-style symmetric/antisymmetric pair [a + b, a - b]; no params.
+      - "corr"      (D3): local correlation of raw intensities over a (2*max_disp+1)^3
+                          displacement window, C(p, d) = a(p) * b(p + d); no params.
+      - "corr_feat" (D3): same correlation on a shared shallow feature embedding,
+                          C(p, d) = mean_c f_a_c(p) * f_b_c(p + d); adds one Conv3d.
+    """
+
+    _MODES = ("hadamard", "corr", "corr_feat")
+
+    def __init__(self, mode: str, embed_ch: int = 8, max_disp: int = 1):
+        super().__init__()
+        if mode not in self._MODES:
+            raise ValueError(f"Unsupported cost-volume mode: {mode}")
+        self.mode = mode
+        self.max_disp = max_disp
+        self.extra_channels = 2 if mode == "hadamard" else (2 * max_disp + 1) ** 3
+
+        self.embed = None
+        if mode == "corr_feat":
+            self.embed = nn.Conv3d(
+                in_channels=1,
+                out_channels=embed_ch,
+                kernel_size=3,
+                padding=1,
+                bias=True,
+            )
+
+    def _correlate(self, fa: torch.Tensor, fb: torch.Tensor) -> torch.Tensor:
+        # C(p, d) = mean_c f_a_c(p) * f_b_c(p + d), d in [-max_disp, max_disp]^3.
+        d = self.max_disp
+        fb = F.pad(fb, (d, d, d, d, d, d))
+        _, _, dd, hh, ww = fa.shape
+
+        cost = []
+        span = range(2 * d + 1)
+        for dz in span:
+            for dy in span:
+                for dx in span:
+                    shifted = fb[:, :, dz : dz + dd, dy : dy + hh, dx : dx + ww]
+                    cost.append((fa * shifted).mean(dim=1, keepdim=True))
+        return torch.cat(cost, dim=1)
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        if self.mode == "hadamard":
+            return torch.cat([a + b, a - b], dim=1)
+        if self.mode == "corr":
+            return self._correlate(a, b)
+        return self._correlate(self.embed(a), self.embed(b))
+
+
 def _match_size_3d(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     """Center-pad or center-crop the last three dims of `x` to match `ref`."""
     if x.dim() != 5 or ref.dim() != 5:
