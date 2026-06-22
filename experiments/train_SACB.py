@@ -49,11 +49,14 @@ class Runner:
         args, ctx = self.args, self.ctx
         x, y = batch[0].to(self.device).float(), batch[1].to(self.device).float()
 
-        def_x, flow = self.model(x, y)
+        # run_train wraps train_step in fp16 autocast, but SACB's kmeans_gpu clustering breaks
+        # under fp16 (Half/Float dtype mismatch in kmeans.fit_predict's index_put). Force fp32.
+        with torch.autocast(device_type="cuda", enabled=False):
+            def_x, flow = self.model(x, y)
 
-        L_ncc = ctx.ncc(def_x.float(), y.float()) * args.w_ncc
-        L_reg = ctx.reg(flow) * args.w_reg
-        loss = L_ncc + L_reg
+            L_ncc = ctx.ncc(def_x.float(), y.float()) * args.w_ncc
+            L_reg = ctx.reg(flow) * args.w_reg
+            loss = L_ncc + L_reg
 
         return loss, {"all": loss.item(), "ncc": L_ncc.item(), "reg": L_reg.item()}
 
