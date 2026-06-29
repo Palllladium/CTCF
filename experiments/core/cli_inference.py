@@ -13,6 +13,8 @@ MODEL_CHOICES = [
     "efficientmorph",
     "mambamorph",
     "vmambamorph",
+    "corrmlp",
+    "sacb",
 ]
 
 
