@@ -37,6 +37,18 @@ def compose_flows(flow_ab: torch.Tensor, flow_bc: torch.Tensor, mode: str = "bil
     return flow_ab + _warp(flow_bc, flow_ab, mode=mode)
 
 
+def integrate_svf(vel: torch.Tensor, st, steps: int = 7) -> torch.Tensor:
+    """Integrate a stationary velocity field into a displacement via scaling-and-squaring.
+
+    `st` is a SpatialTransformer sized to `vel`; it is passed in rather than constructed
+    here so callers keep control of the warp convention their checkpoints were trained on.
+    """
+    disp = vel * (1.0 / (2**steps))
+    for _ in range(steps):
+        disp = disp + st(disp, disp)
+    return disp
+
+
 def jacobian_det(flow: torch.Tensor) -> torch.Tensor:
     """Jacobian determinant map for a 3D displacement field [B,3,D,H,W]."""
     dz = flow[:, :, 2:, :, :] - flow[:, :, :-2, :, :]
@@ -68,9 +80,15 @@ def neg_jacobian_penalty(
     flow: torch.Tensor,
     mask: torch.Tensor | None = None,
     crop: int = 1,
+    eps: float = 0.0,
 ) -> torch.Tensor:
-    """Mean penalty over non-positive Jacobian determinant voxels."""
-    pen = torch.relu(-_crop_spatial(jacobian_det(flow), crop))
+    """Mean penalty over non-positive Jacobian determinant voxels.
+
+    `eps` > 0 widens the penalised band to detJ < eps, so voxels merely approaching a fold
+    are pushed back instead of being punished only once they have folded. Kept at 0.0 by
+    default: every trained checkpoint and reported number depends on the knife-edge form.
+    """
+    pen = torch.relu(-_crop_spatial(jacobian_det(flow), crop) + eps)
 
     if mask is None:
         return pen.mean()

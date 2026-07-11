@@ -12,6 +12,7 @@ from .dice import (
 from .field import (
     compose_flows,
     digital_jacobian_metrics,
+    integrate_svf,
     jacobian_det,
     jacobian_nonpositive_percent,
     logdet_std_from_flow,
@@ -62,6 +63,7 @@ __all__ = [
     "elastic_loss",
     "hd95_mean_labels",
     "icon_loss",
+    "integrate_svf",
     "jacobian_det",
     "jacobian_nonpositive_percent",
     "load_checkpoint_if_exists",

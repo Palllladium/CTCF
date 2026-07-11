@@ -35,7 +35,18 @@ class NCCVxm(nn.Module):
         self.win = win
         self.eps = eps
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        y_true: torch.Tensor,
+        y_pred: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`mask` restricts the average to the given voxels (e.g. the brain).
+
+        Left at None the whole volume is averaged, which is what every trained checkpoint used --
+        do not switch it on in training without re-tuning w_reg, since masking rescales the
+        similarity term relative to the regulariser.
+        """
         ii, ji = y_true, y_pred
         ndims = len(ii.shape) - 2
         assert ndims in (1, 2, 3)
@@ -60,7 +71,15 @@ class NCCVxm(nn.Module):
         cross = ij_sum - uj * i_sum - ui * j_sum + ui * uj * win_size
         i_var = torch.clamp(i2_sum - 2 * ui * i_sum + ui * ui * win_size, min=self.eps)
         j_var = torch.clamp(j2_sum - 2 * uj * j_sum + uj * uj * win_size, min=self.eps)
-        return -torch.mean((cross * cross) / (i_var * j_var))
+        cc = (cross * cross) / (i_var * j_var)
+
+        if mask is None:
+            return -torch.mean(cc)
+
+        m = (mask > 0).to(cc.dtype)
+        if m.dim() == cc.dim() - 1:
+            m = m.unsqueeze(1)
+        return -(cc * m).sum() / torch.clamp(m.sum(), min=1.0)
 
 
 class DareDiffusion(nn.Module):

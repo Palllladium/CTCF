@@ -402,12 +402,6 @@ def cmd_sedm_vs_paper1(args):
         _compare_sedm(df, p1_ixi, metrics_ixi, label, "Paper 1 CTCF Swin-DCA")
 
 
-# Phase 11 mixing-axis screening + Track V baselines. Each tuple = (treatment, reference, label, ds).
-# HL is computed as median Walsh-average of (treatment - reference) on the dataset's pairwise
-# metrics. All per_case.csv live under --sedm-root/<exp>/per_case.csv. Anchors:
-#   OASIS = P11_MAMBA_SVF_CTRL_NONE_OASIS (matched-code 100ep; falls back to P7 if absent),
-#   IXI   = P10_LONGRUN_MAMBA_SVF_IXI (N=115 test; IXI is plateau-saturated past 100ep, so the
-#           500ep-vs-100ep-competitor gap is immaterial — note this in the paper).
 P11_OASIS_ANCHOR = "P11_MAMBA_SVF_CTRL_NONE_OASIS"
 P11_OASIS_ANCHOR_FALLBACK = "P7_CASC_MAMBA_SVF_OASIS"
 P11_IXI_ANCHOR = "P10_LONGRUN_MAMBA_SVF_IXI"
@@ -426,7 +420,6 @@ PHASE11_COMPARISONS = [
     ("P11_MAMBA_SVF_STACK_OASIS", P11_OASIS_ANCHOR, "STACK vs anchor", "OASIS"),
     ("P11_MAMBA_SVF_STACK_OASIS", "P11_MAMBA_SVF_HADAMARD_OASIS", "STACK vs Hadamard", "OASIS"),
     ("P11_MAMBA_SVF_STACK_OASIS", "P11_MAMBA_SVF_L3CH64_OASIS", "STACK vs L3CH64", "OASIS"),
-    # Track V — competitor (treatment) vs our cascade (reference): HL<0 on dice means competitor worse.
     ("P11_CORRMLP_OASIS", P11_OASIS_ANCHOR, "CorrMLP vs CTCF (OASIS)", "OASIS"),
     ("P11_SACB_OASIS", P11_OASIS_ANCHOR, "SACB vs CTCF (OASIS)", "OASIS"),
     ("P11_CORRMLP_IXI", P11_IXI_ANCHOR, "CorrMLP vs CTCF (IXI)", "IXI"),
@@ -483,7 +476,7 @@ def cmd_phase11(args):
     for metric in sorted({r["metric"] for r in results}):
         group = [r for r in results if r["metric"] == metric]
         q, reject = benjamini_hochberg([r["p_wilcoxon"] for r in group])
-        for r, qi, rej in zip(group, q, reject):
+        for r, qi, rej in zip(group, q, reject, strict=True):
             r["q_bh"], r["sig_bh"] = float(qi), bool(rej)
 
     for ds in ("OASIS", "IXI"):
@@ -512,11 +505,21 @@ def cmd_phase11(args):
             ["ds", "metric", "comparison", "n", "hl", "ci_lo", "ci_hi", "p_wilcoxon", "q_bh", "sig_bh", "method"]
         )
         for r in results:
-            w.writerow([
-                r["ds"], r["metric"], r["label"], r["n"],
-                f"{r['hl']:+.6f}", f"{r['ci_lo']:+.6f}", f"{r['ci_hi']:+.6f}",
-                f"{r['p_wilcoxon']:.4e}", f"{r['q_bh']:.4e}", int(r["sig_bh"]), r["method"],
-            ])
+            w.writerow(
+                [
+                    r["ds"],
+                    r["metric"],
+                    r["label"],
+                    r["n"],
+                    f"{r['hl']:+.6f}",
+                    f"{r['ci_lo']:+.6f}",
+                    f"{r['ci_hi']:+.6f}",
+                    f"{r['p_wilcoxon']:.4e}",
+                    f"{r['q_bh']:.4e}",
+                    int(r["sig_bh"]),
+                    r["method"],
+                ]
+            )
     print(f"\n[SAVED] {out_path}")
 
 

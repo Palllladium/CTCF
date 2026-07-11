@@ -6,7 +6,7 @@ import torch.nn as nn
 from models.CTCF.blocks import resize_3d, upsample_flow
 from models.CTCF.stages import CoarseFlowNetQuarter, CTCFDCACoreHalf, FlowRefiner3D
 from models.TransMorph_DCA.model import SpatialTransformer
-from utils.field import compose_flows
+from utils.field import compose_flows, integrate_svf
 
 
 def _build_level2(config, backbone: str) -> nn.Module:
@@ -120,10 +120,7 @@ class CTCFCascadeA(nn.Module):
         steps: int = 7,
     ) -> torch.Tensor:
         """Integrate a stationary velocity field via scaling-and-squaring."""
-        disp = vel * (1.0 / (2**steps))
-        for _ in range(steps):
-            disp = disp + st(disp, disp)
-        return disp
+        return integrate_svf(vel, st, steps=steps)
 
     def _apply_l3_delta(
         self,
