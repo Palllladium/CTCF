@@ -72,6 +72,21 @@ def hodges_lehmann_paired(x, y, alpha=0.05):
     }
 
 
+def benjamini_hochberg(pvals, alpha: float = 0.05):
+    """Benjamini-Hochberg FDR adjustment. Returns (q_values, reject) aligned to input order."""
+    p = np.asarray(pvals, dtype=np.float64)
+    n = len(p)
+    if n == 0:
+        return np.array([]), np.array([], dtype=bool)
+    order = np.argsort(p)
+    ranked = p[order]
+    q = ranked * n / np.arange(1, n + 1)
+    q = np.minimum.accumulate(q[::-1])[::-1]  # enforce monotone non-decreasing in p
+    q_full = np.empty(n, dtype=np.float64)
+    q_full[order] = np.clip(q, 0.0, 1.0)
+    return q_full, q_full <= alpha
+
+
 def _try_per_case(infer_root: Path, dataset: str, model: str) -> pd.DataFrame:
     for subdir in ("best", "best.pth"):
         p = infer_root / dataset / model / subdir / "per_case.csv"
@@ -387,6 +402,124 @@ def cmd_sedm_vs_paper1(args):
         _compare_sedm(df, p1_ixi, metrics_ixi, label, "Paper 1 CTCF Swin-DCA")
 
 
+# Phase 11 mixing-axis screening + Track V baselines. Each tuple = (treatment, reference, label, ds).
+# HL is computed as median Walsh-average of (treatment - reference) on the dataset's pairwise
+# metrics. All per_case.csv live under --sedm-root/<exp>/per_case.csv. Anchors:
+#   OASIS = P11_MAMBA_SVF_CTRL_NONE_OASIS (matched-code 100ep; falls back to P7 if absent),
+#   IXI   = P10_LONGRUN_MAMBA_SVF_IXI (N=115 test; IXI is plateau-saturated past 100ep, so the
+#           500ep-vs-100ep-competitor gap is immaterial — note this in the paper).
+P11_OASIS_ANCHOR = "P11_MAMBA_SVF_CTRL_NONE_OASIS"
+P11_OASIS_ANCHOR_FALLBACK = "P7_CASC_MAMBA_SVF_OASIS"
+P11_IXI_ANCHOR = "P10_LONGRUN_MAMBA_SVF_IXI"
+
+PHASE11_COMPARISONS = [
+    # Mixing axis (OASIS) — is each lever a real per-pair gain vs the matched anchor?
+    ("P11_MAMBA_SVF_HADAMARD_OASIS", P11_OASIS_ANCHOR, "Hadamard vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_HADAMARD_OASIS", "P11_MAMBA_SVF_L3CH64_OASIS", "Hadamard vs L3CH64", "OASIS"),
+    ("P11_MAMBA_SVF_CORR27_OASIS", "P11_MAMBA_SVF_HADAMARD_OASIS", "CORR27 vs Hadamard", "OASIS"),
+    ("P11_MAMBA_SVF_L3CH64_OASIS", P11_OASIS_ANCHOR, "L3CH64 vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_MH2_OASIS", P11_OASIS_ANCHOR, "MH2 vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_REG_FLAT_OASIS", P11_OASIS_ANCHOR, "M3 FLAT vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_REG_MID_OASIS", P11_OASIS_ANCHOR, "M3 MID vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_REG_STRONG_OASIS", P11_OASIS_ANCHOR, "M3 STRONG vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_REG_VSTRONG_OASIS", P11_OASIS_ANCHOR, "M3 VSTRONG vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_STACK_OASIS", P11_OASIS_ANCHOR, "STACK vs anchor", "OASIS"),
+    ("P11_MAMBA_SVF_STACK_OASIS", "P11_MAMBA_SVF_HADAMARD_OASIS", "STACK vs Hadamard", "OASIS"),
+    ("P11_MAMBA_SVF_STACK_OASIS", "P11_MAMBA_SVF_L3CH64_OASIS", "STACK vs L3CH64", "OASIS"),
+    # Track V — competitor (treatment) vs our cascade (reference): HL<0 on dice means competitor worse.
+    ("P11_CORRMLP_OASIS", P11_OASIS_ANCHOR, "CorrMLP vs CTCF (OASIS)", "OASIS"),
+    ("P11_SACB_OASIS", P11_OASIS_ANCHOR, "SACB vs CTCF (OASIS)", "OASIS"),
+    ("P11_CORRMLP_IXI", P11_IXI_ANCHOR, "CorrMLP vs CTCF (IXI)", "IXI"),
+    ("P11_SACB_IXI", P11_IXI_ANCHOR, "SACB vs CTCF (IXI)", "IXI"),
+]
+
+
+def _load_per_case_by_id(path: Path):
+    """Load a per_case.csv into {case_id: row_dict}, or None if the file is absent."""
+    if not path.exists():
+        return None
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            out[row.get("case_id", "")] = row
+    return out
+
+
+def cmd_phase11(args):
+    sedm_root = Path(args.sedm_root)
+
+    def resolve(exp: str) -> Path:
+        if exp == P11_OASIS_ANCHOR and not (sedm_root / exp / "per_case.csv").exists():
+            return sedm_root / P11_OASIS_ANCHOR_FALLBACK / "per_case.csv"
+        return sedm_root / exp / "per_case.csv"
+
+    print("=" * 80)
+    print("Phase 11 — mixing-axis screening + Track V baselines (paired Wilcoxon + HL, BH-FDR)")
+    print("=" * 80)
+
+    results = []
+    for treatment, reference, label, ds in PHASE11_COMPARISONS:
+        a = _load_per_case_by_id(resolve(treatment))
+        b = _load_per_case_by_id(resolve(reference))
+        if a is None or b is None:
+            missing = treatment if a is None else reference
+            print(f"\n  SKIP {label}: {missing}/per_case.csv missing")
+            continue
+        shared = sorted(set(a) & set(b))
+        if len(shared) < 2:
+            print(f"\n  SKIP {label}: <2 shared case_ids")
+            continue
+        for metric in PAIRWISE_METRICS_BY_DS[ds]:
+            try:
+                xs = [float(a[cid][metric]) for cid in shared]
+                ys = [float(b[cid][metric]) for cid in shared]
+            except (KeyError, ValueError):
+                continue
+            res = hodges_lehmann_paired(xs, ys)
+            if res is not None:
+                results.append({"label": label, "ds": ds, "metric": metric, **res})
+
+    # BH-FDR per metric family (control FDR separately for each endpoint).
+    for metric in sorted({r["metric"] for r in results}):
+        group = [r for r in results if r["metric"] == metric]
+        q, reject = benjamini_hochberg([r["p_wilcoxon"] for r in group])
+        for r, qi, rej in zip(group, q, reject):
+            r["q_bh"], r["sig_bh"] = float(qi), bool(rej)
+
+    for ds in ("OASIS", "IXI"):
+        ds_rows = [r for r in results if r["ds"] == ds]
+        if not ds_rows:
+            continue
+        print(f"\n### {ds}  (N={ds_rows[0]['n']}, BH-FDR per metric, alpha=0.05)")
+        for metric in PAIRWISE_METRICS_BY_DS[ds]:
+            mrows = [r for r in ds_rows if r["metric"] == metric]
+            if not mrows:
+                continue
+            direction = "higher better" if metric == "dice_mean" else "lower better"
+            print(f"\n  {metric} ({direction}):")
+            for r in mrows:
+                flag = "*" if r["sig_bh"] else " "
+                print(
+                    f"   {flag} {r['label']:<26} HL={r['hl']:+.5f} "
+                    f"CI=[{r['ci_lo']:+.5f},{r['ci_hi']:+.5f}] p={r['p_wilcoxon']:.3e} q={r['q_bh']:.3e}"
+                )
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(
+            ["ds", "metric", "comparison", "n", "hl", "ci_lo", "ci_hi", "p_wilcoxon", "q_bh", "sig_bh", "method"]
+        )
+        for r in results:
+            w.writerow([
+                r["ds"], r["metric"], r["label"], r["n"],
+                f"{r['hl']:+.6f}", f"{r['ci_lo']:+.6f}", f"{r['ci_hi']:+.6f}",
+                f"{r['p_wilcoxon']:.4e}", f"{r['q_bh']:.4e}", int(r["sig_bh"]), r["method"],
+            ])
+    print(f"\n[SAVED] {out_path}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1].strip())
     sub = p.add_subparsers(dest="mode", required=True)
@@ -404,6 +537,10 @@ def main():
     p3.add_argument("--infer-root", default="results/infer")
     p3.add_argument("--sedm-root", default="results/SEDM/inference")
 
+    p4 = sub.add_parser("phase11", help="Phase 11 mixing-axis screening + Track V baselines (paired Wilcoxon + BH-FDR)")
+    p4.add_argument("--sedm-root", default="results/SEDM/inference")
+    p4.add_argument("--out", default="results/SEDM/summary/phase11_stats.csv")
+
     args = p.parse_args()
     if args.mode == "paper1":
         cmd_paper1(args)
@@ -411,6 +548,8 @@ def main():
         cmd_cross(args)
     elif args.mode == "sedm_vs_paper1":
         cmd_sedm_vs_paper1(args)
+    elif args.mode == "phase11":
+        cmd_phase11(args)
 
 
 if __name__ == "__main__":

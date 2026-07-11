@@ -13,6 +13,8 @@ MODEL_CHOICES = [
     "efficientmorph",
     "mambamorph",
     "vmambamorph",
+    "corrmlp",
+    "sacb",
 ]
 
 
@@ -100,6 +102,13 @@ def add_inference_output_args(p: argparse.ArgumentParser) -> None:
 
 def add_inference_model_config_args(p: argparse.ArgumentParser) -> None:
     group = p.add_argument_group("model configs")
+    group.add_argument(
+        "--img_size",
+        type=int,
+        nargs=3,
+        default=(160, 192, 224),
+        help="Input volume size D H W (needed by models that fix shape at build, e.g. SACB).",
+    )
     group.add_argument(
         "--time_steps",
         type=int,

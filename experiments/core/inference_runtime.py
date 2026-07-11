@@ -76,6 +76,8 @@ def build_infer_model(args, device):
         case "efficientmorph": model = adapter.build(config_key=args.em_config)
         case "mambamorph": model = adapter.build(config_key=args.mamba_config, diffeomorphic=bool(args.mamba_diffeo))
         case "vmambamorph": model = adapter.build(config_key=args.vmamba_config)
+        case "corrmlp": model = adapter.build(img_size=tuple(args.img_size))
+        case "sacb": model = adapter.build(img_size=tuple(args.img_size))
         case _: raise ValueError(f"Unknown model: {args.model}")
     # fmt: on
     return adapter, model.to(device)

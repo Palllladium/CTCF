@@ -319,6 +319,60 @@ class VMambaMorphAdapter(ModelAdapter):
         return flow.float()
 
 
+class CorrMLPAdapter(ModelAdapter):
+    key = "corrmlp"
+
+    def build(
+        self,
+        enc_channels: int = 8,
+        dec_channels: int = 16,
+        img_size: tuple[int, int, int] | None = None,
+    ) -> torch.nn.Module:
+        from models.CorrMLP.wrapper import CorrMLPSolo
+
+        del img_size  # CorrMLP is fully convolutional; input size is not needed at build time
+        return CorrMLPSolo(enc_channels=enc_channels, dec_channels=dec_channels, use_checkpoint=False)
+
+    def forward(
+        self,
+        model: torch.nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        amp: bool = True,
+    ) -> torch.Tensor:
+        use_amp = amp and torch.cuda.is_available()
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            _, flow = model(x, y)
+        return flow.float()
+
+
+class SACBAdapter(ModelAdapter):
+    key = "sacb"
+
+    def build(
+        self,
+        num_k: int = 7,
+        ch_scale: int = 4,
+        img_size: tuple[int, int, int] | None = None,
+    ) -> torch.nn.Module:
+        from models.SACB.wrapper import SACBSolo
+
+        img_size = (160, 192, 224) if img_size is None else tuple(img_size)
+        return SACBSolo(img_size=img_size, num_k=num_k, ch_scale=ch_scale)
+
+    def forward(
+        self,
+        model: torch.nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        amp: bool = True,
+    ) -> torch.Tensor:
+        del amp  # SACB's kmeans_gpu breaks under fp16 autocast; force fp32 (see train_SACB)
+        with torch.autocast(device_type="cuda", enabled=False):
+            _, flow = model(x, y)
+        return flow.float()
+
+
 ADAPTERS: dict[str, type[ModelAdapter]] = {
     "tm-dca": TmDcaAdapter,
     "utsrmorph": UtsrMorphAdapter,
@@ -328,6 +382,8 @@ ADAPTERS: dict[str, type[ModelAdapter]] = {
     "efficientmorph": EfficientMorphAdapter,
     "mambamorph": MambaMorphAdapter,
     "vmambamorph": VMambaMorphAdapter,
+    "corrmlp": CorrMLPAdapter,
+    "sacb": SACBAdapter,
 }
 
 
