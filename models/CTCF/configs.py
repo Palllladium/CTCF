@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import ml_collections
 
 
-def get_CTCF_config():
+def get_ctcf_config() -> ml_collections.ConfigDict:
+    """Paper 1 CTCF Swin-DCA cascade preset (half-res L2/L3, L3 base_ch=64)."""
     c = ml_collections.ConfigDict()
+
     c.if_transskip = True
     c.if_convskip = True
     c.in_chans = 1
@@ -31,80 +35,170 @@ def get_CTCF_config():
     c.reg_head_chan = 16
     c.time_steps = 6
 
-    # Cascade switches
+    c.backbone = "swin-dca"
+
     c.use_level1 = True
     c.level1_base_ch = 32
     c.use_level2 = True
     c.use_level3 = True
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
-    c.prealign_encoder = False
+    c.level3_num_heads = 1
+    c.level3_corr_mode = "none"
 
-    # GEN2 enhancements (architectural)
-    c.l3_iters = 1              # Iterative L3: number of refinement passes (1 = default)
-    c.l3_full_res = False       # Run L3 at full-res (160x192x224) instead of half-res
-    c.learned_upsample = False  # Learned flow upsampling instead of trilinear
-    c.l2_l3_skip = False        # Pass L2 decoder features to L3 as skip connection
-    c.l1_half_res = False       # Run L1 at half-res instead of quarter-res
-    c.l2_full_res = False       # Run L2 at full-res (for lightweight backbones like VxM)
-    c.l1_l2_skip = False        # Pass L1 encoder features to L2 conv-skip path
-    c.l3_compose = False        # Use proper flow composition in L3 instead of addition
-    c.l3_svf = False            # Integrate L3 delta as SVF (scaling-and-squaring) → diffeomorphic
-
-    # GEN2.5 enhancements (capacity)
-    c.l3_cab = False            # Channel attention (CAB) in L3 decoder
-    c.l3_context_blocks = 0     # ResidualContext3D blocks in L3 bottleneck
-    c.l3_gate = False           # RefineGate3D spatial gating on L3 delta
-    c.l3_unshared = False       # Separate L3 weights per iteration (requires l3_iters>1)
-    c.l1_cab = False            # Channel attention (CAB) in L1 decoder
+    c.l3_iters = 1
+    c.l3_unshared = False
+    c.l1_half_res = False
+    c.l2_full_res = False
+    c.l3_full_res = False
+    c.l3_svf = False
 
     return c
 
 
-def get_CTCF_VM_config(*, use_cascade=True):
+def _unified_cascade_base(
+    backbone: str,
+    use_cascade: bool = True,
+    l3_svf: bool = False,
+) -> ml_collections.ConfigDict:
+    """Phase 7+ unified cascade scaffold: full-res L2/L3, L3 base_ch=32, NCC error mode."""
     c = ml_collections.ConfigDict()
+
+    c.backbone = backbone
+    c.img_size = (160, 192, 224)
+    c.time_steps = 0
+
+    c.use_level1 = use_cascade
+    c.level1_base_ch = 32
+    c.use_level2 = True
+    c.use_level3 = use_cascade
+    c.level3_base_ch = 32
+    c.level3_error_mode = "ncc"
+    c.level3_num_heads = 1
+    c.level3_corr_mode = "none"
+
+    c.l3_iters = 1
+    c.l3_unshared = False
+    c.l1_half_res = False
+    c.l2_full_res = True
+    c.l3_full_res = False
+    c.l3_svf = l3_svf
+
+    return c
+
+
+def get_ctcf_vm_legacy_config(use_cascade: bool = True) -> ml_collections.ConfigDict:
+    """Legacy VxM cascade preset (Paper 1 protocol). Kept for P9/historical checkpoints."""
+    c = ml_collections.ConfigDict()
+
     c.backbone = "vxm"
     c.img_size = (160, 192, 224)
-    c.time_steps = 0  # unused by VxmDenseHalf (kept for adapter compatibility)
+    c.time_steps = 0
 
-    # VoxelMorph L2 params (standard VxmDense-2 diffeomorphic)
     c.vxm = ml_collections.ConfigDict()
     c.vxm.enc_nf = [16, 32, 32, 32]
     c.vxm.dec_nf = [32, 32, 32, 32, 32, 16, 16]
     c.vxm.int_steps = 7
 
-    # Cascade switches
     c.use_level1 = use_cascade
     c.level1_base_ch = 32
     c.use_level2 = True
     c.use_level3 = use_cascade
     c.level3_base_ch = 64
     c.level3_error_mode = "ncc"
-    c.prealign_encoder = False
+    c.level3_num_heads = 1
+    c.level3_corr_mode = "none"
 
-    # GEN2 enhancements (architectural)
     c.l3_iters = 1
-    c.l3_full_res = False
-    c.learned_upsample = False
-    c.l2_l3_skip = False
+    c.l3_unshared = False
     c.l1_half_res = False
     c.l2_full_res = False
-    c.l1_l2_skip = False
-    c.l3_compose = False
+    c.l3_full_res = False
     c.l3_svf = False
-
-    # GEN2.5 enhancements (capacity)
-    c.l3_cab = False
-    c.l3_context_blocks = 0
-    c.l3_gate = False
-    c.l3_unshared = False
-    c.l1_cab = False
 
     return c
 
 
+def get_ctcf_vm_unified_config(use_cascade: bool = True) -> ml_collections.ConfigDict:
+    """VxM cascade preset on the unified protocol."""
+    c = _unified_cascade_base(
+        backbone="vxm",
+        use_cascade=use_cascade,
+        l3_svf=False,
+    )
+
+    c.vxm = ml_collections.ConfigDict()
+    c.vxm.enc_nf = [16, 32, 32, 32]
+    c.vxm.dec_nf = [32, 32, 32, 32, 32, 16, 16]
+    c.vxm.int_steps = 7
+
+    return c
+
+
+def get_ctcf_lku_config(
+    config_key: str = "LKU-8",
+    use_cascade: bool = True,
+) -> ml_collections.ConfigDict:
+    """LKU-Net cascade preset. `config_key` selects the LKU width variant."""
+    c = _unified_cascade_base(
+        backbone="lku",
+        use_cascade=use_cascade,
+        l3_svf=False,
+    )
+    c.lku_config = config_key
+    return c
+
+
+def get_ctcf_mamba_config(use_cascade: bool = True) -> ml_collections.ConfigDict:
+    """MambaMorph cascade preset. L3-SVF on by default."""
+    c = _unified_cascade_base(
+        backbone="mamba",
+        use_cascade=use_cascade,
+        l3_svf=True,
+    )
+    c.mamba_config = "MambaMorph"
+    return c
+
+
+def get_ctcf_vmamba_config(use_cascade: bool = True) -> ml_collections.ConfigDict:
+    """VMambaMorph cascade preset. L3-SVF on by default."""
+    c = _unified_cascade_base(
+        backbone="vmamba",
+        use_cascade=use_cascade,
+        l3_svf=True,
+    )
+    c.vmamba_config = "VMambaMorph"
+    return c
+
+
+def get_ctcf_effm_config(
+    config_key: str = "EfficientMorph_2x3_2_hires",
+    use_cascade: bool = True,
+) -> ml_collections.ConfigDict:
+    """EfficientMorph cascade preset."""
+    c = _unified_cascade_base(
+        backbone="effm",
+        use_cascade=use_cascade,
+        l3_svf=False,
+    )
+    c.effm_config = config_key
+    return c
+
+
 CONFIGS = {
-    "CTCF-CascadeA": get_CTCF_config(),
-    "CTCF-CascadeA-VM": get_CTCF_VM_config(use_cascade=True),
-    "CTCF-VM-solo": get_CTCF_VM_config(use_cascade=False),
+    "CTCF-CascadeA": get_ctcf_config(),
+    "CTCF-CascadeA-VM": get_ctcf_vm_legacy_config(use_cascade=True),
+    "CTCF-VM-solo": get_ctcf_vm_legacy_config(use_cascade=False),
+    "CTCF-CascadeA-VM-Unified": get_ctcf_vm_unified_config(use_cascade=True),
+    "CTCF-VM-Unified-solo": get_ctcf_vm_unified_config(use_cascade=False),
+    "CTCF-CascadeA-LKU8": get_ctcf_lku_config("LKU-8", use_cascade=True),
+    "CTCF-LKU8-solo": get_ctcf_lku_config("LKU-8", use_cascade=False),
+    "CTCF-CascadeA-LKU32": get_ctcf_lku_config("LKU-32", use_cascade=True),
+    "CTCF-LKU32-solo": get_ctcf_lku_config("LKU-32", use_cascade=False),
+    "CTCF-CascadeA-Mamba": get_ctcf_mamba_config(use_cascade=True),
+    "CTCF-Mamba-solo": get_ctcf_mamba_config(use_cascade=False),
+    "CTCF-CascadeA-VMamba": get_ctcf_vmamba_config(use_cascade=True),
+    "CTCF-VMamba-solo": get_ctcf_vmamba_config(use_cascade=False),
+    "CTCF-CascadeA-EFFM": get_ctcf_effm_config("EfficientMorph_2x3_2_hires", use_cascade=True),
+    "CTCF-EFFM-solo": get_ctcf_effm_config("EfficientMorph_2x3_2_hires", use_cascade=False),
 }

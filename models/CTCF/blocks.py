@@ -1,22 +1,35 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class CA(nn.Module):
-    """Channel Attention (RCAN-style) for 3D tensors [B,C,D,H,W]."""
-    def __init__(self, num_feat: int, squeeze_factor: int = 16):
+    """Channel attention block for 3D feature maps."""
+
+    def __init__(
+        self,
+        num_feat: int,
+        squeeze_factor: int = 16,
+    ):
         super().__init__()
         hidden = max(1, num_feat // squeeze_factor)
         self.net = nn.Sequential(
-            nn.AdaptiveAvgPool3d(1),
-            nn.Conv3d(num_feat, hidden, kernel_size=1, bias=True),
+            nn.AdaptiveAvgPool3d(output_size=1),
+            nn.Conv3d(
+                in_channels=num_feat,
+                out_channels=hidden,
+                kernel_size=1,
+                bias=True,
+            ),
             nn.ReLU(inplace=True),
-            nn.Conv3d(hidden, num_feat, kernel_size=1, bias=True),
+            nn.Conv3d(
+                in_channels=hidden,
+                out_channels=num_feat,
+                kernel_size=1,
+                bias=True,
+            ),
             nn.Sigmoid(),
         )
 
@@ -25,15 +38,33 @@ class CA(nn.Module):
 
 
 class CAB(nn.Module):
-    """Conv3d -> GELU -> Conv3d -> CA."""
-    def __init__(self, num_feat: int, compress_ratio: int = 3, squeeze_factor: int = 30):
+    """Channel attention block with residual fusion: Conv3d -> GELU -> Conv3d -> CA."""
+
+    def __init__(
+        self,
+        num_feat: int,
+        compress_ratio: int = 3,
+        squeeze_factor: int = 30,
+    ):
         super().__init__()
         hidden = max(1, num_feat // compress_ratio)
         self.body = nn.Sequential(
-            nn.Conv3d(num_feat, hidden, kernel_size=3, padding=1, bias=True),
+            nn.Conv3d(
+                in_channels=num_feat,
+                out_channels=hidden,
+                kernel_size=3,
+                padding=1,
+                bias=True,
+            ),
             nn.GELU(),
-            nn.Conv3d(hidden, num_feat, kernel_size=3, padding=1, bias=True),
-            CA(num_feat, squeeze_factor=squeeze_factor),
+            nn.Conv3d(
+                in_channels=hidden,
+                out_channels=num_feat,
+                kernel_size=3,
+                padding=1,
+                bias=True,
+            ),
+            CA(num_feat=num_feat, squeeze_factor=squeeze_factor),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -41,13 +72,28 @@ class CAB(nn.Module):
 
 
 class Conv3dAct(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, k: int = 3, act: str = "gelu"):
+    """Conv3d followed by an activation (GELU or LeakyReLU)."""
+
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        k: int = 3,
+        act: str = "gelu",
+    ):
         super().__init__()
-        self.conv = nn.Conv3d(in_ch, out_ch, kernel_size=k, padding=k // 2, bias=True)
+        self.conv = nn.Conv3d(
+            in_channels=in_ch,
+            out_channels=out_ch,
+            kernel_size=k,
+            padding=k // 2,
+            bias=True,
+        )
+
         if act == "gelu":
             self.act = nn.GELU()
         elif act == "lrelu":
-            self.act = nn.LeakyReLU(0.1, inplace=True)
+            self.act = nn.LeakyReLU(negative_slope=0.1, inplace=True)
         else:
             raise ValueError(f"Unknown act: {act}")
 
@@ -56,50 +102,110 @@ class Conv3dAct(nn.Module):
 
 
 class ResidualContext3D(nn.Module):
-    """Light residual context block for coarse flow backbone."""
-    def __init__(self, channels: int, dilation: int = 1, scale: float = 0.1):
+    """Residual block with a (possibly dilated) first conv. Second conv is zero-initialised."""
+
+    def __init__(
+        self,
+        channels: int,
+        dilation: int = 1,
+        scale: float = 0.1,
+    ):
         super().__init__()
-        self.scale = float(scale)
-        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=int(dilation), dilation=int(dilation), bias=False)
-        self.in1 = nn.InstanceNorm3d(channels, affine=True)
-        self.act1 = nn.LeakyReLU(0.1, inplace=True)
-        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=False)
-        self.in2 = nn.InstanceNorm3d(channels, affine=True)
-        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+        self.scale = scale
+
+        self.conv1 = nn.Conv3d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            padding=dilation,
+            dilation=dilation,
+            bias=False,
+        )
+        self.in1 = nn.InstanceNorm3d(num_features=channels, affine=True)
+        self.act1 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+
+        self.conv2 = nn.Conv3d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            padding=1,
+            bias=False,
+        )
+        self.in2 = nn.InstanceNorm3d(num_features=channels, affine=True)
+        self.act2 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+
         nn.init.zeros_(self.conv2.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.conv1(x)
         y = self.in1(y)
         y = self.act1(y)
+
         y = self.conv2(y)
         y = self.in2(y)
         y = self.act2(y)
+
         return x + self.scale * y
 
 
-class RefineGate3D(nn.Module):
-    """Spatial gate for level-3 residual flow refinement."""
-    def __init__(self, in_ch: int = 4, base_ch: int = 8, init_bias: float = -1.2):
-        super().__init__()
-        c = int(base_ch)
-        self.body = nn.Sequential(
-            nn.Conv3d(int(in_ch), c, kernel_size=3, padding=1, bias=False),
-            nn.InstanceNorm3d(c, affine=True),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv3d(c, c, kernel_size=3, padding=1, bias=False),
-            nn.InstanceNorm3d(c, affine=True),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv3d(c, 1, kernel_size=1, bias=True),
-        )
-        nn.init.zeros_(self.body[-1].weight)
-        nn.init.constant_(self.body[-1].bias, float(init_bias))
+class CostVolume3D(nn.Module):
+    """Explicit correspondence features between two single-channel volumes (moving-warped
+    and fixed), concatenated into the L3 refiner input. Gives the cascade an explicit
+    feature-matching signal that the pluggable L2 backbone never computes.
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.body(x))
+    Modes (extra channels in parentheses, D3 = (2*max_disp+1)^3 = 27 for max_disp=1):
+      - "hadamard"  (2):  EOIR-style symmetric/antisymmetric pair [a + b, a - b]; no params.
+      - "corr"      (D3): local correlation of raw intensities over a (2*max_disp+1)^3
+                          displacement window, C(p, d) = a(p) * b(p + d); no params.
+      - "corr_feat" (D3): same correlation on a shared shallow feature embedding,
+                          C(p, d) = mean_c f_a_c(p) * f_b_c(p + d); adds one Conv3d.
+    """
+
+    _MODES = ("hadamard", "corr", "corr_feat")
+
+    def __init__(self, mode: str, embed_ch: int = 8, max_disp: int = 1):
+        super().__init__()
+        if mode not in self._MODES:
+            raise ValueError(f"Unsupported cost-volume mode: {mode}")
+        self.mode = mode
+        self.max_disp = max_disp
+        self.extra_channels = 2 if mode == "hadamard" else (2 * max_disp + 1) ** 3
+
+        self.embed = None
+        if mode == "corr_feat":
+            self.embed = nn.Conv3d(
+                in_channels=1,
+                out_channels=embed_ch,
+                kernel_size=3,
+                padding=1,
+                bias=True,
+            )
+
+    def _correlate(self, fa: torch.Tensor, fb: torch.Tensor) -> torch.Tensor:
+        # C(p, d) = mean_c f_a_c(p) * f_b_c(p + d), d in [-max_disp, max_disp]^3.
+        d = self.max_disp
+        fb = F.pad(fb, (d, d, d, d, d, d))
+        _, _, dd, hh, ww = fa.shape
+
+        cost = []
+        span = range(2 * d + 1)
+        for dz in span:
+            for dy in span:
+                for dx in span:
+                    shifted = fb[:, :, dz : dz + dd, dy : dy + hh, dx : dx + ww]
+                    cost.append((fa * shifted).mean(dim=1, keepdim=True))
+        return torch.cat(cost, dim=1)
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        if self.mode == "hadamard":
+            return torch.cat([a + b, a - b], dim=1)
+        if self.mode == "corr":
+            return self._correlate(a, b)
+        return self._correlate(self.embed(a), self.embed(b))
 
 
 def _match_size_3d(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Center-pad or center-crop the last three dims of `x` to match `ref`."""
     if x.dim() != 5 or ref.dim() != 5:
         raise ValueError(f"_match_size_3d expects 5D tensors, got x={x.shape}, ref={ref.shape}")
 
@@ -117,86 +223,65 @@ def _match_size_3d(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     sd = (xd - rd) // 2 if xd > rd else 0
     sh = (xh - rh) // 2 if xh > rh else 0
     sw = (xw - rw) // 2 if xw > rw else 0
-    return x[..., sd:sd + rd, sh:sh + rh, sw:sw + rw]
+    return x[..., sd : sd + rd, sh : sh + rh, sw : sw + rw]
 
 
 class SRUpBlock3D(nn.Module):
-    """Safe SR-style x2 upsampling block with optional skip connection."""
-    def __init__(self, in_channels: int, out_channels: int, skip_channels: int = 0):
-        super().__init__()
-        self.skip_channels = int(skip_channels)
-        self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
-        self.conv1 = Conv3dAct(in_channels + self.skip_channels, out_channels, k=3, act="gelu")
-        self.conv2 = Conv3dAct(out_channels, out_channels, k=3, act="gelu")
+    """Trilinear x2 upsample, optional skip concat, two Conv3dAct refinement layers."""
 
-    def forward(self, x: torch.Tensor, skip: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        skip_channels: int = 0,
+    ):
+        super().__init__()
+        self.skip_channels = skip_channels
+        self.up = nn.Upsample(
+            scale_factor=2,
+            mode="trilinear",
+            align_corners=False,
+        )
+        self.conv1 = Conv3dAct(
+            in_ch=in_channels + self.skip_channels,
+            out_ch=out_channels,
+            k=3,
+            act="gelu",
+        )
+        self.conv2 = Conv3dAct(
+            in_ch=out_channels,
+            out_ch=out_channels,
+            k=3,
+            act="gelu",
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        skip: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         x = self.up(x)
+
         if self.skip_channels > 0:
             if skip is None:
                 raise ValueError("SRUpBlock3D expects skip tensor but got None.")
             x = _match_size_3d(x, skip)
             x = torch.cat([x, skip], dim=1)
+
         return self.conv2(self.conv1(x))
 
 
+def resize_3d(x: torch.Tensor, scale_factor: float) -> torch.Tensor:
+    """Trilinear (re)sampling of a 5D tensor by `scale_factor`."""
+    return F.interpolate(x, scale_factor=scale_factor, mode="trilinear", align_corners=False)
+
+
 def upsample_flow(flow: torch.Tensor, scale_factor: float = 2.0) -> torch.Tensor:
+    """Trilinear upsample of a displacement field with magnitude rescaling.
+
+    Flow values are in voxel units, so enlarging the grid by `scale_factor` requires
+    multiplying every displacement vector by the same factor.
+    """
     if scale_factor == 1:
         return flow
-    flow_up = F.interpolate(flow, scale_factor=scale_factor, mode="trilinear", align_corners=False)
-    return flow_up * float(scale_factor)
-
-
-class LearnedFlowUpsample3D(nn.Module):
-    """Convex upsampling for 3D flow fields (RAFT-style).
-
-    For each low-res voxel, predicts convex combination weights over a
-    3x3x3 neighborhood for each of its 2x2x2 = 8 high-res sub-voxels.
-    This learns sub-voxel interpolation kernels sharper than trilinear.
-    """
-    def __init__(self, scale: int = 2, hidden_ch: int = 64):
-        super().__init__()
-        self.scale = int(scale)
-        self.k = 3
-        self.k3 = self.k ** 3   # 27 neighbors
-        s3 = self.scale ** 3    # 8 sub-voxels
-        self.mask_net = nn.Sequential(
-            nn.Conv3d(3, hidden_ch, 3, padding=1, bias=False),
-            nn.InstanceNorm3d(hidden_ch, affine=True),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv3d(hidden_ch, s3 * self.k3, 1, bias=True),
-        )
-
-    def forward(self, flow: torch.Tensor) -> torch.Tensor:
-        B, C, D, H, W = flow.shape
-        s = self.scale
-        k = self.k
-
-        # Predict per-sub-voxel weights: (B, s^3*k^3, D, H, W)
-        mask = self.mask_net(flow)
-        mask = mask.view(B, s ** 3, self.k3, D, H, W)
-        mask = torch.softmax(mask, dim=2)  # convex combination over neighbors
-
-        # Extract 3x3x3 neighborhoods: (B, C, k^3, D, H, W)
-        p = k // 2
-        flow_pad = F.pad(flow, (p, p, p, p, p, p), mode="replicate")
-        neighbors = []
-        for dz in range(k):
-            for dy in range(k):
-                for dx in range(k):
-                    neighbors.append(flow_pad[:, :, dz:dz + D, dy:dy + H, dx:dx + W])
-        neighbors = torch.stack(neighbors, dim=2)
-        neighbors = neighbors * float(s)  # scale flow values for upsampling
-
-        # Weighted sum per sub-voxel (loop over 8 for memory efficiency)
-        parts = []
-        for i in range(s ** 3):
-            w = mask[:, i: i + 1]           # (B, 1, k^3, D, H, W)
-            parts.append((w * neighbors).sum(dim=2))  # (B, C, D, H, W)
-        flow_up = torch.stack(parts, dim=2)  # (B, C, s^3, D, H, W)
-
-        # Reshape s^3 sub-voxels back to spatial: (B, C, s*D, s*H, s*W)
-        flow_up = flow_up.view(B, C, s, s, s, D, H, W)
-        flow_up = flow_up.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
-        flow_up = flow_up.view(B, C, s * D, s * H, s * W)
-
-        return flow_up
+    return resize_3d(flow, scale_factor) * scale_factor

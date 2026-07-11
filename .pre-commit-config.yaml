@@ -1,0 +1,11 @@
+# Enforce the project code style (ruff) on staged files before each commit.
+# One-time setup per clone:
+#   pip install pre-commit && pre-commit install
+# Ruff reads its config (rules, per-file ignores, excludes) from pyproject.toml.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

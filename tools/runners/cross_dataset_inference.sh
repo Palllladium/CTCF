@@ -10,8 +10,8 @@
 #   results/infer/cross_dataset_summary.csv  (aggregated final table)
 #
 # Usage:
-#   bash tools/cross_dataset_eval.sh --paths-profile 3 --gpu 0
-#   bash tools/cross_dataset_eval.sh --paths-profile 2 --gpu 0 --dry-run
+#   bash tools/runners/cross_dataset_inference.sh --paths-profile 3 --gpu 0
+#   bash tools/runners/cross_dataset_inference.sh --paths-profile 2 --gpu 0 --dry-run
 #
 # Checkpoint resolution:
 #   1) Each experiment is associated with a *folder* under $RESULTS_ROOT.
@@ -19,8 +19,9 @@
 #   3) Either the folder name (EXP_*) or the full checkpoint path (CKPT_*) may
 #      be overridden via env vars; CKPT_* wins when both are set.
 #
-# Defaults are set to the advisor's layout:
-#   RESULTS_ROOT=/home/roman/P/CTCF/results
+# Defaults assume checkpoints under ./results/<EXP_*>/; override RESULTS_ROOT and any
+# EXP_* name via env vars or flags:
+#   RESULTS_ROOT=results
 #   EXP_CTCF_OASIS=CTCF_UPD_OASIS_E500
 #   EXP_CTCF_IXI=CTCF_IXI_TUNED
 #   EXP_TMDCA_OASIS=TM_DCA_unsup_OASIS
@@ -30,12 +31,12 @@
 #
 set -euo pipefail
 
-# ── Defaults ─────────────────────────────────────────────────────────
+# Defaults
 PATHS_PROFILE=1
 GPU=0
 DRY_RUN=0
 SKIP_EXISTING=0
-RESULTS_ROOT_DEFAULT="/home/roman/P/CTCF/results"
+RESULTS_ROOT_DEFAULT="results"
 PREFER_DEFAULT="best"   # best | last
 
 while [[ $# -gt 0 ]]; do
@@ -57,7 +58,7 @@ cd "$WORK_DIR"
 RESULTS_ROOT="${RESULTS_ROOT:-$RESULTS_ROOT_DEFAULT}"
 PREFER="${PREFER:-$PREFER_DEFAULT}"
 
-# Experiment folder defaults match advisor's layout on /home/roman/P/CTCF/results/
+# Experiment folder defaults (override any via the env vars below).
 EXP_CTCF_OASIS="${EXP_CTCF_OASIS:-CTCF_UPD_OASIS_E500}"
 EXP_CTCF_IXI="${EXP_CTCF_IXI:-CTCF_IXI_TUNED}"
 EXP_TMDCA_OASIS="${EXP_TMDCA_OASIS:-TM_DCA_unsup_OASIS}"
@@ -65,10 +66,7 @@ EXP_TMDCA_IXI="${EXP_TMDCA_IXI:-TM_DCA_IXI}"
 EXP_UTSR_OASIS="${EXP_UTSR_OASIS:-UTSRMorph_OASIS}"
 EXP_UTSR_IXI="${EXP_UTSR_IXI:-UTSR_IXI_WREG4_E500}"
 
-# ── Checkpoint resolver ──────────────────────────────────────────────
-# Picks the first existing candidate inside an experiment folder.
-# Search order depends on $PREFER: either best-first or last-first.
-# Looks in the folder root AND in ./ckpt/ (the latter matches train_runtime.py layout).
+
 resolve_ckpt() {
   local folder="$1"
   local -a candidates
@@ -90,7 +88,7 @@ resolve_ckpt() {
   return 1
 }
 
-# Either user supplied an explicit CKPT_* path, or resolve from the folder.
+
 CKPT_CTCF_OASIS="${CKPT_CTCF_OASIS:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_CTCF_OASIS" || true)}"
 CKPT_CTCF_IXI="${CKPT_CTCF_IXI:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_CTCF_IXI" || true)}"
 CKPT_TMDCA_OASIS="${CKPT_TMDCA_OASIS:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_TMDCA_OASIS" || true)}"
@@ -98,31 +96,25 @@ CKPT_TMDCA_IXI="${CKPT_TMDCA_IXI:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_TMDCA_IXI" 
 CKPT_UTSR_OASIS="${CKPT_UTSR_OASIS:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_UTSR_OASIS" || true)}"
 CKPT_UTSR_IXI="${CKPT_UTSR_IXI:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_UTSR_IXI" || true)}"
 
-# ── Experiment matrix ────────────────────────────────────────────────
 # Fields: model | ckpt_path | ckpt_ds | eval_ds | config_key | extra_flags
 EXPERIMENTS=(
-  # CTCF: one config covers both datasets
   "ctcf|$CKPT_CTCF_OASIS|OASIS|OASIS|CTCF-CascadeA|"
   "ctcf|$CKPT_CTCF_OASIS|OASIS|IXI|CTCF-CascadeA|--use_test"
   "ctcf|$CKPT_CTCF_IXI|IXI|IXI|CTCF-CascadeA|--use_test"
   "ctcf|$CKPT_CTCF_IXI|IXI|OASIS|CTCF-CascadeA|"
 
-  # TM-DCA: single config
   "tm-dca|$CKPT_TMDCA_OASIS|OASIS|OASIS|TransMorph-3-LVL|"
   "tm-dca|$CKPT_TMDCA_OASIS|OASIS|IXI|TransMorph-3-LVL|--use_test"
   "tm-dca|$CKPT_TMDCA_IXI|IXI|IXI|TransMorph-3-LVL|--use_test"
   "tm-dca|$CKPT_TMDCA_IXI|IXI|OASIS|TransMorph-3-LVL|"
 
-  # UTSRMorph: config MUST match the checkpoint architecture (Large vs IXI-Large differ in embed dim)
   "utsrmorph|$CKPT_UTSR_OASIS|OASIS|OASIS|UTSRMorph-Large|"
   "utsrmorph|$CKPT_UTSR_OASIS|OASIS|IXI|UTSRMorph-Large|--use_test"
   "utsrmorph|$CKPT_UTSR_IXI|IXI|IXI|UTSRMorph-IXI-Large|--use_test"
   "utsrmorph|$CKPT_UTSR_IXI|IXI|OASIS|UTSRMorph-IXI-Large|"
 )
 
-# ── Header ───────────────────────────────────────────────────────────
 TOTAL=${#EXPERIMENTS[@]}
-echo "=========================================================="
 echo "  Cross-dataset zero-shot evaluation"
 echo "  paths profile : $PATHS_PROFILE"
 echo "  gpu           : $GPU"
@@ -130,7 +122,6 @@ echo "  results root  : $RESULTS_ROOT"
 echo "  prefer ckpt   : $PREFER"
 echo "  experiments   : $TOTAL"
 echo "  dry-run       : $DRY_RUN"
-echo "=========================================================="
 
 # Validate that all required ckpt files exist (unless dry-run).
 # Report each of the 6 unique (model, dataset) pairs once, even if resolution failed.
@@ -164,12 +155,12 @@ if [ "$MISSING" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   echo "         UTSR OASIS  -> \$EXP_UTSR_OASIS   (default: $EXP_UTSR_OASIS)"
   echo "         UTSR IXI    -> \$EXP_UTSR_IXI     (default: $EXP_UTSR_IXI)"
   echo "       Override any of them via env vars, e.g.:"
-  echo "         EXP_TMDCA_OASIS=TM_DCA_OASIS_actual_name bash tools/cross_dataset_eval.sh ..."
+  echo "         EXP_TMDCA_OASIS=TM_DCA_OASIS_actual_name bash tools/runners/cross_dataset_inference.sh ..."
   echo "       Or pass a full path via CKPT_TMDCA_OASIS=/abs/path/best.pth"
   exit 1
 fi
 
-# ── Run loop ─────────────────────────────────────────────────────────
+# Run loop
 PASSED=0; FAILED=0; SKIPPED=0
 
 for i in "${!EXPERIMENTS[@]}"; do
@@ -189,7 +180,6 @@ for i in "${!EXPERIMENTS[@]}"; do
   TAG="[${CKPT_DS}->${EVAL_DS}]"
 
   echo ""
-  echo "----------------------------------------------------------"
   echo "[$IDX/$TOTAL] $MODEL $TAG"
   echo "  ckpt   : $CKPT_PATH"
   echo "  config : $CONFIG_KEY"
@@ -242,11 +232,8 @@ for i in "${!EXPERIMENTS[@]}"; do
   fi
 done
 
-# ── Aggregate ────────────────────────────────────────────────────────
 echo ""
-echo "=========================================================="
 echo "  Done. Passed: $PASSED, Failed: $FAILED, Skipped: $SKIPPED"
-echo "=========================================================="
 
 if [ "$DRY_RUN" -eq 0 ] && [ "$PASSED" -gt 0 ]; then
   echo ""

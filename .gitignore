@@ -2,6 +2,15 @@
 __pycache__/
 *.py[cod]
 *.pyd
+*.egg-info/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# OS junk
+.DS_Store
 
 # Virtual envs
 .venv/
@@ -17,6 +26,7 @@ Thumbs.db
 # Local project docs
 CLAUDE.md
 tools/paper/
+tools/archive/
 paper/
 /main.tex
 

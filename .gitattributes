@@ -1,1 +1,10 @@
+# Normalize line endings to LF across the repo.
+* text=auto eol=lf
+
+# Shell scripts must stay LF.
 *.sh text eol=lf
+
+# Binary assets — never touch line endings.
+*.png binary
+*.jpg binary
+*.pdf binary

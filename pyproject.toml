@@ -1,0 +1,63 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    "logs",
+    "results",
+    "tools/archive",
+    "tools/paper",
+    # verbatim upstream baseline code
+    "models/CorrMLP/networks.py",
+    "models/SACB/SACB1.py",
+    "models/SACB/model.py",
+    "models/SACB/nn_util.py",
+    "models/SACB/utils.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "RUF",
+    "N",
+]
+ignore = [
+    "E501",   # handled by the formatter
+    "E701",   # allow short inline guards
+    "B008",   # allow selected PyTorch argparse/config default patterns
+    "N812",   # torch.nn.functional as F
+    "N803",   # allow math-style names such as K, N
+    "N806",   # allow UNet/cascade names such as e1, d2, phi_l1
+    "SIM108", # keep explicit if/else blocks when clearer
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"experiments/**/*.py" = ["E402"]
+"experiments/train_*.py" = ["N999"]
+"tools/analysis/aggregate_results.py" = ["RUF001", "RUF002", "RUF003"]
+
+# Upstream or vendored model code: format it, but avoid broad style churn.
+"models/TransMorph_DCA/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/UTSRMorph/**/*.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/EfficientMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/LKUNet/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/MambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VMambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VoxelMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+
+# Config registries are mostly upstream-derived hyperparameter data.
+"models/EfficientMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/LKUNet/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/MambaMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VMambaMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/VoxelMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["models", "experiments", "utils", "datasets", "tools"]
+combine-as-imports = true

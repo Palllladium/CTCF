@@ -1,0 +1,36 @@
+exp_name,ds,group,family,backbone,svf,params_m,note
+P9_CASC_VXM_SVF_OASIS,OASIS,cascade,classical CNN,VoxelMorph,ON,9.240905,
+SEDM_CASC_VXM_NOSVF_OASIS,OASIS,cascade,classical CNN,VoxelMorph,OFF,9.240905,
+P8_CASC_LKU8_FIXSCHED_OASIS,OASIS,cascade,large-kernel CNN,LKU-8,OFF,6.691596,P8 fixsched
+P9_CASC_LKU8_SVF_OASIS,OASIS,cascade,large-kernel CNN,LKU-8,ON,6.691596,
+P8_CASC_LKU32_SVF_OASIS,OASIS,cascade,large-kernel CNN,LKU-32,ON,37.952796,
+P7_CASC_MAMBA_SVF_OASIS,OASIS,cascade,state-space,MambaMorph,ON,11.910713,
+P7_CASC_VMAMBA_SVF_OASIS,OASIS,cascade,state-space cross-scan,VMambaMorph,ON,13.957625,
+P9_CASC_VXM_SVF_IXI,IXI,cascade,classical CNN,VoxelMorph,ON,9.240905,
+SEDM_CASC_VXM_NOSVF_IXI,IXI,cascade,classical CNN,VoxelMorph,OFF,9.240905,
+P9_CASC_LKU8_SVF_IXI,IXI,cascade,large-kernel CNN,LKU-8,ON,6.691596,
+SEDM_CASC_LKU8_NOSVF_IXI,IXI,cascade,large-kernel CNN,LKU-8,OFF,6.691596,
+P8_CASC_LKU32_SVF_IXI,IXI,cascade,large-kernel CNN,LKU-32,ON,37.952796,
+P8_CASC_MAMBA_SVF_IXI,IXI,cascade,state-space,MambaMorph,ON,11.910713,
+P9_CASC_VMAMBA_SVF_IXI,IXI,cascade,state-space cross-scan,VMambaMorph,ON,13.957625,
+P9_CTRL_VXM_L2ONLY_OASIS,OASIS,L2-only,classical CNN,VoxelMorph,,0.396451,
+P7_CTRL_LKU8_L2ONLY_OASIS,OASIS,L2-only,large-kernel CNN,LKU-8,,2.086342,
+P7_CTRL_LKU32_L2ONLY_OASIS,OASIS,L2-only,large-kernel CNN,LKU-32,,33.347542,
+P7_CTRL_MAMBA_L2ONLY_OASIS,OASIS,L2-only,state-space,MambaMorph,,7.305459,
+P7_CTRL_VMAMBA_L2ONLY_OASIS,OASIS,L2-only,state-space cross-scan,VMambaMorph,,9.352371,
+P9_CTRL_VXM_L2ONLY_IXI,IXI,L2-only,classical CNN,VoxelMorph,,0.396451,
+P9_CTRL_LKU8_L2ONLY_IXI,IXI,L2-only,large-kernel CNN,LKU-8,,2.086342,
+P9_CTRL_LKU32_L2ONLY_IXI,IXI,L2-only,large-kernel CNN,LKU-32,,33.347542,
+P9_CTRL_MAMBA_L2ONLY_IXI,IXI,L2-only,state-space,MambaMorph,,7.305459,
+P9_CTRL_VMAMBA_L2ONLY_IXI,IXI,L2-only,state-space cross-scan,VMambaMorph,,9.352371,
+SEDM_CASC_MAMBA_NOSVF_OASIS,OASIS,cascade,state-space,MambaMorph,OFF,11.910713,
+SEDM_CASC_MAMBA_NOSVF_IXI,IXI,cascade,state-space,MambaMorph,OFF,11.910713,
+P10_LONGRUN_VXM_UNIFIED_SVF_OASIS,OASIS,cascade,classical CNN,VoxelMorph,ON,9.240905,500ep Unified
+P10_LONGRUN_VXM_UNIFIED_SVF_IXI,IXI,cascade,classical CNN,VoxelMorph,ON,9.240905,500ep Unified
+P10_LONGRUN_LKU8_SVF_OASIS,OASIS,cascade,large-kernel CNN,LKU-8,ON,6.691596,500ep
+P10_LONGRUN_LKU8_SVF_IXI,IXI,cascade,large-kernel CNN,LKU-8,ON,6.691596,500ep
+P10_LONGRUN_MAMBA_SVF_OASIS,OASIS,cascade,state-space,MambaMorph,ON,11.910713,500ep
+P10_LONGRUN_MAMBA_SVF_IXI,IXI,cascade,state-space,MambaMorph,ON,11.910713,500ep
+P10_LONGRUN_MAMBA_NOSVF_OASIS,OASIS,cascade,state-space,MambaMorph,OFF,11.910713,500ep
+P10_CROSS_MAMBA_SVF_OASIS_TO_IXI,IXI,cross-dataset,state-space,MambaMorph,ON,11.910713,"OASIS→IXI, 500ep ckpt"
+P10_CROSS_MAMBA_SVF_IXI_TO_OASIS,OASIS,cross-dataset,state-space,MambaMorph,ON,11.910713,"IXI→OASIS, 500ep ckpt"
