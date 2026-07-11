@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from experiments.core.cli_ctcf import add_ctcf_override_args
+from utils.tto import TTO_MODES, TTO_SCHEDULES
 
 MODEL_CHOICES = [
     "tm-dca",
@@ -22,7 +23,82 @@ def add_inference_args(p: argparse.ArgumentParser) -> None:
     add_inference_run_args(p)
     add_inference_output_args(p)
     add_inference_model_config_args(p)
+    add_tto_args(p)
     add_ctcf_override_args(p, prefix="ctcf_")
+
+
+def add_tto_args(p: argparse.ArgumentParser) -> None:
+    group = p.add_argument_group("test-time optimisation")
+    group.add_argument(
+        "--tto_mode",
+        type=str,
+        choices=list(TTO_MODES),
+        default="none",
+        help="Per-pair field refinement: none | disp (dense residual) | svf (diffeomorphic) | inr.",
+    )
+    group.add_argument(
+        "--tto_steps",
+        type=int,
+        default=200,
+        help="Adam steps per pair.",
+    )
+    group.add_argument(
+        "--tto_lr",
+        type=float,
+        default=0.01,
+        help="Adam learning rate (voxel units).",
+    )
+    group.add_argument(
+        "--tto_w_reg",
+        type=float,
+        default=1.0,
+        help="Diffusion weight; keep at the training value so losses stay comparable.",
+    )
+    group.add_argument(
+        "--tto_w_jac",
+        type=float,
+        default=0.005,
+        help="Negative-Jacobian penalty weight.",
+    )
+    group.add_argument(
+        "--tto_jac_eps",
+        type=float,
+        default=0.0,
+        help="Overcorrection margin: penalise detJ < eps, not just detJ < 0.",
+    )
+    group.add_argument(
+        "--tto_lr_schedule",
+        type=str,
+        choices=list(TTO_SCHEDULES),
+        default="cosine",
+        help="LR schedule over the TTO steps.",
+    )
+    group.add_argument(
+        "--tto_mask",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Restrict the TTO loss to the brain (KAN-IDIR does this). Changes the loss scale.",
+    )
+    group.add_argument(
+        "--tto_kan_degree",
+        type=int,
+        default=28,
+        help="Max Chebyshev degree for --tto_mode kan.",
+    )
+    group.add_argument(
+        "--tto_kan_k",
+        type=int,
+        default=12,
+        help="Active random degrees per layer for --tto_mode randkan (drawn from 1..84).",
+    )
+    group.add_argument(
+        "--tto_trace",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Also score the field at these intermediate steps (one run yields the whole curve).",
+    )
 
 
 def add_inference_run_args(p: argparse.ArgumentParser) -> None:

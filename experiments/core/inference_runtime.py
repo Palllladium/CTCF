@@ -12,7 +12,7 @@ from torchvision import transforms
 
 from datasets import IXI, OASIS
 from experiments.core.cli_ctcf import ctcf_overrides_from_args
-from experiments.core.inference_metrics import metric_profile_for, write_results
+from experiments.core.inference_metrics import metric_profile_for, write_results, write_trace
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import get_dataset_paths
 from utils import (
@@ -24,6 +24,7 @@ from utils import (
     mk_grid_img,
     setup_device,
 )
+from utils.tto import TTOConfig, refine_flow
 
 
 def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> None:
@@ -178,6 +179,33 @@ class InferRunner:
         load_checkpoint_state(self.model, self.ckpt_path, strict=bool(args.strict_ckpt))
         self.model.eval()
 
+        self.tto = TTOConfig(
+            mode=args.tto_mode,
+            steps=args.tto_steps,
+            lr=args.tto_lr,
+            w_reg=args.tto_w_reg,
+            w_jac=args.tto_w_jac,
+            jac_eps=args.tto_jac_eps,
+            lr_schedule=args.tto_lr_schedule,
+            use_mask=bool(args.tto_mask),
+            kan_degree=args.tto_kan_degree,
+            kan_k=args.tto_kan_k,
+            snapshot_at=tuple(args.tto_trace or ()),
+        )
+        if self.tto.enabled:
+            # TTO backprops into the field only; freezing the weights keeps them out of the graph.
+            for p in self.model.parameters():
+                p.requires_grad_(False)
+
+    def _score(self, flow, x_seg, y_seg, reg_nearest) -> dict:
+        """Dice + Jacobian metrics for one flow field."""
+        with torch.no_grad():
+            def_seg = reg_nearest((x_seg.float(), flow.float()))
+            dice_lbl = dice_per_label(def_seg.long(), y_seg.long(), labels=self.labels)
+            row = {"dice_mean": float(np.mean(dice_lbl))}
+            row.update(self.jac_metrics(flow, x_seg))
+        return row, def_seg, dice_lbl
+
     def run(self):
         """Execute inference over the dataset and save per-case metrics."""
         args = self.args
@@ -185,6 +213,8 @@ class InferRunner:
             out_dir = args.out_dir
         else:
             ckpt_name = Path(self.ckpt_path).stem
+            if self.tto.enabled:
+                ckpt_name = f"{ckpt_name}__{self.tto.slug()}"
             out_dir = os.path.join("results", "infer", self.ds_key, self.name, ckpt_name)
         os.makedirs(out_dir, exist_ok=True)
         png_dir = os.path.join(out_dir, "png") if args.save_pngs else None
@@ -200,55 +230,79 @@ class InferRunner:
         print(f"[INFO] Out dir: {out_dir}")
 
         rows = []
+        trace_rows = []
         reg_nearest = None
         reg_bilin = None
 
-        with torch.no_grad():
-            for idx, batch in enumerate(self.loader):
-                x, y, x_seg, y_seg = [t.to(self.device, non_blocking=True) for t in batch]
-                vol_shape = tuple(x.shape[2:])
-                if reg_nearest is None:
-                    reg_nearest = RegisterModel(vol_shape, mode="nearest").to(self.device)
-                    reg_bilin = RegisterModel(vol_shape, mode="bilinear").to(self.device)
-                stem = Path(self.test_files[idx]).stem
-                cid = stem[2:] if stem.startswith("p_") else stem
+        for idx, batch in enumerate(self.loader):
+            x, y, x_seg, y_seg = [t.to(self.device, non_blocking=True) for t in batch]
+            vol_shape = tuple(x.shape[2:])
+            if reg_nearest is None:
+                reg_nearest = RegisterModel(vol_shape, mode="nearest").to(self.device)
+                reg_bilin = RegisterModel(vol_shape, mode="bilinear").to(self.device)
+            stem = Path(self.test_files[idx]).stem
+            cid = stem[2:] if stem.startswith("p_") else stem
 
-                t0 = time.perf_counter()
+            t0 = time.perf_counter()
+            with torch.no_grad():
                 flow = self.adapter.forward(self.model, x, y)
-                def_seg = reg_nearest((x_seg.float(), flow.float()))
-                dt = time.perf_counter() - t0
-                dice_lbl = dice_per_label(def_seg.long(), y_seg.long(), labels=self.labels)
-                row = {"case_id": cid, "dice_mean": float(np.mean(dice_lbl)), "time_sec": dt}
-                row.update(self.jac_metrics(flow, x_seg))
+            t_fwd = time.perf_counter() - t0
 
-                if args.hd95:
+            snapshots = {}
+            if self.tto.enabled:
+                result = refine_flow(
+                    flow.float(),
+                    x.float(),
+                    y.float(),
+                    self.tto,
+                    reg_bilin.spatial_trans,
+                    mask=x_seg,
+                )
+                flow, snapshots = result.flow, result.snapshots
+            dt = time.perf_counter() - t0
+
+            row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
+            row = {"case_id": cid, "time_sec": dt, **row}
+            if self.tto.enabled:
+                row["tto_steps"] = self.tto.steps
+                row["fwd_sec"] = t_fwd
+
+            if args.hd95:
+                with torch.no_grad():
                     row["hd95_mean"] = hd95_mean_labels(
                         def_seg.long(),
                         y_seg.long(),
                         labels=self.hd95_labels,
                         spacing=(1.0, 1.0, 1.0),
                     )
-                for lbl, v in zip(self.labels, dice_lbl, strict=True):
-                    row[f"dice_lbl_{lbl}"] = float(v)
-                rows.append(row)
+            for lbl, v in zip(self.labels, dice_lbl, strict=True):
+                row[f"dice_lbl_{lbl}"] = float(v)
+            rows.append(row)
 
-                if args.save_flow:
-                    np.savez_compressed(os.path.join(flow_dir, f"flow_{cid}.npz"), flow=flow.detach().cpu().numpy())
-                if args.save_pngs and (args.png_limit < 0 or idx < args.png_limit):
+            for step, snap in snapshots.items():
+                srow, _, _ = self._score(snap, x_seg, y_seg, reg_nearest)
+                trace_rows.append({"case_id": cid, "tto_step": step, **srow})
+
+            if args.save_flow:
+                np.savez_compressed(os.path.join(flow_dir, f"flow_{cid}.npz"), flow=flow.detach().cpu().numpy())
+            if args.save_pngs and (args.png_limit < 0 or idx < args.png_limit):
+                with torch.no_grad():
                     grid = mk_grid_img(flow.float(), grid_step=8, line_thickness=1)
                     def_grid = reg_bilin((grid.float(), flow.float()))
-                    save_preview(os.path.join(png_dir, f"{cid}.png"), x, y, x_seg, y_seg, def_seg, def_grid)
+                save_preview(os.path.join(png_dir, f"{cid}.png"), x, y, x_seg, y_seg, def_seg, def_grid)
 
-                if (idx + 1) % max(1, args.print_every) == 0:
-                    msg = (
-                        f"[{idx + 1:03d}/{len(self.loader):03d}] {cid} "
-                        f"dice={row['dice_mean']:.4f} time={dt:.3f}s{self.jac_log(row)}"
-                    )
-                    if args.hd95:
-                        msg += f" hd95={row['hd95_mean']:.4f}"
-                    print(msg)
+            if (idx + 1) % max(1, args.print_every) == 0:
+                msg = (
+                    f"[{idx + 1:03d}/{len(self.loader):03d}] {cid} "
+                    f"dice={row['dice_mean']:.4f} time={dt:.3f}s{self.jac_log(row)}"
+                )
+                if args.hd95:
+                    msg += f" hd95={row['hd95_mean']:.4f}"
+                print(msg)
 
         write_results(rows, out_dir, model_name=self.name, ckpt_path=self.ckpt_path, test_dir=self.test_dir)
+        if trace_rows:
+            write_trace(trace_rows, out_dir)
         if args.save_pngs:
             print(f"[SAVED] png dir: {png_dir}")
         if args.save_flow:

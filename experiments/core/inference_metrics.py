@@ -52,6 +52,32 @@ def metric_profile_for(ds_key: str) -> MetricProfile:
     return _PROFILES[ds_key]
 
 
+def write_trace(rows: list[dict], out_dir: str) -> None:
+    """Persist per-case metrics at intermediate TTO steps, plus the per-step mean curve."""
+    if not rows:
+        return
+
+    trace_path = os.path.join(out_dir, "tto_trace.csv")
+    with open(trace_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    steps = sorted({int(r["tto_step"]) for r in rows})
+    metric_keys = [k for k in rows[0] if k not in ("case_id", "tto_step")]
+    curve_path = os.path.join(out_dir, "tto_curve.csv")
+    with open(curve_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["tto_step", "n_cases", *[f"{k}_mean" for k in metric_keys]])
+        for s in steps:
+            at_step = [r for r in rows if int(r["tto_step"]) == s]
+            means = [float(np.mean([r[k] for r in at_step])) for k in metric_keys]
+            writer.writerow([s, len(at_step), *[f"{m:.6f}" for m in means]])
+
+    print(f"[SAVED] tto trace: {trace_path}")
+    print(f"[SAVED] tto curve: {curve_path}")
+
+
 def write_results(
     rows: list[dict],
     out_dir: str,
