@@ -16,11 +16,17 @@ set -euo pipefail
 
 PROFILE="${PROFILE:---2}"          # advisor's machine
 GPU="${GPU:-0}"
+PYBIN="${PYBIN:-python}"
 STEPS="${STEPS:-400}"
 TRACE="${TRACE:-25 50 100 200 400}"
 OUT_ROOT="${OUT_ROOT:-results/tto}"
 BLOCK="${BLOCK:-ALL}"
-MAMBA="--model ctcf --ctcf_config CTCF-CascadeA-Mamba"
+HD95="${HD95:---hd95}"             # keep per_case.csv schema-compatible with results/SEDM/inference
+
+# Required for the experiments.* package imports
+export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+
+MAMBA="--model ctcf --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"
 
 # Checkpoints live where our own training code writes them: results/<EXP_NAME>/ckpt/best.pth
 ck() { echo "results/$1/ckpt/best.pth"; }
@@ -40,8 +46,9 @@ run() {
   echo; echo "=== $tag ==="
   local extra=()
   [[ "$ds" == "IXI" ]] && extra+=(--use_test)   # IXI: the 115 held-out test pairs, not the val split
-  python experiments/inference.py \
-    $MAMBA --ds "$ds" "$PROFILE" --ckpt "$ckpt" --strict_ckpt 0 --gpu "$GPU" \
+  # shellcheck disable=SC2086
+  "${PYBIN}" -m experiments.inference \
+    $MAMBA --ds "$ds" "$PROFILE" --ckpt "$ckpt" --strict_ckpt 0 --gpu "$GPU" $HD95 \
     --print_every 5 --out_dir "$out" \
     "${arch[@]}" "${extra[@]}" "${tto[@]}"
 }
