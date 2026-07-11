@@ -63,19 +63,15 @@ MAMBA_SVF="--config CTCF-CascadeA-Mamba --l3_svf 1"
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
 
-# ============================================================
 # A. L3 capacity scaling — l3_base_ch=64 (no new code; flag passthrough)
 #    Expected: +0.005-0.012 Dice (R5 prior was +0.016 on Swin-DCA, but full-res
 #    transition was confounded there; on Mamba this isolates pure capacity).
 #    VRAM forecast: 45-50GB (Mamba SVF baseline 31.9GB + ~10-15GB L3 widening).
-# ============================================================
 if [ "${SKIP_A}" != "1" ]; then
     run_ctcf "P11_MAMBA_SVF_L3CH64_OASIS" \
         ${MAMBA_SVF} \
@@ -84,13 +80,11 @@ if [ "${SKIP_A}" != "1" ]; then
 fi
 
 
-# ============================================================
 # B. M1 — Multi-head L3 with learned routing (K parallel flow heads).
 #    Sweep K ∈ {2, 4, 8}. K=1 is the existing Mamba SVF (Phase 10) and is NOT
 #    re-run here — its number is the comparison baseline.
 #    Heads + routing zero-init → starts identical to single-head zero-init L3.
 #    VRAM forecast: ≈ baseline (added params are tiny relative to U-Net body).
-# ============================================================
 if [ "${SKIP_B}" != "1" ]; then
     if [ "${SKIP_K2}" != "1" ]; then
         run_ctcf "P11_MAMBA_SVF_MH2_OASIS" \
@@ -113,7 +107,6 @@ if [ "${SKIP_B}" != "1" ]; then
 fi
 
 
-# ============================================================
 # C. M2 — EMA self-distillation (mean-teacher with flow L1 consistency).
 #    Grid: (decay, lambda) ∈ {(0.99, 0.5), (0.999, 0.5), (0.999, 0.1)}.
 #      AGGRESSIVE: fast teacher tracking, strong consistency.
@@ -121,7 +114,6 @@ fi
 #      SOFT:       slow teacher tracking, mild consistency.
 #    EMA teacher forward adds compute but not parameters; VRAM ≈ +30-40GB
 #    (no_grad teacher activations; should fit on 96GB).
-# ============================================================
 if [ "${SKIP_C}" != "1" ]; then
     if [ "${SKIP_EMA_AGGRESSIVE}" != "1" ]; then
         run_ctcf "P11_MAMBA_SVF_EMA_AGGR_OASIS" \
@@ -144,7 +136,6 @@ if [ "${SKIP_C}" != "1" ]; then
 fi
 
 
-# ============================================================
 # D. M3 — Cascade-aware regularization (per-level diffusion weights).
 #    L_reg = w_reg * [w_l1 · L_diff(phi_L1) + w_l2 · L_diff(phi_L2) + w_l3 · L_diff(delta_L3)]
 #    Grid:
@@ -154,7 +145,6 @@ fi
 #      VERY_STRONG: (5,1,0.1) = very strong L1 smoothness + very relaxed L3
 #      MID        : (2,1,0.5) = mild redistribution
 #    Baseline reference: Mamba SVF Phase 10 OASIS (Dice 0.8314 with uniform w_reg=1).
-# ============================================================
 if [ "${SKIP_D}" != "1" ]; then
     if [ "${SKIP_REG_FLAT}" != "1" ]; then
         run_ctcf "P11_MAMBA_SVF_REG_FLAT_OASIS" \
@@ -184,7 +174,6 @@ fi
 
 
 echo ""
-echo "==================================================================="
 echo "Phase 11 batch 0 complete (or skipped per env flags)."
 echo ""
 echo "Outputs:"
@@ -197,4 +186,3 @@ echo "     pattern; add P11_* entries)."
 echo "  2. Aggregate to results/SEDM/summary/ — extend aggregate_results.py CONFIGS."
 echo "  3. Rank improvements by Dice gain vs baseline (Mamba SVF Phase 10 OASIS 0.8314)."
 echo "  4. Lock the best stack -> Phase 11.1 = stack longruns 500ep."
-echo "==================================================================="

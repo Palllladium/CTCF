@@ -32,15 +32,11 @@ CTCF_IXI="--ds IXI ${PATHS_PROFILE} ${CTCF_BASE} --w_reg 4.0"
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
-# ============================================================
 # Phase 10 longruns — 500 epochs
-# ============================================================
 
 # 1. Mamba SVF OASIS — headline, resume from P7_CASC_MAMBA_SVF_OASIS
 if [ "${SKIP_MAMBA_SVF_OASIS}" != "1" ]; then
@@ -104,7 +100,6 @@ if [ "${SKIP_VXM_UNIFIED_SVF_IXI}" != "1" ]; then
 fi
 
 echo ""
-echo "==================================================================="
 echo "Phase 10 longruns complete."
 echo "Results in logs/P10_*/logfile.log and results/P10_*/ckpt/best.pth"
 echo ""
@@ -113,4 +108,3 @@ echo "  - Extend tools/runners/phase9_matrix_and_inference.sh with P10 configs"
 echo "    (or write phase10 equivalent) to run inference on Phase 10 ckpts."
 echo "  - Run tools/analysis/compute_stats.py sedm_vs_paper1 with P10 cascades added."
 echo "  - Update results/SEDM/summary/ + memory/phase10_results.md"
-echo "==================================================================="

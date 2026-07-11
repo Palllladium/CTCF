@@ -45,40 +45,32 @@ SKIP_V_SACB_IXI="${SKIP_V_SACB_IXI:-0}"
 
 COMMON="--gpu ${GPU} --max_epoch ${MAX_EPOCH} --use_tb 1 --save_ckpt 1"
 
-# ---- CTCF Track M base (Mamba SVF cascade, OASIS, loss identical to batch0) ----
+# CTCF Track M base (Mamba SVF cascade, OASIS, loss identical to batch0)
 CTCF_BASE="${COMMON} --w_ncc 1.0 --w_icon 0.05 --w_jac 0.005"
 CTCF_OASIS="--ds OASIS ${PATHS_PROFILE} ${CTCF_BASE} --w_reg 1.0"
 MAMBA_SVF="--config CTCF-CascadeA-Mamba --l3_svf 1"
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
 run_corrmlp() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name} (CorrMLP baseline)"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CorrMLP "$@" --exp "${exp_name}"
 }
 
 run_sacb() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name} (SACB-Net baseline)"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_SACB "$@" --exp "${exp_name}"
 }
 
 
-# ============================================================
 # Track M — correspondence cost-volume in L3 (Mamba SVF, OASIS, 100ep)
 #   Compare each vs anchor 0.8274. Hadamard is the headline cheap test.
-# ============================================================
 if [ "${SKIP_M_HADAMARD}" != "1" ]; then
     run_ctcf "P11_MAMBA_SVF_HADAMARD_OASIS" \
         ${MAMBA_SVF} --l3_corr_mode hadamard \
@@ -98,11 +90,9 @@ if [ "${SKIP_M_CORRFEAT}" != "1" ]; then
 fi
 
 
-# ============================================================
 # Track V — CorrMLP baseline on OUR split (loss = NCC9 + diffusion, w=[1,1], Adam 1e-4).
 #   Verifies the ~0.871 OASIS / ~0.769 IXI unsupervised claim on our data.
 #   GPL upstream (models/CorrMLP/networks.py) -> standalone baseline only, never merged into CTCF.
-# ============================================================
 if [ "${SKIP_V_CORRMLP_OASIS}" != "1" ]; then
     run_corrmlp "P11_CORRMLP_OASIS" \
         --ds OASIS ${PATHS_PROFILE} ${COMMON} \
@@ -116,11 +106,9 @@ if [ "${SKIP_V_CORRMLP_IXI}" != "1" ]; then
 fi
 
 
-# ============================================================
 # Track V — SACB-Net baseline on OUR split (loss = NCC9 + diffusion, w=[1, 0.3], SACB native).
 #   Voxel-units flow -> runs through our Runner/val directly. Needs CUDA + SACB deps
 #   (einops kmeans_gpu timm monai pystrum scipy). Confirms IXI 0.769 vs our 0.7635.
-# ============================================================
 if [ "${SKIP_V_SACB_OASIS}" != "1" ]; then
     run_sacb "P11_SACB_OASIS" \
         --ds OASIS ${PATHS_PROFILE} ${COMMON} \
@@ -135,11 +123,9 @@ fi
 
 
 echo ""
-echo "==================================================================="
 echo "Phase 11 batch 1 complete (or skipped per env flags)."
 echo ""
 echo "Next:"
 echo "  1. Inference + aggregate the P11_* ckpts (reuse phase10_inference pattern)."
 echo "  2. Rank Track-M corr modes vs anchor 0.8274; pick the winner for a 500ep longrun."
 echo "  3. Compare CorrMLP/SACB baselines vs CTCF to confirm the unsupervised gap."
-echo "==================================================================="

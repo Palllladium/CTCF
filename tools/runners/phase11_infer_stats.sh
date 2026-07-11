@@ -53,9 +53,7 @@ run_inf() {
         echo "[SKIP] ${exp} — no ckpt at ${ckpt}"
         return
     fi
-    echo "==========================================="
     echo ">> ${exp} (${model}, ${ds})"
-    echo "==========================================="
     "${PYBIN}" -m experiments.inference \
         --ds "${ds}" ${PATHS_PROFILE} --gpu "${GPU}" \
         --model "${model}" --ckpt "${ckpt}" --strict_ckpt 0 --hd95 \
@@ -64,9 +62,7 @@ run_inf() {
 }
 
 
-# ============================================================
 # 1. CTCF mixing-axis inferences (OASIS, val = test N=19)
-# ============================================================
 if [ "${SKIP_CTCF}" != "1" ]; then
     run_inf P11_MAMBA_SVF_CTRL_NONE_OASIS  ctcf OASIS "${CTCF_BASE_INF} --ctcf_l3_corr_mode none"                  ""
     run_inf P11_MAMBA_SVF_HADAMARD_OASIS   ctcf OASIS "${CTCF_BASE_INF} --ctcf_l3_corr_mode hadamard"              ""
@@ -82,9 +78,7 @@ if [ "${SKIP_CTCF}" != "1" ]; then
 fi
 
 
-# ============================================================
 # 2. Track V baselines (CorrMLP / SACB) — OASIS N=19 + IXI N=115 test
-# ============================================================
 if [ "${SKIP_TRACKV}" != "1" ]; then
     run_inf P11_CORRMLP_OASIS corrmlp OASIS "" ""
     run_inf P11_SACB_OASIS    sacb    OASIS "" ""
@@ -93,14 +87,10 @@ if [ "${SKIP_TRACKV}" != "1" ]; then
 fi
 
 
-# ============================================================
 # 3. Paired Wilcoxon + Hodges-Lehmann + BH-FDR (mixing axis + Track V)
-# ============================================================
 if [ "${SKIP_STATS}" != "1" ]; then
     echo ""
-    echo "==========================================="
     echo ">> Phase 11 paired Wilcoxon + BH-FDR"
-    echo "==========================================="
     "${PYBIN}" tools/analysis/compute_stats.py phase11 \
         --sedm-root "${OUT}/inference" \
         --out "${OUT}/summary/phase11_stats.csv" \
@@ -108,11 +98,9 @@ if [ "${SKIP_STATS}" != "1" ]; then
 fi
 
 echo ""
-echo "==================================================================="
 echo "Phase 11 inference + stats complete."
 echo ""
 echo "Files to send back to user (all small):"
 echo "  - ${OUT}/inference/P11_*/per_case.csv      (CTCF mechanisms + Track V)"
 echo "  - ${OUT}/summary/phase11_stats.csv"
 echo "  - ${OUT}/summary/phase11_stats.txt"
-echo "==================================================================="

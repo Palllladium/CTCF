@@ -35,7 +35,7 @@ MAX_EPOCH="${MAX_EPOCH:-100}"
 PATHS_PROFILE="${PATHS_PROFILE:---2}"
 PYBIN="${PYBIN:-python}"
 
-# --- skip flags ----------------------------------------------------------
+# skip flags
 SKIP_SOLO_LKU="${SKIP_SOLO_LKU:-0}"
 SKIP_SOLO_EFFM="${SKIP_SOLO_EFFM:-0}"
 SKIP_SOLO_MAMBA="${SKIP_SOLO_MAMBA:-0}"
@@ -53,23 +53,17 @@ CTCF_COMMON="${COMMON} --w_ncc 1.0 --w_reg 1.0 --w_icon 0.05 --w_jac 0.005"
 
 run() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m "$@" --exp "${exp_name}" ${COMMON}
 }
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}" ${CTCF_COMMON}
 }
 
-# ============================================================
 # Group 1 — Solo Phase 6 (native loss)
-# ============================================================
 
 if [ "${SKIP_SOLO_LKU}" != "1" ]; then
     run "P6_LKU8_OASIS" experiments.train_LKUNet --config LKU-8 --sim mse --w_reg 0.01
@@ -89,9 +83,7 @@ if [ "${SKIP_SOLO_VMAMBA}" != "1" ]; then
     run "P6_VMAMBA_OASIS" experiments.train_VMambaMorph --config VMambaMorph
 fi
 
-# ============================================================
 # Group 2 — L2-only controls under CTCF protocol (Phase 7)
-# ============================================================
 
 if [ "${SKIP_CTRL_LKU8}" != "1" ]; then
     run_ctcf "P7_CTRL_LKU8_L2ONLY_OASIS" --config CTCF-LKU8-solo
@@ -109,15 +101,11 @@ if [ "${SKIP_CTRL_VMAMBA}" != "1" ]; then
     run_ctcf "P7_CTRL_VMAMBA_L2ONLY_OASIS" --config CTCF-VMamba-solo
 fi
 
-# ============================================================
 # Group 3 — Native LKU-32 reference (Phase 7)
-# ============================================================
 
 if [ "${SKIP_NATIVE_LKU32}" != "1" ]; then
     run "P7_NATIVE_LKU32_OASIS" experiments.train_LKUNet --config LKU-32 --sim mse --w_reg 0.01
 fi
 
-echo "==================================================================="
 echo "Phase 6+7 solo/controls runs complete."
 echo "Results in logs/{P6_*,P7_*}/logfile.log and results/{P6_*,P7_*}/ckpt/best.pth"
-echo "==================================================================="

@@ -45,33 +45,27 @@ SKIP_D_MID="${SKIP_D_MID:-0}"
 
 COMMON="--gpu ${GPU} --max_epoch ${MAX_EPOCH} --use_tb 1 --save_ckpt 1"
 
-# ---- CTCF M3 base (Mamba SVF cascade, OASIS, loss identical to batch1) ----
+# CTCF M3 base (Mamba SVF cascade, OASIS, loss identical to batch1)
 CTCF_BASE="${COMMON} --w_ncc 1.0 --w_icon 0.05 --w_jac 0.005"
 CTCF_OASIS="--ds OASIS ${PATHS_PROFILE} ${CTCF_BASE} --w_reg 1.0"
 MAMBA_SVF="--config CTCF-CascadeA-Mamba --l3_svf 1"
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
 run_sacb() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name} (SACB-Net baseline)"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_SACB "$@" --exp "${exp_name}"
 }
 
 
-# ============================================================
 # Track V — SACB-Net baseline on OUR split (loss = NCC9 + diffusion, w=[1, 0.3], SACB native).
 #   Voxel-units flow -> runs through our Runner/val directly. AMP fix applied (fp32 train_step).
 #   Confirms its IXI 0.769 vs our 0.7635, and OASIS vs our 0.8274.
-# ============================================================
 if [ "${SKIP_V_SACB_OASIS}" != "1" ]; then
     run_sacb "P11_SACB_OASIS" \
         --ds OASIS ${PATHS_PROFILE} ${COMMON} \
@@ -85,7 +79,6 @@ if [ "${SKIP_V_SACB_IXI}" != "1" ]; then
 fi
 
 
-# ============================================================
 # Block D — M3 cascade-aware per-level reg grid (Mamba SVF, OASIS, 100ep).
 #   --w_reg_l1/l2/l3 replace the uniform --w_reg with per-level diffusion weights on
 #   {phi_l1, phi_l2_residual, delta_l3}. Compare each vs anchor 0.8274.
@@ -93,7 +86,6 @@ fi
 #     STRONG  (3, 1, 0.3) -> heavier coarse L1, lighter L3 residual.
 #     VSTRONG (5, 1, 0.1) -> push the same direction harder.
 #     MID     (2, 1, 0.5) -> moderate version.
-# ============================================================
 if [ "${SKIP_D_FLAT}" != "1" ]; then
     run_ctcf "P11_MAMBA_SVF_REG_FLAT_OASIS" \
         ${MAMBA_SVF} ${CTCF_OASIS} \
@@ -120,7 +112,6 @@ fi
 
 
 echo ""
-echo "==================================================================="
 echo "Phase 11 batch 2 complete (or skipped per env flags)."
 echo ""
 echo "Next:"
@@ -128,4 +119,3 @@ echo "  1. Confirm SACB val Dice > 0.7 (sanity) on OASIS+IXI; compare vs our 0.8
 echo "  2. Rank the M3 grid vs anchor 0.8274; FLAT should ~= anchor (decomposition is neutral)."
 echo "  3. If any M3 weighting beats the anchor, fold it into the locked config alongside"
 echo "     Hadamard correspondence before the (single) 500ep longrun."
-echo "==================================================================="

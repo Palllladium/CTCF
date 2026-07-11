@@ -59,15 +59,11 @@ CTCF_IXI="--ds IXI ${PATHS_PROFILE} ${CTCF_BASE} --w_reg 4.0"
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
-# ============================================================
 # Stage 1 — Training (12 runs to fill 100ep matrix gaps)
-# ============================================================
 if [ "${SKIP_STAGE1}" != "1" ]; then
     echo ""
     echo "════════════════════════════════════════════════════════════════════"
@@ -81,26 +77,21 @@ if [ "${SKIP_STAGE1}" != "1" ]; then
     [ "${SKIP_VXM_L2_IXI}" != "1" ]      && run_ctcf "P9_CTRL_VXM_L2ONLY_IXI" --config CTCF-VM-solo ${CTCF_IXI}
     [ "${SKIP_VXM_CASC_IXI}" != "1" ]    && run_ctcf "P9_CASC_VXM_SVF_IXI" --config CTCF-CascadeA-VM --l3_svf 1 ${CTCF_IXI}
 
-    # LKU-8
     [ "${SKIP_LKU8_L2_IXI}" != "1" ]     && run_ctcf "P9_CTRL_LKU8_L2ONLY_IXI" --config CTCF-LKU8-solo ${CTCF_IXI}
     [ "${SKIP_LKU8_CASC_OASIS}" != "1" ] && run_ctcf "P9_CASC_LKU8_SVF_OASIS" --config CTCF-CascadeA-LKU8 --l3_svf 1 ${CTCF_OASIS}
     [ "${SKIP_LKU8_CASC_IXI}" != "1" ]   && run_ctcf "P9_CASC_LKU8_SVF_IXI" --config CTCF-CascadeA-LKU8 --l3_svf 1 ${CTCF_IXI}
 
-    # LKU-32 L2-only IXI (cascade IXI already in P8)
     [ "${SKIP_LKU32_L2_IXI}" != "1" ]    && run_ctcf "P9_CTRL_LKU32_L2ONLY_IXI" --config CTCF-LKU32-solo ${CTCF_IXI}
 
-    # Mamba (heavy)
     [ "${SKIP_MAMBA_L2_IXI}" != "1" ]    && run_ctcf "P9_CTRL_MAMBA_L2ONLY_IXI" --config CTCF-Mamba-solo ${CTCF_IXI}
     [ "${SKIP_MAMBA_NOSVF_IXI}" != "1" ] && run_ctcf "P9_CASC_MAMBA_NOSVF_IXI" --config CTCF-CascadeA-Mamba --l3_svf 0 ${CTCF_IXI}
 
-    # VMamba (heaviest; matrix completeness only, not in longruns)
     [ "${SKIP_VMAMBA_L2_IXI}" != "1" ]   && run_ctcf "P9_CTRL_VMAMBA_L2ONLY_IXI" --config CTCF-VMamba-solo ${CTCF_IXI}
     [ "${SKIP_VMAMBA_CASC_IXI}" != "1" ] && run_ctcf "P9_CASC_VMAMBA_SVF_IXI" --config CTCF-CascadeA-VMamba --l3_svf 1 ${CTCF_IXI}
 fi
 
-# ============================================================
 # Stage 2 — Inference + complexity + aggregation
-# ============================================================
+
 if [ "${SKIP_STAGE2}" != "1" ]; then
     echo ""
     echo "════════════════════════════════════════════════════════════════════"
@@ -122,9 +113,7 @@ if [ "${SKIP_STAGE2}" != "1" ]; then
         local use_test=""; [ "${ds}" = "IXI" ] && use_test="--use_test"
         local out_dir="${OUT}/inference/${exp_name}"
 
-        echo "==========================================="
         echo ">> ${exp_name} (${ds})"
-        echo "==========================================="
 
         "${PYBIN}" -m experiments.inference \
             --ds "${ds}" ${PATHS_PROFILE} --gpu "${GPU}" \
@@ -188,9 +177,7 @@ if [ "${SKIP_STAGE2}" != "1" ]; then
 fi
 
 echo ""
-echo "==================================================================="
 echo "Phase 9 (matrix + inference) complete."
 echo "Training: results/<exp>/ckpt/best.pth (Stage 1)"
 echo "Inference: ${OUT}/inference/<exp>/per_case.csv (Stage 2)"
 echo "Summary: ${OUT}/summary/*.{md,tex}"
-echo "==================================================================="

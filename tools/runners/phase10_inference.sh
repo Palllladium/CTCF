@@ -51,9 +51,7 @@ run_inf() {
     local use_test=""; [ "${ds}" = "IXI" ] && use_test="--use_test"
     local out_dir="${OUT}/inference/${exp_name}"
 
-    echo "==========================================="
     echo ">> ${exp_name} (${ds}, native)"
-    echo "==========================================="
     "${PYBIN}" -m experiments.inference \
         --ds "${ds}" ${PATHS_PROFILE} --gpu "${GPU}" \
         --model ctcf \
@@ -76,9 +74,7 @@ run_inf_cross() {
     local use_test=""; [ "${target_ds}" = "IXI" ] && use_test="--use_test"
     local out_dir="${OUT}/inference/${cross_name}"
 
-    echo "==========================================="
     echo ">> ${cross_name} (${src_exp} ckpt → ${target_ds} test set)"
-    echo "==========================================="
     "${PYBIN}" -m experiments.inference \
         --ds "${target_ds}" ${PATHS_PROFILE} --gpu "${GPU}" \
         --model ctcf \
@@ -90,9 +86,8 @@ run_inf_cross() {
         --out_dir "${out_dir}"
 }
 
-# ============================================================
 # 1. Native inference (7 runs)
-# ============================================================
+
 if [ "${SKIP_NATIVE}" != "1" ]; then
     run_inf P10_LONGRUN_MAMBA_SVF_OASIS       OASIS "--ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"
     run_inf P10_LONGRUN_MAMBA_SVF_IXI         IXI   "--ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"
@@ -103,9 +98,8 @@ if [ "${SKIP_NATIVE}" != "1" ]; then
     run_inf P10_LONGRUN_VXM_UNIFIED_SVF_IXI   IXI   "--ctcf_config CTCF-CascadeA-VM-Unified --ctcf_l3_svf 1"
 fi
 
-# ============================================================
 # 2. Cross-dataset zero-shot (Mamba SVF headline)
-# ============================================================
+
 if [ "${SKIP_CROSS}" != "1" ]; then
     # OASIS-trained Mamba SVF ckpt evaluated on IXI test set
     run_inf_cross P10_LONGRUN_MAMBA_SVF_OASIS IXI   "--ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1" \
@@ -115,27 +109,21 @@ if [ "${SKIP_CROSS}" != "1" ]; then
                   P10_CROSS_MAMBA_SVF_IXI_TO_OASIS
 fi
 
-# ============================================================
 # 3. Aggregate (Phase 9 + Phase 10 in one summary)
-# ============================================================
+
 if [ "${SKIP_AGGREGATE}" != "1" ]; then
     echo ""
-    echo "==========================================="
     echo ">> Aggregating with Phase 10 data"
-    echo "==========================================="
     "${PYBIN}" tools/analysis/aggregate_results.py \
         --inference-dir "${OUT}/inference" \
         --output-dir "${OUT}/summary"
 fi
 
-# ============================================================
 # 4. Paired Wilcoxon stat-tests vs Paper 1 (Phase 9 + Phase 10 entries)
-# ============================================================
+
 if [ "${SKIP_STATS}" != "1" ]; then
     echo ""
-    echo "==========================================="
     echo ">> Paired Wilcoxon vs Paper 1"
-    echo "==========================================="
     "${PYBIN}" tools/analysis/compute_stats.py sedm_vs_paper1 \
         --infer-root results/infer \
         --sedm-root "${OUT}/inference" \
@@ -143,7 +131,6 @@ if [ "${SKIP_STATS}" != "1" ]; then
 fi
 
 echo ""
-echo "==================================================================="
 echo "Phase 10 inference + aggregation complete."
 echo ""
 echo "Files to send back to user:"
@@ -155,4 +142,3 @@ echo "  - ${OUT}/summary/main_ixi.{md,tex}"
 echo "  - ${OUT}/summary/cascade_delta.{md,tex}"
 echo "  - ${OUT}/summary/stat_tests.md"
 echo "  - ${OUT}/summary/stat_tests_vs_paper1.txt"
-echo "==================================================================="

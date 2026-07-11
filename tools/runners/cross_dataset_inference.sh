@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-# ── Defaults ─────────────────────────────────────────────────────────
+# Defaults
 PATHS_PROFILE=1
 GPU=0
 DRY_RUN=0
@@ -66,10 +66,7 @@ EXP_TMDCA_IXI="${EXP_TMDCA_IXI:-TM_DCA_IXI}"
 EXP_UTSR_OASIS="${EXP_UTSR_OASIS:-UTSRMorph_OASIS}"
 EXP_UTSR_IXI="${EXP_UTSR_IXI:-UTSR_IXI_WREG4_E500}"
 
-# ── Checkpoint resolver ──────────────────────────────────────────────
-# Picks the first existing candidate inside an experiment folder.
-# Search order depends on $PREFER: either best-first or last-first.
-# Looks in the folder root AND in ./ckpt/ (the latter matches train_runtime.py layout).
+
 resolve_ckpt() {
   local folder="$1"
   local -a candidates
@@ -91,7 +88,7 @@ resolve_ckpt() {
   return 1
 }
 
-# Either user supplied an explicit CKPT_* path, or resolve from the folder.
+
 CKPT_CTCF_OASIS="${CKPT_CTCF_OASIS:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_CTCF_OASIS" || true)}"
 CKPT_CTCF_IXI="${CKPT_CTCF_IXI:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_CTCF_IXI" || true)}"
 CKPT_TMDCA_OASIS="${CKPT_TMDCA_OASIS:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_TMDCA_OASIS" || true)}"
@@ -99,31 +96,25 @@ CKPT_TMDCA_IXI="${CKPT_TMDCA_IXI:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_TMDCA_IXI" 
 CKPT_UTSR_OASIS="${CKPT_UTSR_OASIS:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_UTSR_OASIS" || true)}"
 CKPT_UTSR_IXI="${CKPT_UTSR_IXI:-$(resolve_ckpt "$RESULTS_ROOT/$EXP_UTSR_IXI" || true)}"
 
-# ── Experiment matrix ────────────────────────────────────────────────
 # Fields: model | ckpt_path | ckpt_ds | eval_ds | config_key | extra_flags
 EXPERIMENTS=(
-  # CTCF: one config covers both datasets
   "ctcf|$CKPT_CTCF_OASIS|OASIS|OASIS|CTCF-CascadeA|"
   "ctcf|$CKPT_CTCF_OASIS|OASIS|IXI|CTCF-CascadeA|--use_test"
   "ctcf|$CKPT_CTCF_IXI|IXI|IXI|CTCF-CascadeA|--use_test"
   "ctcf|$CKPT_CTCF_IXI|IXI|OASIS|CTCF-CascadeA|"
 
-  # TM-DCA: single config
   "tm-dca|$CKPT_TMDCA_OASIS|OASIS|OASIS|TransMorph-3-LVL|"
   "tm-dca|$CKPT_TMDCA_OASIS|OASIS|IXI|TransMorph-3-LVL|--use_test"
   "tm-dca|$CKPT_TMDCA_IXI|IXI|IXI|TransMorph-3-LVL|--use_test"
   "tm-dca|$CKPT_TMDCA_IXI|IXI|OASIS|TransMorph-3-LVL|"
 
-  # UTSRMorph: config MUST match the checkpoint architecture (Large vs IXI-Large differ in embed dim)
   "utsrmorph|$CKPT_UTSR_OASIS|OASIS|OASIS|UTSRMorph-Large|"
   "utsrmorph|$CKPT_UTSR_OASIS|OASIS|IXI|UTSRMorph-Large|--use_test"
   "utsrmorph|$CKPT_UTSR_IXI|IXI|IXI|UTSRMorph-IXI-Large|--use_test"
   "utsrmorph|$CKPT_UTSR_IXI|IXI|OASIS|UTSRMorph-IXI-Large|"
 )
 
-# ── Header ───────────────────────────────────────────────────────────
 TOTAL=${#EXPERIMENTS[@]}
-echo "=========================================================="
 echo "  Cross-dataset zero-shot evaluation"
 echo "  paths profile : $PATHS_PROFILE"
 echo "  gpu           : $GPU"
@@ -131,7 +122,6 @@ echo "  results root  : $RESULTS_ROOT"
 echo "  prefer ckpt   : $PREFER"
 echo "  experiments   : $TOTAL"
 echo "  dry-run       : $DRY_RUN"
-echo "=========================================================="
 
 # Validate that all required ckpt files exist (unless dry-run).
 # Report each of the 6 unique (model, dataset) pairs once, even if resolution failed.
@@ -170,7 +160,7 @@ if [ "$MISSING" -gt 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   exit 1
 fi
 
-# ── Run loop ─────────────────────────────────────────────────────────
+# Run loop
 PASSED=0; FAILED=0; SKIPPED=0
 
 for i in "${!EXPERIMENTS[@]}"; do
@@ -190,7 +180,6 @@ for i in "${!EXPERIMENTS[@]}"; do
   TAG="[${CKPT_DS}->${EVAL_DS}]"
 
   echo ""
-  echo "----------------------------------------------------------"
   echo "[$IDX/$TOTAL] $MODEL $TAG"
   echo "  ckpt   : $CKPT_PATH"
   echo "  config : $CONFIG_KEY"
@@ -243,11 +232,8 @@ for i in "${!EXPERIMENTS[@]}"; do
   fi
 done
 
-# ── Aggregate ────────────────────────────────────────────────────────
 echo ""
-echo "=========================================================="
 echo "  Done. Passed: $PASSED, Failed: $FAILED, Skipped: $SKIPPED"
-echo "=========================================================="
 
 if [ "$DRY_RUN" -eq 0 ] && [ "$PASSED" -gt 0 ]; then
   echo ""

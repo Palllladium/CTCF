@@ -47,9 +47,7 @@ CTCF_IXI="--ds IXI ${PATHS_PROFILE} ${CTCF_BASE} --w_reg 4.0"
 
 run_ctcf() {
     local exp_name="$1"; shift
-    echo "==================================================================="
     echo "> ${exp_name}"
-    echo "==================================================================="
     "${PYBIN}" -m experiments.train_CTCF "$@" --exp "${exp_name}"
 }
 
@@ -97,7 +95,5 @@ if [ "${SKIP_LKU32_SVF_IXI}" != "1" ]; then
         ${CTCF_IXI}
 fi
 
-echo "==================================================================="
 echo "Phase 8 cascade runs complete."
 echo "Results in logs/P8_*/logfile.log and experiments/P8_*/ckpt/best.pth"
-echo "==================================================================="
