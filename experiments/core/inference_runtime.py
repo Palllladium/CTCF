@@ -61,7 +61,6 @@ def build_infer_dataset(ds_key: str, files: list[str], atlas_path: str | None):
 def build_infer_model(args, device):
     """Resolve the adapter and build its model with per-model CLI config keys."""
     adapter = get_model_adapter(args.model)
-    # Compact single-line case arms (per-branch build logic); see code_style.md.
     # fmt: off
     match adapter.key:
         case "tm-dca": model = adapter.build(time_steps=args.time_steps, config_key=args.tm_config)
@@ -186,14 +185,20 @@ class InferRunner:
             w_reg=args.tto_w_reg,
             w_jac=args.tto_w_jac,
             jac_eps=args.tto_jac_eps,
+            svf_int_steps=args.tto_svf_int_steps,
             lr_schedule=args.tto_lr_schedule,
             use_mask=bool(args.tto_mask),
             kan_degree=args.tto_kan_degree,
             kan_k=args.tto_kan_k,
             snapshot_at=tuple(args.tto_trace or ()),
+            stop_mode=args.tto_stop,
+            fold_k=args.tto_fold_k,
+            fold_delta=args.tto_fold_delta,
+            fold_check_every=args.tto_fold_check_every,
+            plateau_window=args.tto_plateau_window,
+            plateau_rel=args.tto_plateau_rel,
         )
         if self.tto.enabled:
-            # TTO backprops into the field only; freezing the weights keeps them out of the graph.
             for p in self.model.parameters():
                 p.requires_grad_(False)
 
@@ -264,7 +269,12 @@ class InferRunner:
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
             row = {"case_id": cid, "time_sec": dt, **row}
             if self.tto.enabled:
-                row["tto_steps"] = self.tto.steps
+                # Numeric only: write_results averages every column it is given.
+                row["tto_steps"] = result.steps_run
+                row["tto_stopped_early"] = float(result.stop_reason != "fixed")
+                row["tto_folds_start"] = result.folds_start
+                row["tto_folds_end"] = result.folds_end
+                row["tto_fold_budget"] = result.fold_budget
                 row["fwd_sec"] = t_fwd
 
             if args.hd95:

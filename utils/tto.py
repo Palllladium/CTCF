@@ -7,12 +7,13 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from utils.coord_nets import ChebyKANResidual, RandChebyKANResidual, SirenResidual
-from utils.field import compose_flows, integrate_svf, neg_jacobian_penalty
+from utils.field import compose_flows, integrate_svf, jacobian_penalty_and_folds, neg_jacobian_penalty
 from utils.losses import Grad3d, NCCVxm
 from utils.spatial import SpatialTransformer
 
 TTO_MODES = ("none", "disp", "svf", "inr", "kan", "randkan")
 TTO_SCHEDULES = ("cosine", "onecycle", "exp", "const")
+TTO_STOP_MODES = ("fixed", "topology", "plateau", "both")
 _DENSE_MODES = ("disp", "svf")
 
 
@@ -22,6 +23,12 @@ class TTOConfig:
 
     `mode` selects what is optimised: the displacement itself (disp), a stationary velocity field
     integrated into one (svf), or a coordinate network producing the residual (inr/kan/randkan).
+    `stop_mode` may end a run before `steps`, which is always the ceiling.
+
+    Plus:
+    - every trained checkpoint depends on the eps=0 knife-edge form
+    - 'use_mask' rescales similarity against the regulariser; w_reg would need re-tuning
+    - 'inr_chunks' unchunked, a coord net over every voxel needs ~23 GB of activations
     """
 
     mode: str = "svf"
@@ -29,29 +36,33 @@ class TTOConfig:
     lr: float = 0.01
     w_reg: float = 1.0
     w_jac: float = 0.005
-    # eps > 0 penalises detJ below eps rather than only below 0; every trained checkpoint and
-    # reported number depends on the eps=0 form, so it stays the default.
     jac_eps: float = 0.0
     ncc_win: int = 9
     svf_int_steps: int = 7
     lr_schedule: str = "cosine"
-    # Masking rescales the similarity term against the regulariser, so w_reg would need re-tuning.
     use_mask: bool = False
     inr_hidden: int = 128
     inr_layers: int = 3
     kan_degree: int = 28
     kan_k: int = 12
     kan_layers: tuple[int, ...] = (3, 70, 70, 3)
-    # A coordinate net evaluated on all ~6.9M voxels at once needs ~23 GB of activations; chunking
-    # the forward and recomputing chunks in backward trades ~30% time for that memory.
     inr_chunks: int = 16
     snapshot_at: tuple[int, ...] = field(default_factory=tuple)
+
+    stop_mode: str = "fixed"
+    fold_k: float = 1.25
+    fold_delta: float = 0.01  # percentage points
+    fold_check_every: int = 10
+    plateau_window: int = 50
+    plateau_rel: float = 0.02
 
     def __post_init__(self):
         if self.mode not in TTO_MODES:
             raise ValueError(f"Unknown TTO mode '{self.mode}'; expected one of {TTO_MODES}.")
         if self.lr_schedule not in TTO_SCHEDULES:
             raise ValueError(f"Unknown TTO schedule '{self.lr_schedule}'; expected one of {TTO_SCHEDULES}.")
+        if self.stop_mode not in TTO_STOP_MODES:
+            raise ValueError(f"Unknown TTO stop mode '{self.stop_mode}'; expected one of {TTO_STOP_MODES}.")
         if self.steps < 0:
             raise ValueError(f"TTO steps must be >= 0, got {self.steps}.")
         self.snapshot_at = tuple(sorted({s for s in self.snapshot_at if 0 < s <= self.steps}))
@@ -60,9 +71,18 @@ class TTOConfig:
     def enabled(self) -> bool:
         return self.mode != "none" and self.steps > 0
 
+    @property
+    def guards_topology(self) -> bool:
+        return self.stop_mode in ("topology", "both")
+
+    @property
+    def guards_plateau(self) -> bool:
+        return self.stop_mode in ("plateau", "both")
+
     def slug(self) -> str:
-        """Output-directory identifier, e.g. 'tto_svf_s200'."""
-        return f"tto_{self.mode}_s{self.steps}"
+        """Output-directory identifier, e.g. 'tto_svf_s200' or 'tto_svf_s400_topology'."""
+        base = f"tto_{self.mode}_s{self.steps}"
+        return base if self.stop_mode == "fixed" else f"{base}_{self.stop_mode}"
 
 
 @dataclass
@@ -70,6 +90,10 @@ class TTOResult:
     flow: torch.Tensor
     snapshots: dict[int, torch.Tensor]
     steps_run: int
+    stop_reason: str = "fixed"
+    fold_budget: float = 0.0
+    folds_start: float = 0.0
+    folds_end: float = 0.0
 
 
 def _normalised_coords(shape: tuple[int, int, int], device, dtype) -> torch.Tensor:
@@ -109,7 +133,6 @@ def _build_scheduler(opt: torch.optim.Optimizer, cfg: TTOConfig):
 
 class _FieldParameterisation(nn.Module):
     """Maps the free parameters to a full-resolution flow, given the cascade's flow0.
-
     Every mode yields exactly flow0 at initialisation, so step 0 reproduces the cascade.
     """
 
@@ -142,11 +165,19 @@ class _FieldParameterisation(nn.Module):
         if self.cfg.mode == "disp":
             return self.flow0 + self.theta
         if self.cfg.mode == "svf":
-            # Same integrate-then-compose chain the cascade uses in model.py::_merge_l3; exp(v) is
-            # a diffeomorphism, so the refinement cannot fold the field by construction.
+            # model.py::_merge_l3's chain verbatim: this repo carries two align_corners conventions.
             delta = integrate_svf(self.theta, self.st, steps=self.cfg.svf_int_steps)
             return compose_flows(delta, self.flow0)
         return self.flow0 + self._coord_residual()
+
+
+def _is_plateau(sim_hist: list[float], cfg: TTOConfig) -> bool:
+    """True once the similarity term's recent gain is a negligible share of its total gain."""
+    if len(sim_hist) <= cfg.plateau_window:
+        return False
+    total_gain = sim_hist[0] - sim_hist[-1]
+    window_gain = sim_hist[-1 - cfg.plateau_window] - sim_hist[-1]
+    return total_gain > 0.0 and window_gain < cfg.plateau_rel * total_gain
 
 
 def refine_flow(
@@ -158,9 +189,8 @@ def refine_flow(
     mask: torch.Tensor | None = None,
 ) -> TTOResult:
     """Optimise the deformation field for one pair, starting from the cascade's flow0.
-
-    `st_bilinear` must be the warp used by the evaluation path, so the loss scores the same
-    deformation the metrics will. `mask` is consulted only when `cfg.use_mask` is set.
+    `st_bilinear` must be the warp the evaluation path uses, so the loss scores what the metrics will.
+    Iteration `step` evaluates the field after `step` updates, so iteration 0 is flow0 itself.
     """
     if not cfg.enabled:
         return TTOResult(flow=flow0, snapshots={}, steps_run=0)
@@ -172,26 +202,64 @@ def refine_flow(
     ncc = NCCVxm(win=[cfg.ncc_win] * 3)
     reg = Grad3d(penalty="l2")
     loss_mask = mask if cfg.use_mask else None
-    snapshots: dict[int, torch.Tensor] = {}
+    every = max(cfg.fold_check_every, 1)
 
-    for step in range(1, cfg.steps + 1):
-        opt.zero_grad(set_to_none=True)
+    snapshots: dict[int, torch.Tensor] = {}
+    sim_hist: list[float] = []
+    admissible, steps_run = flow0, 0
+    budget = folds_start = folds_end = 0.0
+    stop_reason = "fixed"
+
+    for step in range(cfg.steps + 1):
         flow = param()
         warped = st_bilinear(moving, flow)
+        sim = ncc(fixed, warped, mask=loss_mask)
+        loss = sim + cfg.w_reg * reg(flow)
 
-        loss = ncc(fixed, warped, mask=loss_mask) + cfg.w_reg * reg(flow)
-        if cfg.w_jac > 0.0:
+        # The strict fold count is expensive; pay for it only on the steps the guard looks at.
+        checking = cfg.guards_topology and (step % every == 0 or step == cfg.steps)
+        folds = 0.0
+        if checking:
+            pen, folds = jacobian_penalty_and_folds(flow, mask=loss_mask, eps=cfg.jac_eps)
+            if cfg.w_jac > 0.0:
+                loss = loss + cfg.w_jac * pen
+        elif cfg.w_jac > 0.0:
             loss = loss + cfg.w_jac * neg_jacobian_penalty(flow, mask=loss_mask, eps=cfg.jac_eps)
 
+        if step == 0 and cfg.guards_topology:
+            folds_start = folds
+            budget = max(cfg.fold_k * folds, folds + cfg.fold_delta)
+
+        if checking and folds > budget:
+            stop_reason = "topology"
+            break
+
+        if checking or not cfg.guards_topology:
+            # Only a field whose topology was verified may be returned.
+            admissible, folds_end, steps_run = flow.detach(), folds, step
+        if step in cfg.snapshot_at:
+            snapshots[step] = flow.detach()
+
+        sim_hist.append(float(sim.detach()))
+        if cfg.guards_plateau and _is_plateau(sim_hist, cfg):
+            stop_reason = "plateau"
+            break
+
+        if step == cfg.steps:
+            break
+
+        opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
         if sched is not None:
             sched.step()
 
-        if step in cfg.snapshot_at:
-            with torch.no_grad():
-                snapshots[step] = param().detach()
-
-    with torch.no_grad():
-        final = param().detach()
-    return TTOResult(flow=final, snapshots=snapshots, steps_run=cfg.steps)
+    return TTOResult(
+        flow=admissible,
+        snapshots=snapshots,
+        steps_run=steps_run,
+        stop_reason=stop_reason,
+        fold_budget=budget,
+        folds_start=folds_start,
+        folds_end=folds_end,
+    )

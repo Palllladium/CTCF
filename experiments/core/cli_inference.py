@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from experiments.core.cli_ctcf import add_ctcf_override_args
-from utils.tto import TTO_MODES, TTO_SCHEDULES
+from utils.tto import TTO_MODES, TTO_SCHEDULES, TTO_STOP_MODES
 
 MODEL_CHOICES = [
     "tm-dca",
@@ -72,6 +72,49 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         choices=list(TTO_SCHEDULES),
         default="cosine",
         help="LR schedule over the TTO steps.",
+    )
+    group.add_argument(
+        "--tto_svf_int_steps",
+        type=int,
+        default=7,
+        help="Scaling-and-squaring steps for --tto_mode svf.",
+    )
+    group.add_argument(
+        "--tto_stop",
+        type=str,
+        choices=list(TTO_STOP_MODES),
+        default="fixed",
+        help="Early stop rule; --tto_steps remains the ceiling.",
+    )
+    group.add_argument(
+        "--tto_fold_k",
+        type=float,
+        default=1.25,
+        help="Topology guard: allow folds up to fold_k x the network's own fold percentage.",
+    )
+    group.add_argument(
+        "--tto_fold_delta",
+        type=float,
+        default=0.01,
+        help="Topology guard: additive fold allowance, in percentage points.",
+    )
+    group.add_argument(
+        "--tto_fold_check_every",
+        type=int,
+        default=10,
+        help="Topology guard: steps between fold checks.",
+    )
+    group.add_argument(
+        "--tto_plateau_window",
+        type=int,
+        default=50,
+        help="Plateau guard: window over which the similarity gain is measured.",
+    )
+    group.add_argument(
+        "--tto_plateau_rel",
+        type=float,
+        default=0.02,
+        help="Plateau guard: stop when the window gain drops below this share of the total gain.",
     )
     group.add_argument(
         "--tto_mask",
