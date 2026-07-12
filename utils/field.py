@@ -38,11 +38,7 @@ def compose_flows(flow_ab: torch.Tensor, flow_bc: torch.Tensor, mode: str = "bil
 
 
 def integrate_svf(vel: torch.Tensor, st, steps: int = 7) -> torch.Tensor:
-    """Integrate a stationary velocity field into a displacement via scaling-and-squaring.
-
-    `st` is a SpatialTransformer sized to `vel`; it is passed in rather than constructed
-    here so callers keep control of the warp convention their checkpoints were trained on.
-    """
+    """Integrate a stationary velocity field into a displacement via scaling-and-squaring."""
     disp = vel * (1.0 / (2**steps))
     for _ in range(steps):
         disp = disp + st(disp, disp)
@@ -76,19 +72,13 @@ def jacobian_det(flow: torch.Tensor) -> torch.Tensor:
     return det.unsqueeze(1)
 
 
-def neg_jacobian_penalty(
-    flow: torch.Tensor,
+def _neg_jac_penalty_from_det(
+    det: torch.Tensor,
     mask: torch.Tensor | None = None,
     crop: int = 1,
     eps: float = 0.0,
 ) -> torch.Tensor:
-    """Mean penalty over non-positive Jacobian determinant voxels.
-
-    `eps` > 0 widens the penalised band to detJ < eps, so voxels merely approaching a fold
-    are pushed back instead of being punished only once they have folded. Kept at 0.0 by
-    default: every trained checkpoint and reported number depends on the knife-edge form.
-    """
-    pen = torch.relu(-_crop_spatial(jacobian_det(flow), crop) + eps)
+    pen = torch.relu(-_crop_spatial(det, crop) + eps)
 
     if mask is None:
         return pen.mean()
@@ -99,6 +89,84 @@ def neg_jacobian_penalty(
     m = _crop_spatial(m, crop)
     denom = torch.clamp(m.sum(), min=1.0)
     return (pen * m).sum() / denom
+
+
+def neg_jacobian_penalty(
+    flow: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    crop: int = 1,
+    eps: float = 0.0,
+) -> torch.Tensor:
+    """Mean penalty over non-positive Jacobian determinant voxels.
+    `eps` > 0 widens the band to detJ < eps; 0.0 is the form every trained checkpoint depends on.
+    """
+    return _neg_jac_penalty_from_det(jacobian_det(flow), mask, crop, eps)
+
+
+_AXIS_MODES = (
+    ("+", "+", "+"), ("+", "+", "-"), ("+", "-", "+"), ("+", "-", "-"),
+    ("-", "+", "+"), ("-", "+", "-"), ("-", "-", "+"), ("-", "-", "-"),
+)  # fmt: skip
+
+
+def _one_sided_diff(t: torch.Tensor, axis: int, mode: str) -> torch.Tensor:
+    """Forward ('+') or backward ('-') difference of [3,D,H,W] along a spatial axis, edge-clamped."""
+    dim = axis + 1
+    n = t.shape[dim]
+    idx = torch.arange(n, device=t.device)
+    if mode == "+":
+        return t.index_select(dim, torch.clamp(idx + 1, max=n - 1)) - t
+    return t - t.index_select(dim, torch.clamp(idx - 1, min=0))
+
+
+def digital_fold_percent(flow: torch.Tensor) -> torch.Tensor:
+    """Percent of voxels where any of the 8 one-sided Jacobian determinants is non-positive.
+    Stricter than the central-difference `jacobian_det`; the two are not interchangeable.
+    """
+    disp = flow[0]
+    d, h, w = disp.shape[1:]
+    zz, yy, xx = torch.meshgrid(
+        torch.arange(d, device=flow.device),
+        torch.arange(h, device=flow.device),
+        torch.arange(w, device=flow.device),
+        indexing="ij",
+    )
+    trans = disp + torch.stack([zz, yy, xx], dim=0).to(disp.dtype)
+
+    all_pos = None
+    for mx, my, mz in _AXIS_MODES:
+        gx = _one_sided_diff(trans, 0, mx)
+        gy = _one_sided_diff(trans, 1, my)
+        gz = _one_sided_diff(trans, 2, mz)
+        det = (
+            gx[0] * (gy[1] * gz[2] - gy[2] * gz[1])
+            - gx[1] * (gy[0] * gz[2] - gy[2] * gz[0])
+            + gx[2] * (gy[0] * gz[1] - gy[1] * gz[0])
+        )[1:-1, 1:-1, 1:-1]
+        pos = det > 0.0
+        all_pos = pos if all_pos is None else (all_pos & pos)
+
+    return (~all_pos).to(flow.dtype).mean() * 100.0
+
+
+def jacobian_penalty_and_folds(
+    flow: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    crop: int = 1,
+    eps: float = 0.0,
+    strict: bool = True,
+) -> tuple[torch.Tensor, float]:
+    """Fold penalty on the central-difference detJ, plus a fold percentage, from one pass.
+    `strict` counts the percentage by `digital_fold_percent` instead of that same detJ.
+    """
+    det = jacobian_det(flow)
+    pen = _neg_jac_penalty_from_det(det, mask, crop, eps)
+    with torch.no_grad():
+        if strict:
+            folds = float(digital_fold_percent(flow).item())
+        else:
+            folds = float((_crop_spatial(det, crop) <= 0.0).to(det.dtype).mean().item() * 100.0)
+    return pen, folds
 
 
 def jacobian_nonpositive_percent(

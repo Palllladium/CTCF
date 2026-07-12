@@ -23,11 +23,17 @@ def _ixi_jac_log(row: dict) -> str:
 
 
 def _oasis_jac_metrics(flow: torch.Tensor, x_seg: torch.Tensor) -> dict[str, float]:
-    return {"sdlogj": float(logdet_std_from_flow(flow))}
+    # sdlogj stays first and unchanged: every published OASIS table is keyed on it.
+    j_leq0, ndv = digital_jacobian_metrics(flow, mask=x_seg)
+    return {
+        "sdlogj": float(logdet_std_from_flow(flow)),
+        "j_leq0_percent": float(j_leq0),
+        "ndv_percent": float(ndv),
+    }
 
 
 def _oasis_jac_log(row: dict) -> str:
-    return f" sdlogj={row['sdlogj']:.4f}"
+    return f" sdlogj={row['sdlogj']:.4f} j<=0%={row['j_leq0_percent']:.4f}"
 
 
 @dataclass
