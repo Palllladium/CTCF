@@ -20,7 +20,9 @@ HD95="${HD95:---hd95}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
-MAMBA="--model ctcf --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"
+# Arch flags passed to run() land after these, and argparse takes the last occurrence, so a block can
+# override the config or the SVF switch just by naming them again.
+BASE="--model ctcf --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"
 
 ck() { echo "results/$1/ckpt/best.pth"; }
 
@@ -41,7 +43,7 @@ run() {
   [[ "$ds" == "IXI" ]] && extra+=(--use_test)
   # shellcheck disable=SC2086
   "${PYBIN}" -m experiments.inference \
-    $MAMBA --ds "$ds" "$PROFILE" --ckpt "$ckpt" --strict_ckpt 0 --gpu "$GPU" $HD95 \
+    $BASE --ds "$ds" "$PROFILE" --ckpt "$ckpt" --strict_ckpt 0 --gpu "$GPU" $HD95 \
     --print_every 5 --out_dir "$out" \
     "${arch[@]}" "${extra[@]}" "${tto[@]}"
 }
@@ -74,6 +76,24 @@ if want F0; then
   done
 fi
 
+# F1 — the whole Paper-2 headline table, re-scored under the strict fold rule.          (~40 min)
+# Paper 2 reports "0.00 % folds" on OASIS. That is the lenient central-difference count; the OASIS and
+# IXI fold columns are not the same quantity. Nobody can decide what the paper should report without
+# seeing the strict numbers for every headline row, and they cost minutes. No TTO, no model changes.
+if want F1; then
+  echo "########## F1 — Paper-2 headline configs, strict fold metric ##########"
+  # $2 is deliberately unquoted: it carries several flags that must word-split.
+  # shellcheck disable=SC2086
+  f1() { run "F1_$1" "$3" "$(ck "$1")" $2 -- --tto_mode none; }
+  f1 P10_LONGRUN_MAMBA_SVF_OASIS     "--ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"      OASIS
+  f1 P10_LONGRUN_MAMBA_SVF_IXI       "--ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"      IXI
+  f1 P10_LONGRUN_MAMBA_NOSVF_OASIS   "--ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 0"      OASIS
+  f1 P10_LONGRUN_LKU8_SVF_OASIS      "--ctcf_config CTCF-CascadeA-LKU8 --ctcf_l3_svf 1"       OASIS
+  f1 P10_LONGRUN_LKU8_SVF_IXI        "--ctcf_config CTCF-CascadeA-LKU8 --ctcf_l3_svf 1"       IXI
+  f1 P10_LONGRUN_VXM_UNIFIED_SVF_OASIS "--ctcf_config CTCF-CascadeA-VM-Unified --ctcf_l3_svf 1" OASIS
+  f1 P10_LONGRUN_VXM_UNIFIED_SVF_IXI   "--ctcf_config CTCF-CascadeA-VM-Unified --ctcf_l3_svf 1" IXI
+fi
+
 # A2 — the Dice/topology trade-off curve. Round 1's Pareto was drawn on sdlogj and is void. (~6 h)
 # A single-pair local probe says the two parameterisations are not on one curve at all: for the same
 # pair, disp bought +0.0070 Dice at 6.4x the folds, svf bought +0.0061 at 1.00x. This block is the
@@ -82,9 +102,12 @@ if want A2; then
   echo "########## A2 — Dice vs folds, svf against disp ##########"
   for M in svf disp; do
     for LR in 0.003 0.01 0.03; do
-      run "A2_${M}_lr${LR/./p}" OASIS "$OASIS_CK" \
+      run "A2_OASIS__${M}_lr${LR/./p}" OASIS "$OASIS_CK" \
           -- --tto_mode "$M" --tto_steps "$STEPS" --tto_lr "$LR" --tto_trace $TRACE
     done
+    # Round 1 never ran disp on IXI, so the claim rests on one dataset. One lr is enough to see
+    # whether the fold cost separates the two parameterisations here as well.
+    run "A2_IXI__${M}" IXI "$IXI_CK" -- --tto_mode "$M" --tto_steps "$STEPS" --tto_trace $TRACE
   done
 fi
 
@@ -158,6 +181,12 @@ if want D2; then
   run "D2_IXIck_on_OASIS__svf"  OASIS "$IXI_CK"   -- --tto_mode svf --tto_steps 800 --tto_trace $TRACE 800
   run "D2_OASISck_on_IXI__none" IXI   "$OASIS_CK" -- --tto_mode none
   run "D2_OASISck_on_IXI__svf"  IXI   "$OASIS_CK" -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
+  # The guard applied to the case it was built for. Adapting to an unseen domain is the one setting
+  # where nobody can tune the step count, because there are no labels to tune it against.
+  run "D2_IXIck_on_OASIS__guard" OASIS "$IXI_CK" \
+      -- --tto_mode svf --tto_steps 800 --tto_stop topology --tto_fold_k 2.0 --tto_fold_check_every 5
+  run "D2_OASISck_on_IXI__guard" IXI  "$OASIS_CK" \
+      -- --tto_mode svf --tto_steps 800 --tto_stop topology --tto_fold_k 2.0 --tto_fold_check_every 5
 fi
 
 # R — does a smoother source field adapt better?                                         (~4 h)
