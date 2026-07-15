@@ -189,6 +189,30 @@ if want D2; then
       -- --tto_mode svf --tto_steps 800 --tto_stop topology --tto_fold_k 2.0 --tto_fold_check_every 5
 fi
 
+# T — does the backbone matter at all under TTO?                                         (~3 h)
+# The Phase-11 ladder collapse was within the Mamba family (a capacity axis). This is the same test
+# across the whole backbone axis: the original Paper-1 Swin-DCA cascade is 296M — 25x the Mamba —
+# and was the entire subject of Paper 1. TTO adds a fresh SVF velocity on top of flow0 regardless of
+# how flow0 was produced, so it applies unchanged. Config is the l3_svf=False Swin-DCA preset.
+# If 296M+TTO lands where 11.9M+TTO does (~0.835), the backbone is not a lever under TTO — which
+# settles both "is there architectural headroom" and Paper 2's efficiency claim in one run.
+# The control MUST reproduce the checkpoint's known feed-forward Dice; if it does not, the flags are
+# wrong and the SVF number is meaningless — stop.
+if want T; then
+  echo "########## T — Swin-DCA (296M) under TTO vs Mamba (11.9M) ##########"
+  SWIN="--ctcf_config CTCF-CascadeA --ctcf_l3_svf 0"
+  # shellcheck disable=SC2086
+  run "T_SWIN_OASIS__none" OASIS "$(ck CTCF_UPD_OASIS_E500)" $SWIN -- --tto_mode none
+  # shellcheck disable=SC2086
+  run "T_SWIN_OASIS__svf"  OASIS "$(ck CTCF_UPD_OASIS_E500)" $SWIN \
+      -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
+  # shellcheck disable=SC2086
+  run "T_SWIN_IXI__none"   IXI   "$(ck CTCF_IXI_TUNED)" $SWIN -- --tto_mode none
+  # shellcheck disable=SC2086
+  run "T_SWIN_IXI__svf"    IXI   "$(ck CTCF_IXI_TUNED)" $SWIN \
+      -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
+fi
+
 # R — does a smoother source field adapt better?                                         (~4 h)
 # The asymmetry above tracks w_reg: IXI trains at 4.0, OASIS at 1.0. If smoothness is what travels,
 # a reference checkpoint for domain adaptation must be trained smooth, not merely on more data.
