@@ -213,6 +213,20 @@ if want T; then
       -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
 fi
 
+# XB — does TTO collapse the BACKBONE axis, not just capacity?                            (~2 h)
+# C2 collapsed the capacity ladder inside Mamba; T tests the 296M Swin-DCA extreme. This fills the
+# middle: the other 500ep backbones under TTO. Their no-TTO baselines are the F1 runs. If VxM 9.2M,
+# LKU8 6.7M, Mamba 11.9M and Swin-DCA 296M all land at ~0.835 under TTO, the backbone washes out too.
+if want XB; then
+  echo "########## XB — other 500ep backbones under TTO ##########"
+  run "XB_LKU8_OASIS__svf" OASIS "$(ck P10_LONGRUN_LKU8_SVF_OASIS)" \
+      --ctcf_config CTCF-CascadeA-LKU8 --ctcf_l3_svf 1 \
+      -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
+  run "XB_VXM_OASIS__svf"  OASIS "$(ck P10_LONGRUN_VXM_UNIFIED_SVF_OASIS)" \
+      --ctcf_config CTCF-CascadeA-VM-Unified --ctcf_l3_svf 1 \
+      -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
+fi
+
 # R — does a smoother source field adapt better?                                         (~4 h)
 # The asymmetry above tracks w_reg: IXI trains at 4.0, OASIS at 1.0. If smoothness is what travels,
 # a reference checkpoint for domain adaptation must be trained smooth, not merely on more data.
