@@ -24,7 +24,17 @@ export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 # override the config or the SVF switch just by naming them again.
 BASE="--model ctcf --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 1"
 
-ck() { echo "results/$1/ckpt/best.pth"; }
+# Mamba P10/P11 runs store ckpt/best.pth; the older Swin-DCA (Paper-1) runs store best.pth[.tar] flat.
+ck() {
+  local folder="results/$1" sub name p
+  for sub in "ckpt/" ""; do
+    for name in best.pth best.pth.tar last.pth last.pth.tar; do
+      p="$folder/$sub$name"
+      [[ -f "$p" ]] && { echo "$p"; return 0; }
+    done
+  done
+  echo "$folder/ckpt/best.pth"
+}
 
 run() {
   # run <tag> <ds> <ckpt> <arch-flags...> -- <tto-flags...>
