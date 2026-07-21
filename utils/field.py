@@ -119,9 +119,40 @@ def _one_sided_diff(t: torch.Tensor, axis: int, mode: str) -> torch.Tensor:
     return t - t.index_select(dim, torch.clamp(idx - 1, min=0))
 
 
-def digital_fold_percent(flow: torch.Tensor) -> torch.Tensor:
-    """Percent of voxels where any of the 8 one-sided Jacobian determinants is non-positive.
-    Stricter than the central-difference `jacobian_det`; the two are not interchangeable.
+_STAR_OFFSETS = (
+    ((-1, -1, 0), (-1, 0, -1), (0, -1, -1)),
+    ((1, 1, 0), (0, 1, 1), (1, 0, 1)),
+)  # J1*, J2* — the two tetrahedralisations of the cell; face-diagonal, not axis-aligned
+
+
+def _shift_diff(t: torch.Tensor, offset: tuple[int, int, int]) -> torch.Tensor:
+    """t[p + offset] - t[p] for [3,D,H,W], edge-clamped like the one-sided differences."""
+    shifted = t
+    for axis, off in enumerate(offset):
+        if off == 0:
+            continue
+        dim = axis + 1
+        n = shifted.shape[dim]
+        idx = torch.clamp(torch.arange(n, device=t.device) + off, 0, n - 1)
+        shifted = shifted.index_select(dim, idx)
+    return shifted - t
+
+
+def _det3(gx: torch.Tensor, gy: torch.Tensor, gz: torch.Tensor) -> torch.Tensor:
+    """Determinant of the 3x3 matrix built from three difference vectors of [3,D,H,W]."""
+    return (
+        gx[0] * (gy[1] * gz[2] - gy[2] * gz[1])
+        - gx[1] * (gy[0] * gz[2] - gy[2] * gz[0])
+        + gx[2] * (gy[0] * gz[1] - gy[1] * gz[0])
+    )
+
+
+def digital_fold_percent(flow: torch.Tensor, corners_only: bool = False) -> torch.Tensor:
+    """Percent of voxels failing the digital diffeomorphism criterion of Liu et al., IJCV 2024
+    (doi:10.1007/s11263-024-02047-1): in 3D all **ten** determinants must be positive — the 8
+    forward/backward combinations plus J1*/J2*, which cover the cell interior the 8 corner
+    tetrahedra leave out. `corners_only=True` restricts the test to those 8, reproducing the
+    permissive count reported before 2026-07-22.
     """
     disp = flow[0]
     d, h, w = disp.shape[1:]
@@ -135,16 +166,22 @@ def digital_fold_percent(flow: torch.Tensor) -> torch.Tensor:
 
     all_pos = None
     for mx, my, mz in _AXIS_MODES:
-        gx = _one_sided_diff(trans, 0, mx)
-        gy = _one_sided_diff(trans, 1, my)
-        gz = _one_sided_diff(trans, 2, mz)
-        det = (
-            gx[0] * (gy[1] * gz[2] - gy[2] * gz[1])
-            - gx[1] * (gy[0] * gz[2] - gy[2] * gz[0])
-            + gx[2] * (gy[0] * gz[1] - gy[1] * gz[0])
+        det = _det3(
+            _one_sided_diff(trans, 0, mx),
+            _one_sided_diff(trans, 1, my),
+            _one_sided_diff(trans, 2, mz),
         )[1:-1, 1:-1, 1:-1]
         pos = det > 0.0
         all_pos = pos if all_pos is None else (all_pos & pos)
+
+    if not corners_only:
+        for ox, oy, oz in _STAR_OFFSETS:
+            det = _det3(
+                _shift_diff(trans, ox),
+                _shift_diff(trans, oy),
+                _shift_diff(trans, oz),
+            )[1:-1, 1:-1, 1:-1]
+            all_pos = all_pos & (det > 0.0)
 
     return (~all_pos).to(flow.dtype).mean() * 100.0
 
@@ -273,15 +310,17 @@ def digital_jacobian_metrics(flow: torch.Tensor, mask: torch.Tensor) -> tuple[fl
     ):
         det_pm.append(_det_from_axis_modes(mx, my, mz))
 
-    all_pos = np.ones_like(det_pm[0], dtype=np.bool_)
-    for det in det_pm:
-        all_pos &= det > 0.0
-    j_leq0_percent = float((~all_pos).sum() / all_pos.size * 100.0)
-
     k1 = np.array([[1, 0, 0], [0, -1, 0], [0, 0, 0]], dtype=np.float32)
     k2 = np.array([[0, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=np.float32)
     jstar1 = _det_from_kernels(k1.reshape(3, 3, 1), k1.reshape(3, 1, 3), k1.reshape(1, 3, 3))
     jstar2 = _det_from_kernels(k2.reshape(3, 3, 1), k2.reshape(1, 3, 3), k2.reshape(3, 1, 3))
+
+    # All ten determinants, per Definition 8 of Liu et al., IJCV 2024 — J1*/J2* are required,
+    # the 8 corner tetrahedra do not fill the cell.
+    all_pos = np.ones_like(det_pm[0], dtype=np.bool_)
+    for det in (*det_pm, jstar1, jstar2):
+        all_pos &= det > 0.0
+    j_leq0_percent = float((~all_pos).sum() / all_pos.size * 100.0)
 
     brain = (mask_np[1:-1, 1:-1, 1:-1] > 0).astype(np.float32)
     denom = float(brain.sum())
