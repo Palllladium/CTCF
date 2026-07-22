@@ -53,7 +53,7 @@ fi
 if [ "${SKIP_P9}" != "1" ]; then
     echo ""
     echo "########## 2/4  Phase 9 Stage 2 — extended table (inference only) ##########"
-    SKIP_STAGE1=1 GPU="${GPU}" PATHS_PROFILE="${PROFILE}" \
+    SKIP_STAGE1=1 GPU="${GPU}" PATHS_PROFILE="${PROFILE}" OUT="${OUT}" \
         bash tools/runners/phase9_matrix_and_inference.sh
 fi
 
@@ -61,7 +61,7 @@ fi
 if [ "${SKIP_P11}" != "1" ]; then
     echo ""
     echo "########## 3/4  Phase 11 — ablations + competitor baselines ##########"
-    GPU="${GPU}" PATHS_PROFILE="${PROFILE}" \
+    GPU="${GPU}" PATHS_PROFILE="${PROFILE}" OUT="${OUT}" \
         bash tools/runners/phase11_infer_stats.sh
 fi
 
