@@ -83,22 +83,28 @@ def safe_float(s):
         return None
 
 
+def _col(rows, name):
+    return mean_std([v for v in (safe_float(r.get(name)) for r in rows) if v is not None])
+
+
 def aggregate_one(csv_path: Path, ds: str) -> dict:
     rows = load_per_case(csv_path)
     dice = [safe_float(r.get("dice_mean")) for r in rows]
     hd95 = [safe_float(r.get("hd95_mean")) for r in rows if r.get("hd95_mean")]
-    if ds == "OASIS":
-        jac = [safe_float(r.get("sdlogj")) for r in rows]
-        jac_name = "SDlogJ"
-    else:
-        jac = [safe_float(r.get("j_leq0_percent")) for r in rows]
-        jac_name = "Fold,%"
+    # Fold counts are reported under their own names, never merged into one column: on the same field
+    # they differ by up to three orders of magnitude, and a single "Fold %" header is what made the
+    # OASIS and IXI columns incomparable in the first place.
     return dict(
         n=len(rows),
         dice=mean_std([v for v in dice if v is not None]),
         hd95=mean_std(hd95),
-        jac=mean_std([v for v in jac if v is not None]),
-        jac_name=jac_name,
+        sdlogj=_col(rows, "sdlogj"),
+        fold_central=_col(rows, "j_leq0_central_percent"),
+        fold_corners8=_col(rows, "j_leq0_corners_percent"),
+        fold_digital10=_col(rows, "j_leq0_percent"),
+        ndv=_col(rows, "ndv_percent"),
+        jac=_col(rows, "sdlogj") if ds == "OASIS" else _col(rows, "j_leq0_percent"),
+        jac_name="SDlogJ" if ds == "OASIS" else "Fold,% (digital-10)",
         dice_arr=[v for v in dice if v is not None],
     )
 
@@ -288,6 +294,11 @@ def write_aggregated_csv(stats_by_exp, output_dir: Path):
                 "jac_metric",
                 "jac_mean",
                 "jac_std",
+                "sdlogj_mean",
+                "fold_central_mean",
+                "fold_corners8_mean",
+                "fold_digital10_mean",
+                "ndv_mean",
             ]
         )
         for exp_name, s in stats_by_exp.items():
@@ -308,6 +319,10 @@ def write_aggregated_csv(stats_by_exp, output_dir: Path):
                 s["jac_name"],
                 f"{s['jac'][0]:.4f}" if s["jac"][0] is not None else "—",
                 f"{s['jac'][1]:.4f}" if s["jac"][1] is not None else "—",
+                *(
+                    f"{s[k][0]:.4f}" if s[k][0] is not None else "—"
+                    for k in ("sdlogj", "fold_central", "fold_corners8", "fold_digital10", "ndv")
+                ),
             ]
             w.writerow(row)
 
