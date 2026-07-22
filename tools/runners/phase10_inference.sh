@@ -35,6 +35,9 @@ SKIP_CROSS="${SKIP_CROSS:-0}"
 SKIP_AGGREGATE="${SKIP_AGGREGATE:-0}"
 SKIP_STATS="${SKIP_STATS:-0}"
 
+# Paper-1 baseline inference output; only needed by the final stat-test step.
+PAPER1_ROOT="${PAPER1_ROOT:-results/infer}"
+
 # Required for tools/analysis/* imports of experiments.core.*
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
@@ -123,21 +126,28 @@ fi
 
 if [ "${SKIP_STATS}" != "1" ]; then
     echo ""
-    echo ">> Paired Wilcoxon vs Paper 1"
-    "${PYBIN}" tools/analysis/compute_stats.py sedm_vs_paper1 \
-        --infer-root results/infer \
-        --sedm-root "${OUT}/inference" \
-        2>&1 | tee "${OUT}/summary/stat_tests_vs_paper1.txt"
+    # The Paper-1 baseline lives outside OUT and is not present on every machine.
+    # Missing it must not fail a run whose inference and aggregation already succeeded.
+    if [ ! -f "${PAPER1_ROOT}/OASIS/ctcf/best/per_case.csv" ] \
+        && [ ! -f "${PAPER1_ROOT}/OASIS/ctcf/best.pth/per_case.csv" ]; then
+        echo ">> SKIP Paired Wilcoxon vs Paper 1 — no baseline at ${PAPER1_ROOT}/OASIS/ctcf/"
+        echo "   (Paper-1 inference output; run this step where that directory exists,"
+        echo "    or point PAPER1_ROOT at it. Inference and aggregation above are unaffected.)"
+    else
+        echo ">> Paired Wilcoxon vs Paper 1"
+        "${PYBIN}" tools/analysis/compute_stats.py sedm_vs_paper1 \
+            --infer-root "${PAPER1_ROOT}" \
+            --sedm-root "${OUT}/inference" \
+            2>&1 | tee "${OUT}/summary/stat_tests_vs_paper1.txt"
+    fi
 fi
 
 echo ""
 echo "Phase 10 inference + aggregation complete."
 echo ""
-echo "Files to send back to user:"
-echo "  - ${OUT}/inference/P10_LONGRUN_*/per_case.csv     (7 files)"
-echo "  - ${OUT}/inference/P10_CROSS_*/per_case.csv       (2 files)"
-echo "  - ${OUT}/summary/aggregated.csv"
-echo "  - ${OUT}/summary/main_oasis.{md,tex}"
+echo "Send back the whole directory: ${OUT}/  (~3 MB)"
+echo "  ${OUT}/inference/*/per_case.csv  — the leaf data; every table is rebuilt from these"
+echo "  ${OUT}/summary/                  — derived tables (regenerate rather than trust)"
 echo "  - ${OUT}/summary/main_ixi.{md,tex}"
 echo "  - ${OUT}/summary/cascade_delta.{md,tex}"
 echo "  - ${OUT}/summary/stat_tests.md"
