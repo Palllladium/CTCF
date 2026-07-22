@@ -223,6 +223,28 @@ if want T; then
       -- --tto_mode svf --tto_steps "$STEPS" --tto_trace $TRACE
 fi
 
+# RS — re-score under the corrected fold metrics, and probe whether the guard still behaves. (~45 min)
+# The Paper-1 baseline is the only fold number no inference runner produces, and every "vs Paper 1"
+# statement needs it on the same metric as the rest.
+# The guard budgets folds RELATIVE to f0 (stop when folds > max(k*f0, f0+delta)), so a uniform
+# rescaling of the metric cancels in the multiplicative term and only shifts the additive floor.
+# The measured 8->10 factor is not perfectly uniform (1.00-1.13 across configs), so this runs the ship
+# setting once on OASIS: if the stop step and final numbers hold, no recalibration is needed and the
+# rest of the TTO re-score is pure re-reporting. New tag, so the existing S_OASIS__k1p25 survives for
+# a side-by-side comparison.
+if want RS; then
+  echo "########## RS — Paper-1 baseline + guard probe under the corrected metric ##########"
+  SWIN="--ctcf_config CTCF-CascadeA --ctcf_l3_svf 0"
+  # shellcheck disable=SC2046,SC2086
+  run "RS_SWIN_OASIS__none" OASIS "$(ck CTCF_UPD_OASIS_E500)" $SWIN -- --tto_mode none
+  # shellcheck disable=SC2046,SC2086
+  run "RS_SWIN_IXI__none"   IXI   "$(ck CTCF_IXI_TUNED)"      $SWIN -- --tto_mode none
+
+  run "RS_GUARD_OASIS__k1p25" OASIS "$OASIS_CK" \
+      -- --tto_mode svf --tto_steps 800 --tto_stop topology \
+         --tto_fold_k 1.25 --tto_fold_check_every 5 --tto_trace $TRACE
+fi
+
 # XB — does TTO collapse the BACKBONE axis, not just capacity?                            (~2 h)
 # C2 collapsed the capacity ladder inside Mamba; T tests the 296M Swin-DCA extreme. This fills the
 # middle: the other 500ep backbones under TTO. Their no-TTO baselines are the F1 runs. If VxM 9.2M,
