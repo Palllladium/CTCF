@@ -11,7 +11,9 @@ from .dice import (
 )
 from .field import (
     compose_flows,
+    digital_fold_penalty,
     digital_jacobian_metrics,
+    digital_penalty_and_folds,
     integrate_svf,
     jacobian_det,
     jacobian_nonpositive_percent,
@@ -59,7 +61,9 @@ __all__ = [
     "dice_per_label",
     "dice_val",
     "dice_val_subset",
+    "digital_fold_penalty",
     "digital_jacobian_metrics",
+    "digital_penalty_and_folds",
     "elastic_loss",
     "hd95_mean_labels",
     "icon_loss",

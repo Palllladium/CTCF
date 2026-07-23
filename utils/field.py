@@ -186,6 +186,93 @@ def digital_fold_percent(flow: torch.Tensor, corners_only: bool = False) -> torc
     return (~all_pos).to(flow.dtype).mean() * 100.0
 
 
+def _digital_determinants(flow: torch.Tensor, corners_only: bool = False) -> list[torch.Tensor]:
+    """The ten (or eight, `corners_only`) differentiable determinant maps of the digital
+    diffeomorphism criterion (Liu et al., IJCV 2024), each cropped to the interior [1:-1,1:-1,1:-1].
+    `digital_fold_percent` counts their signs; this returns the raw values so a hinge or a barrier
+    can act on them. Kept separate from `digital_fold_percent` — which is frozen because reported
+    numbers depend on it — and checked numerically equal to it in the count it induces.
+    """
+    disp = flow[0]
+    d, h, w = disp.shape[1:]
+    zz, yy, xx = torch.meshgrid(
+        torch.arange(d, device=flow.device),
+        torch.arange(h, device=flow.device),
+        torch.arange(w, device=flow.device),
+        indexing="ij",
+    )
+    trans = disp + torch.stack([zz, yy, xx], dim=0).to(disp.dtype)
+
+    dets = [
+        _det3(
+            _one_sided_diff(trans, 0, mx),
+            _one_sided_diff(trans, 1, my),
+            _one_sided_diff(trans, 2, mz),
+        )[1:-1, 1:-1, 1:-1]
+        for mx, my, mz in _AXIS_MODES
+    ]
+    if not corners_only:
+        for ox, oy, oz in _STAR_OFFSETS:
+            dets.append(_det3(_shift_diff(trans, ox), _shift_diff(trans, oy), _shift_diff(trans, oz))[1:-1, 1:-1, 1:-1])
+    return dets
+
+
+def _interior_masked_mean(pen_map: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """Mean of an interior [D-2,H-2,W-2] map, over the brain if `mask` is given.
+    The mask (any of [.,.,D,H,W] / [.,D,H,W] / [D,H,W]) is cropped to the same interior.
+    """
+    if mask is None:
+        return pen_map.mean()
+    m = mask
+    while m.dim() > 3:
+        m = m[0]
+    m = (m[1:-1, 1:-1, 1:-1] > 0).to(pen_map.dtype)
+    return (pen_map * m).sum() / torch.clamp(m.sum(), min=1.0)
+
+
+def digital_fold_penalty(
+    flow: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    eps: float = 0.0,
+) -> torch.Tensor:
+    """Differentiable hinge on the ten digital-diffeomorphism determinants (Liu et al., IJCV 2024).
+    `neg_jacobian_penalty` scores the single central-difference detJ, which stays positive — hence
+    inert — even where the field folds digitally; this sums relu(eps - det_k) over the ten one-sided
+    and tetrahedral determinants the criterion requires positive, so the gradient is non-zero exactly
+    on the voxels `digital_fold_percent` counts. Restricted to the brain interior when `mask` is given.
+    Note: J1*/J2* have natural scale 2 vs 1 for the corner determinants, so a shared eps>0 imposes a
+    tighter relative margin on the corners; eps=0 (sign only) is scale-free.
+    """
+    pen_map = None
+    for det in _digital_determinants(flow):
+        h = torch.relu(eps - det)
+        pen_map = h if pen_map is None else pen_map + h
+    return _interior_masked_mean(pen_map, mask)
+
+
+def digital_penalty_and_folds(
+    flow: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    eps: float = 0.0,
+) -> tuple[torch.Tensor, float]:
+    """Differentiable digital hinge penalty and the strict digital fold percentage in one pass over
+    the ten determinants. The penalty follows `digital_fold_penalty` and honours `mask` (brain ROI);
+    the returned fold % is always whole-interior, matching `digital_fold_percent` and the reported
+    headline, so the topology guard and the comparison table stay on one scale.
+    """
+    pen_map = None
+    all_pos = None
+    for det in _digital_determinants(flow):
+        h = torch.relu(eps - det)
+        pen_map = h if pen_map is None else pen_map + h
+        pos = det > 0.0
+        all_pos = pos if all_pos is None else (all_pos & pos)
+    pen = _interior_masked_mean(pen_map, mask)
+    with torch.no_grad():
+        folds = float((~all_pos).to(flow.dtype).mean().item() * 100.0)
+    return pen, folds
+
+
 def jacobian_penalty_and_folds(
     flow: torch.Tensor,
     mask: torch.Tensor | None = None,

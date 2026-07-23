@@ -7,13 +7,21 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from utils.coord_nets import ChebyKANResidual, RandChebyKANResidual, SirenResidual
-from utils.field import compose_flows, integrate_svf, jacobian_penalty_and_folds, neg_jacobian_penalty
+from utils.field import (
+    compose_flows,
+    digital_fold_penalty,
+    digital_penalty_and_folds,
+    integrate_svf,
+    jacobian_penalty_and_folds,
+    neg_jacobian_penalty,
+)
 from utils.losses import Grad3d, NCCVxm
 from utils.spatial import SpatialTransformer
 
 TTO_MODES = ("none", "disp", "svf", "inr", "kan", "randkan")
 TTO_SCHEDULES = ("cosine", "onecycle", "exp", "const")
 TTO_STOP_MODES = ("fixed", "topology", "plateau", "both")
+TTO_JAC_MODES = ("central", "digital")
 _DENSE_MODES = ("disp", "svf")
 
 
@@ -24,6 +32,10 @@ class TTOConfig:
     `mode` selects what is optimised: the displacement itself (disp), a stationary velocity field
     integrated into one (svf), or a coordinate network producing the residual (inr/kan/randkan).
     `stop_mode` may end a run before `steps`, which is always the ceiling.
+    `jac_mode` selects the penalty the topology term acts on: 'central' is the legacy
+    central-difference detJ (inert once min detJ>0, i.e. on every SVF field we have); 'digital'
+    is the hinge on the ten Liu-et-al. determinants, whose gradient is non-zero exactly on the
+    voxels that fold digitally. `topo_mask` restricts that penalty to the brain interior.
 
     Plus:
     - every trained checkpoint depends on the eps=0 knife-edge form
@@ -36,7 +48,9 @@ class TTOConfig:
     lr: float = 0.01
     w_reg: float = 1.0
     w_jac: float = 0.005
+    jac_mode: str = "central"
     jac_eps: float = 0.0
+    topo_mask: bool = False
     ncc_win: int = 9
     svf_int_steps: int = 7
     lr_schedule: str = "cosine"
@@ -59,6 +73,8 @@ class TTOConfig:
     def __post_init__(self):
         if self.mode not in TTO_MODES:
             raise ValueError(f"Unknown TTO mode '{self.mode}'; expected one of {TTO_MODES}.")
+        if self.jac_mode not in TTO_JAC_MODES:
+            raise ValueError(f"Unknown TTO jac_mode '{self.jac_mode}'; expected one of {TTO_JAC_MODES}.")
         if self.lr_schedule not in TTO_SCHEDULES:
             raise ValueError(f"Unknown TTO schedule '{self.lr_schedule}'; expected one of {TTO_SCHEDULES}.")
         if self.stop_mode not in TTO_STOP_MODES:
@@ -80,9 +96,13 @@ class TTOConfig:
         return self.stop_mode in ("plateau", "both")
 
     def slug(self) -> str:
-        """Output-directory identifier, e.g. 'tto_svf_s200' or 'tto_svf_s400_topology'."""
+        """Output-directory identifier, e.g. 'tto_svf_s200' or 'tto_svf_s400_topology_digital'."""
         base = f"tto_{self.mode}_s{self.steps}"
-        return base if self.stop_mode == "fixed" else f"{base}_{self.stop_mode}"
+        if self.stop_mode != "fixed":
+            base = f"{base}_{self.stop_mode}"
+        if self.jac_mode != "central":
+            base = f"{base}_{self.jac_mode}"
+        return base
 
 
 @dataclass
@@ -202,6 +222,7 @@ def refine_flow(
     ncc = NCCVxm(win=[cfg.ncc_win] * 3)
     reg = Grad3d(penalty="l2")
     loss_mask = mask if cfg.use_mask else None
+    topo_mask = mask if cfg.topo_mask else None
     every = max(cfg.fold_check_every, 1)
 
     snapshots: dict[int, torch.Tensor] = {}
@@ -216,27 +237,40 @@ def refine_flow(
         sim = ncc(fixed, warped, mask=loss_mask)
         loss = sim + cfg.w_reg * reg(flow)
 
-        # The strict fold count is expensive; pay for it only on the steps the guard looks at.
-        checking = cfg.guards_topology and (step % every == 0 or step == cfg.steps)
+        # The strict fold count is expensive; pay for it only on the scheduled steps. It is needed
+        # to guard topology, and to report folds while the digital penalty is what shapes the field.
+        on_schedule = step % every == 0 or step == cfg.steps
+        measure = on_schedule and (cfg.guards_topology or cfg.jac_mode == "digital")
         folds = 0.0
-        if checking:
+        if cfg.jac_mode == "digital":
+            if measure:
+                pen, folds = digital_penalty_and_folds(flow, mask=topo_mask, eps=cfg.jac_eps)
+            elif cfg.w_jac > 0.0:
+                pen = digital_fold_penalty(flow, mask=topo_mask, eps=cfg.jac_eps)
+            else:
+                pen = None
+        elif measure:
             pen, folds = jacobian_penalty_and_folds(flow, mask=loss_mask, eps=cfg.jac_eps)
-            if cfg.w_jac > 0.0:
-                loss = loss + cfg.w_jac * pen
         elif cfg.w_jac > 0.0:
-            loss = loss + cfg.w_jac * neg_jacobian_penalty(flow, mask=loss_mask, eps=cfg.jac_eps)
+            pen = neg_jacobian_penalty(flow, mask=loss_mask, eps=cfg.jac_eps)
+        else:
+            pen = None
+        if pen is not None and cfg.w_jac > 0.0:
+            loss = loss + cfg.w_jac * pen
 
         if step == 0 and cfg.guards_topology:
             folds_start = folds
             budget = max(cfg.fold_k * folds, folds + cfg.fold_delta)
 
-        if checking and folds > budget:
+        if cfg.guards_topology and measure and folds > budget:
             stop_reason = "topology"
             break
 
-        if checking or not cfg.guards_topology:
-            # Only a field whose topology was verified may be returned.
-            admissible, folds_end, steps_run = flow.detach(), folds, step
+        if measure or not cfg.guards_topology:
+            # With a guard, only a field whose topology was just verified may be returned.
+            admissible, steps_run = flow.detach(), step
+        if measure:
+            folds_end = folds
         if step in cfg.snapshot_at:
             snapshots[step] = flow.detach()
 

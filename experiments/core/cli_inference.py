@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from experiments.core.cli_ctcf import add_ctcf_override_args
-from utils.tto import TTO_MODES, TTO_SCHEDULES, TTO_STOP_MODES
+from utils.tto import TTO_JAC_MODES, TTO_MODES, TTO_SCHEDULES, TTO_STOP_MODES
 
 MODEL_CHOICES = [
     "tm-dca",
@@ -61,10 +61,26 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         help="Negative-Jacobian penalty weight.",
     )
     group.add_argument(
+        "--tto_jac_mode",
+        type=str,
+        choices=list(TTO_JAC_MODES),
+        default="central",
+        help="Topology penalty: central (legacy detJ, inert on SVF fields) | digital (hinge on the "
+        "ten Liu-et-al. determinants, gradient non-zero exactly where the field folds digitally).",
+    )
+    group.add_argument(
         "--tto_jac_eps",
         type=float,
         default=0.0,
         help="Overcorrection margin: penalise detJ < eps, not just detJ < 0.",
+    )
+    group.add_argument(
+        "--tto_topo_mask",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Restrict the digital penalty to the brain interior. 0 = whole volume (matches the "
+        "reported fold%% and is the stricter feasibility test); 1 = brain ROI (the eventual claim scope).",
     )
     group.add_argument(
         "--tto_lr_schedule",
