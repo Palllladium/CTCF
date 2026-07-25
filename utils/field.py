@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -147,12 +149,13 @@ def _det3(gx: torch.Tensor, gy: torch.Tensor, gz: torch.Tensor) -> torch.Tensor:
     )
 
 
-def digital_fold_percent(flow: torch.Tensor, corners_only: bool = False) -> torch.Tensor:
+def digital_fold_percent(
+    flow: torch.Tensor, corners_only: bool = False, mask: torch.Tensor | None = None
+) -> torch.Tensor:
     """Percent of voxels failing the digital diffeomorphism criterion of Liu et al., IJCV 2024
-    (doi:10.1007/s11263-024-02047-1): in 3D all **ten** determinants must be positive — the 8
-    forward/backward combinations plus J1*/J2*, which cover the cell interior the 8 corner
-    tetrahedra leave out. `corners_only=True` restricts the test to those 8, reproducing the
-    permissive count reported before 2026-07-22.
+    (doi:10.1007/s11263-024-02047-1): all ten determinants positive — the 8 one-sided combinations
+    plus J1*/J2*. `corners_only=True` tests only the 8. `mask` restricts the count to the brain
+    interior; `mask=None` is the whole-volume count and stays byte-identical to the frozen form.
     """
     disp = flow[0]
     d, h, w = disp.shape[1:]
@@ -183,15 +186,16 @@ def digital_fold_percent(flow: torch.Tensor, corners_only: bool = False) -> torc
             )[1:-1, 1:-1, 1:-1]
             all_pos = all_pos & (det > 0.0)
 
-    return (~all_pos).to(flow.dtype).mean() * 100.0
+    fold = (~all_pos).to(flow.dtype)
+    if mask is None:
+        return fold.mean() * 100.0
+    return _interior_masked_mean(fold, mask) * 100.0
 
 
 def _digital_determinants(flow: torch.Tensor, corners_only: bool = False) -> list[torch.Tensor]:
-    """The ten (or eight, `corners_only`) differentiable determinant maps of the digital
-    diffeomorphism criterion (Liu et al., IJCV 2024), each cropped to the interior [1:-1,1:-1,1:-1].
-    `digital_fold_percent` counts their signs; this returns the raw values so a hinge or a barrier
-    can act on them. Kept separate from `digital_fold_percent` — which is frozen because reported
-    numbers depend on it — and checked numerically equal to it in the count it induces.
+    """The ten (or eight, `corners_only`) differentiable determinant maps of the digital criterion,
+    each cropped to the interior [1:-1,1:-1,1:-1]. Raw values for a hinge/barrier to act on; kept
+    separate from the frozen `digital_fold_percent`, whose sign count it reproduces.
     """
     disp = flow[0]
     d, h, w = disp.shape[1:]
@@ -235,13 +239,9 @@ def digital_fold_penalty(
     mask: torch.Tensor | None = None,
     eps: float = 0.0,
 ) -> torch.Tensor:
-    """Differentiable hinge on the ten digital-diffeomorphism determinants (Liu et al., IJCV 2024).
-    `neg_jacobian_penalty` scores the single central-difference detJ, which stays positive — hence
-    inert — even where the field folds digitally; this sums relu(eps - det_k) over the ten one-sided
-    and tetrahedral determinants the criterion requires positive, so the gradient is non-zero exactly
-    on the voxels `digital_fold_percent` counts. Restricted to the brain interior when `mask` is given.
-    Note: J1*/J2* have natural scale 2 vs 1 for the corner determinants, so a shared eps>0 imposes a
-    tighter relative margin on the corners; eps=0 (sign only) is scale-free.
+    """Differentiable hinge sum(relu(eps - det_k)) over the ten digital determinants, restricted to
+    the brain interior when `mask` is given. eps>0 widens the band to det < eps (a soft margin);
+    since J1*/J2* have identity scale 2 vs 1 for the corners, a shared eps>0 margins the corners tighter.
     """
     pen_map = None
     for det in _digital_determinants(flow):
@@ -255,10 +255,8 @@ def digital_penalty_and_folds(
     mask: torch.Tensor | None = None,
     eps: float = 0.0,
 ) -> tuple[torch.Tensor, float]:
-    """Differentiable digital hinge penalty and the strict digital fold percentage in one pass over
-    the ten determinants. The penalty follows `digital_fold_penalty` and honours `mask` (brain ROI);
-    the returned fold % is always whole-interior, matching `digital_fold_percent` and the reported
-    headline, so the topology guard and the comparison table stay on one scale.
+    """Hinge penalty (honours `mask`) and the strict fold percentage (always whole-interior, matching
+    `digital_fold_percent`) in one pass over the ten determinants.
     """
     pen_map = None
     all_pos = None
@@ -271,6 +269,77 @@ def digital_penalty_and_folds(
     with torch.no_grad():
         folds = float((~all_pos).to(flow.dtype).mean().item() * 100.0)
     return pen, folds
+
+
+# Identity-map value of each determinant (1 for the corner tetrahedra, 2 for the face-diagonal
+# J1*/J2*); normalising by it lets one threshold `t` mean the same on all ten.
+_DET_IDENTITY = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0)
+
+
+def _shifted_relaxed_barrier(det: torch.Tensor, scale: float, t: float, u_min: float = 0.1) -> torch.Tensor:
+    """One-sided C1 log-barrier on one determinant, normalised by its identity `scale`. With
+    u = det/(scale*t): 0 for u >= 1; -log(u)+(u-1) for u_min <= u < 1 (-> +inf as det -> 0); a C1-linear
+    extension for u < u_min, keeping a still-folded start (det <= 0) finite rather than NaN. `t` is the
+    fraction of the identity determinant at which it engages.
+    """
+    u = det / (scale * t)
+    safe = torch.clamp(u, min=u_min)
+    val = -torch.log(safe) + (safe - 1.0)
+    v0 = -math.log(u_min) + (u_min - 1.0)
+    s0 = -1.0 / u_min + 1.0
+    lin = v0 + s0 * (u - u_min)
+    return torch.where(u >= 1.0, torch.zeros_like(u), torch.where(u >= u_min, val, lin))
+
+
+def digital_barrier_penalty(
+    flow: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    t: float = 0.1,
+) -> torch.Tensor:
+    """Sum of the one-sided relaxed log-barriers over the ten determinants, restricted to the brain
+    interior when `mask` is given. `t` sets the engagement threshold; finite on a folded start.
+    """
+    pen_map = None
+    for det, scale in zip(_digital_determinants(flow), _DET_IDENTITY, strict=True):
+        b = _shifted_relaxed_barrier(det, scale, t)
+        pen_map = b if pen_map is None else pen_map + b
+    return _interior_masked_mean(pen_map, mask)
+
+
+def digital_barrier_and_folds(
+    flow: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    t: float = 0.1,
+) -> tuple[torch.Tensor, float]:
+    """Relaxed digital log-barrier penalty and the strict whole-interior fold percentage, one pass."""
+    pen_map = None
+    all_pos = None
+    for det, scale in zip(_digital_determinants(flow), _DET_IDENTITY, strict=True):
+        b = _shifted_relaxed_barrier(det, scale, t)
+        pen_map = b if pen_map is None else pen_map + b
+        pos = det > 0.0
+        all_pos = pos if all_pos is None else (all_pos & pos)
+    pen = _interior_masked_mean(pen_map, mask)
+    with torch.no_grad():
+        folds = float((~all_pos).to(flow.dtype).mean().item() * 100.0)
+    return pen, folds
+
+
+def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:
+    """Binary erosion of a mask by `iters` voxels (3x3x3 min over 26-neighbours); outside the volume
+    counts as background, so the border erodes inward. `iters<=0` is a no-op.
+    """
+    if iters <= 0:
+        return mask
+    orig_dim = mask.dim()
+    m = (mask > 0).float()
+    while m.dim() < 5:
+        m = m.unsqueeze(0)
+    for _ in range(iters):
+        m = -F.max_pool3d(-m, kernel_size=3, stride=1, padding=1)
+    while m.dim() > orig_dim:
+        m = m.squeeze(0)
+    return m
 
 
 def jacobian_penalty_and_folds(

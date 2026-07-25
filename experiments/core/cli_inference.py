@@ -66,13 +66,20 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         choices=list(TTO_JAC_MODES),
         default="central",
         help="Topology penalty: central (legacy detJ, inert on SVF fields) | digital (hinge on the "
-        "ten Liu-et-al. determinants, gradient non-zero exactly where the field folds digitally).",
+        "ten Liu-et-al. determinants, non-zero gradient exactly where the field folds digitally) | "
+        "barrier (relaxed one-sided log-barrier on the same ten, holds the field admissible).",
     )
     group.add_argument(
         "--tto_jac_eps",
         type=float,
         default=0.0,
-        help="Overcorrection margin: penalise detJ < eps, not just detJ < 0.",
+        help="Digital-hinge overcorrection margin: penalise det < eps, not just det < 0 (a soft barrier).",
+    )
+    group.add_argument(
+        "--tto_barrier_t",
+        type=float,
+        default=0.1,
+        help="Barrier engagement threshold as a fraction of the identity determinant (--tto_jac_mode barrier).",
     )
     group.add_argument(
         "--tto_topo_mask",
@@ -81,6 +88,13 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         default=0,
         help="Restrict the digital penalty to the brain interior. 0 = whole volume (matches the "
         "reported fold%% and is the stricter feasibility test); 1 = brain ROI (the eventual claim scope).",
+    )
+    group.add_argument(
+        "--tto_topo_erode",
+        type=int,
+        default=0,
+        help="Erode the topology mask by N voxels (needs --tto_topo_mask 1) to penalise strictly inside "
+        "the brain, clear of the mask-boundary interpolation layer.",
     )
     group.add_argument(
         "--tto_lr_schedule",
