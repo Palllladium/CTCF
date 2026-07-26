@@ -4,6 +4,7 @@ import argparse
 import copy
 
 import torch
+import torch.nn.functional as F
 from torch import optim
 
 from datasets.synthetic import build_synth_loaders
@@ -17,11 +18,17 @@ from utils import (
     RegisterModel,
     ctcf_schedule,
     dice_val,
+    digital_fold_penalty,
     elastic_loss,
     icon_loss,
     neg_jacobian_penalty,
     setup_device,
+    soft_dice_loss,
 )
+
+# One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
+# absent/background channels, so an over-wide count is harmless.
+_SEG_NUM_CLASSES = 37
 
 
 class Runner:
@@ -52,6 +59,8 @@ class Runner:
         self.img_size = tuple(self.model.img_size_full)
         self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
+        # Differentiable (bilinear) warp of one-hot labels for the weakly-supervised Dice loss.
+        self.reg_bilin = RegisterModel(self.img_size, mode="bilinear").to(device) if args.w_dice > 0.0 else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
         self._val_alpha_l1 = 0.0 if args.disable_l1 else 1.0
@@ -121,7 +130,9 @@ class Runner:
         args, ctx = self.args, self.ctx
         self._ema_update()
 
-        if self.is_synth:
+        if self.is_synth or args.w_dice > 0.0:
+            if len(batch) < 4:
+                raise RuntimeError("--w_dice > 0 needs a dataset that provides segmentations (x_seg, y_seg).")
             x, y, x_seg, y_seg = batch[0], batch[1], batch[2], batch[3]
             x_seg, y_seg = x_seg.to(self.device).long(), y_seg.to(self.device).long()
         else:
@@ -158,7 +169,16 @@ class Runner:
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
-        L_jac = 0.5 * (neg_jacobian_penalty(flow_xy) + neg_jacobian_penalty(flow_yx)) * W_jac
+        jac_pen = digital_fold_penalty if args.jac_mode == "digital" else neg_jacobian_penalty
+        L_jac = 0.5 * (jac_pen(flow_xy) + jac_pen(flow_yx)) * W_jac
+
+        L_dice = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
+        if args.w_dice > 0.0 and x_seg is not None:
+            x_oh = F.one_hot(x_seg.squeeze(1), _SEG_NUM_CLASSES).permute(0, 4, 1, 2, 3).float()
+            y_oh = F.one_hot(y_seg.squeeze(1), _SEG_NUM_CLASSES).permute(0, 4, 1, 2, 3).float()
+            warp_xy = self.reg_bilin((x_oh, flow_xy))
+            warp_yx = self.reg_bilin((y_oh, flow_yx))
+            L_dice = 0.5 * (soft_dice_loss(warp_xy, y_oh) + soft_dice_loss(warp_yx, x_oh)) * args.w_dice
 
         if self.use_cascade_reg:
             level_weights = (
@@ -194,7 +214,7 @@ class Runner:
                 * warm
             )
 
-        loss = L_ncc + L_icon + L_reg + L_jac + L_ema
+        loss = L_ncc + L_icon + L_reg + L_jac + L_ema + L_dice
 
         logs = {
             "all": loss.item(),
@@ -202,6 +222,7 @@ class Runner:
             "reg": L_reg.item(),
             "icon": L_icon.item(),
             "jac": L_jac.item(),
+            "dice": L_dice.item(),
             "alpha_l1": alpha_l1,
             "alpha_l3": alpha_l3,
             "warm": warm,

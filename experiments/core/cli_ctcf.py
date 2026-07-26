@@ -91,7 +91,22 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         "--w_jac",
         type=float,
         default=0.005,
-        help="Negative Jacobian penalty base weight.",
+        help="Jacobian penalty base weight (ramped by the warm-up schedule).",
+    )
+    group.add_argument(
+        "--jac_mode",
+        type=str,
+        choices=["central", "digital"],
+        default="central",
+        help="Jacobian penalty: central (legacy detJ, inert on SVF fields) or digital (hinge on the "
+        "ten Liu-et-al. determinants). Default central keeps every prior run reproducible.",
+    )
+    group.add_argument(
+        "--w_dice",
+        type=float,
+        default=0.0,
+        help="Weakly-supervised soft-Dice loss weight on warped segmentations. 0 = off (unsupervised, "
+        "the default for every prior run); ~1.0 is the standard weakly-supervised setting.",
     )
     group.add_argument(
         "--icon_mode",

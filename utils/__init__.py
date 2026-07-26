@@ -8,6 +8,7 @@ from .dice import (
     dice_val,
     dice_val_subset,
     hd95_mean_labels,
+    soft_dice_loss,
 )
 from .field import (
     compose_flows,
@@ -88,5 +89,6 @@ __all__ = [
     "pkload",
     "save_checkpoint",
     "setup_device",
+    "soft_dice_loss",
     "validate",
 ]
