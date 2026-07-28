@@ -61,6 +61,20 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         help="Negative-Jacobian penalty weight.",
     )
     group.add_argument(
+        "--tto_w_ncc",
+        type=float,
+        default=1.0,
+        help="NCC similarity weight during TTO. Set 0 for a pure topology repair (barrier+anchor only), "
+        "so the field is not dragged toward the label-free NCC optimum.",
+    )
+    group.add_argument(
+        "--tto_anchor_w",
+        type=float,
+        default=0.0,
+        help="Proximal anchor weight ||flow-flow0||^2 pinning the refined field to the feed-forward one "
+        "(trust region). 0 = off (legacy). Pair with --tto_w_ncc 0 to move only the folded voxels.",
+    )
+    group.add_argument(
         "--tto_jac_mode",
         type=str,
         choices=list(TTO_JAC_MODES),
@@ -95,6 +109,26 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         default=0,
         help="Erode the topology mask by N voxels (needs --tto_topo_mask 1) to penalise strictly inside "
         "the brain, clear of the mask-boundary interpolation layer.",
+    )
+    group.add_argument(
+        "--tto_project",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="After refinement, hard-project the field onto the digital-diffeomorphic set (contract "
+        "displacement toward identity at folded voxels until every determinant is positive).",
+    )
+    group.add_argument(
+        "--tto_project_iters",
+        type=int,
+        default=50,
+        help="Max projection passes (--tto_project 1).",
+    )
+    group.add_argument(
+        "--tto_project_damp",
+        type=float,
+        default=0.5,
+        help="Per-pass contraction factor at folded voxels (--tto_project 1).",
     )
     group.add_argument(
         "--tto_lr_schedule",

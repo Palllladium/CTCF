@@ -24,6 +24,7 @@ from utils import (
     mk_grid_img,
     setup_device,
 )
+from utils.field import digital_project
 from utils.tto import TTOConfig, refine_flow
 
 
@@ -184,6 +185,8 @@ class InferRunner:
             lr=args.tto_lr,
             w_reg=args.tto_w_reg,
             w_jac=args.tto_w_jac,
+            w_ncc=args.tto_w_ncc,
+            anchor_w=args.tto_anchor_w,
             jac_mode=args.tto_jac_mode,
             jac_eps=args.tto_jac_eps,
             barrier_t=args.tto_barrier_t,
@@ -268,6 +271,12 @@ class InferRunner:
                     mask=x_seg,
                 )
                 flow, snapshots = result.flow, result.snapshots
+
+            proj_folds, proj_iters = None, 0
+            if args.tto_project:
+                flow, proj_folds, proj_iters = digital_project(
+                    flow.float(), damp=args.tto_project_damp, max_iters=args.tto_project_iters
+                )
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
@@ -280,6 +289,9 @@ class InferRunner:
                 row["tto_folds_end"] = result.folds_end
                 row["tto_fold_budget"] = result.fold_budget
                 row["fwd_sec"] = t_fwd
+            if args.tto_project:
+                row["proj_folds_end"] = proj_folds
+                row["proj_iters"] = float(proj_iters)
 
             if args.hd95:
                 with torch.no_grad():

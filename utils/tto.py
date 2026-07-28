@@ -44,6 +44,9 @@ class TTOConfig:
     `topo_erode` erodes that mask by N voxels to keep clear of the mask boundary.
 
     Plus:
+    - 'anchor_w' pins the field to flow0 (a proximal trust region); with 'w_ncc'=0 the step
+      optimises only barrier+anchor, so a topology repair moves the folded voxels and leaves the
+      rest — and the Dice it carries — put. Defaults (w_ncc=1, anchor_w=0) reproduce prior runs.
     - every trained checkpoint depends on the eps=0 knife-edge form
     - 'use_mask' rescales similarity against the regulariser; w_reg would need re-tuning
     - 'inr_chunks' unchunked, a coord net over every voxel needs ~23 GB of activations
@@ -54,6 +57,8 @@ class TTOConfig:
     lr: float = 0.01
     w_reg: float = 1.0
     w_jac: float = 0.005
+    w_ncc: float = 1.0
+    anchor_w: float = 0.0
     jac_mode: str = "central"
     jac_eps: float = 0.0
     barrier_t: float = 0.1
@@ -89,6 +94,8 @@ class TTOConfig:
             raise ValueError(f"Unknown TTO stop mode '{self.stop_mode}'; expected one of {TTO_STOP_MODES}.")
         if self.steps < 0:
             raise ValueError(f"TTO steps must be >= 0, got {self.steps}.")
+        if self.w_ncc < 0.0 or self.anchor_w < 0.0:
+            raise ValueError(f"TTO w_ncc/anchor_w must be >= 0, got {self.w_ncc}/{self.anchor_w}.")
         self.snapshot_at = tuple(sorted({s for s in self.snapshot_at if 0 < s <= self.steps}))
 
     @property
@@ -272,7 +279,9 @@ def refine_flow(
         flow = param()
         warped = st_bilinear(moving, flow)
         sim = ncc(fixed, warped, mask=loss_mask)
-        loss = sim + cfg.w_reg * reg(flow)
+        loss = cfg.w_ncc * sim + cfg.w_reg * reg(flow)
+        if cfg.anchor_w > 0.0:
+            loss = loss + cfg.anchor_w * (flow - flow0.detach()).pow(2).mean()
 
         # Measured (fold count computed) on scheduled steps when a guard or a digital penalty needs it.
         on_schedule = step % every == 0 or step == cfg.steps

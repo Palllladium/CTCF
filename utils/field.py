@@ -325,6 +325,41 @@ def digital_barrier_and_folds(
     return pen, folds
 
 
+def digital_project(
+    flow: torch.Tensor,
+    eps: float = 0.0,
+    damp: float = 0.5,
+    max_iters: int = 50,
+) -> tuple[torch.Tensor, float, int]:
+    """Project a displacement field onto the digital-diffeomorphic set: contract the displacement
+    toward identity at voxels whose digital determinants fail (det <= eps) and their 3x3x3 neighbours,
+    re-checking all ten every pass until none fail or `max_iters` is reached. Contraction toward
+    identity (whose determinants are `_DET_IDENTITY`, all > 0) is monotone toward a certified field,
+    so the fold set shrinks; only the folded neighbourhood moves. Returns (projected flow, residual
+    fold %, passes applied); residual==0 certifies every one of the ten determinants is positive.
+    """
+    if flow.dim() != 5 or flow.shape[0] != 1 or flow.shape[1] != 3:
+        raise ValueError(f"Expected flow shape [1,3,D,H,W], got {tuple(flow.shape)}.")
+    out = flow.detach().clone()
+    d, h, w = out.shape[2:]
+    applied = 0
+    with torch.no_grad():
+        for _ in range(max_iters):
+            fail_interior = None
+            for det in _digital_determinants(out):
+                bad = det <= eps
+                fail_interior = bad if fail_interior is None else (fail_interior | bad)
+            if not bool(fail_interior.any()):
+                break
+            fail = torch.zeros((1, 1, d, h, w), device=out.device, dtype=out.dtype)
+            fail[0, 0, 1:-1, 1:-1, 1:-1] = fail_interior.to(out.dtype)
+            fail = (F.max_pool3d(fail, kernel_size=3, stride=1, padding=1) > 0).to(out.dtype)
+            out = out * (1.0 - damp * fail)
+            applied += 1
+        residual = float(digital_fold_percent(out).item())
+    return out, residual, applied
+
+
 def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:
     """Binary erosion of a mask by `iters` voxels (3x3x3 min over 26-neighbours); outside the volume
     counts as background, so the border erodes inward. `iters<=0` is a no-op.
