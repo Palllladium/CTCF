@@ -121,14 +121,14 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--tto_project_iters",
         type=int,
-        default=50,
-        help="Max projection passes (--tto_project 1).",
+        default=80,
+        help="Max feathered-projection passes (--tto_project 1).",
     )
     group.add_argument(
         "--tto_project_damp",
         type=float,
-        default=0.5,
-        help="Per-pass contraction factor at folded voxels (--tto_project 1).",
+        default=0.6,
+        help="Per-pass blend strength toward the local-smooth field at folded voxels (--tto_project 1).",
     )
     group.add_argument(
         "--tto_lr_schedule",

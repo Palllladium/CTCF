@@ -328,18 +328,24 @@ def digital_barrier_and_folds(
 def digital_project(
     flow: torch.Tensor,
     eps: float = 0.0,
-    damp: float = 0.5,
-    max_iters: int = 50,
+    damp: float = 0.6,
+    max_iters: int = 80,
 ) -> tuple[torch.Tensor, float, int]:
-    """Project a displacement field onto the digital-diffeomorphic set: contract the displacement
-    toward identity at voxels whose digital determinants fail (det <= eps) and their 3x3x3 neighbours,
-    re-checking all ten every pass until none fail or `max_iters` is reached. Contraction toward
-    identity (whose determinants are `_DET_IDENTITY`, all > 0) is monotone toward a certified field,
-    so the fold set shrinks; only the folded neighbourhood moves. Returns (projected flow, residual
-    fold %, passes applied); residual==0 certifies every one of the ten determinants is positive.
+    """Project a displacement field onto the digital-diffeomorphic set by feathered local relaxation:
+    at voxels whose digital determinants fail (det <= eps), blend the displacement toward its local
+    (mean-smoothed) value under a blurred weight, re-checking all ten every pass until none fail or
+    `max_iters` is reached. Smoothing removes the fold; blending toward the local-smooth field (not
+    identity) with a feathered weight avoids the boundary discontinuity that makes a hard contraction
+    spawn new folds and run away. Returns (projected flow, residual fold %, passes applied). A zero
+    residual certifies every one of the ten determinants is positive; a non-zero residual is returned
+    honestly (max_iters reached without a valid field), never as a false certificate.
     """
     if flow.dim() != 5 or flow.shape[0] != 1 or flow.shape[1] != 3:
         raise ValueError(f"Expected flow shape [1,3,D,H,W], got {tuple(flow.shape)}.")
+
+    def _smooth(t: torch.Tensor) -> torch.Tensor:
+        return F.avg_pool3d(F.pad(t, (1, 1, 1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
+
     out = flow.detach().clone()
     d, h, w = out.shape[2:]
     applied = 0
@@ -353,8 +359,8 @@ def digital_project(
                 break
             fail = torch.zeros((1, 1, d, h, w), device=out.device, dtype=out.dtype)
             fail[0, 0, 1:-1, 1:-1, 1:-1] = fail_interior.to(out.dtype)
-            fail = (F.max_pool3d(fail, kernel_size=3, stride=1, padding=1) > 0).to(out.dtype)
-            out = out * (1.0 - damp * fail)
+            feather = _smooth(_smooth(fail)).clamp(0.0, 1.0)  # blurred mask: no hard boundary
+            out = out * (1.0 - damp * feather) + _smooth(out) * (damp * feather)
             applied += 1
         residual = float(digital_fold_percent(out).item())
     return out, residual, applied
