@@ -275,7 +275,10 @@ class InferRunner:
             proj_folds, proj_iters = None, 0
             if args.tto_project:
                 flow, proj_folds, proj_iters = digital_project(
-                    flow.float(), damp=args.tto_project_damp, max_iters=args.tto_project_iters
+                    flow.float(),
+                    eps=args.tto_project_eps,
+                    damp=args.tto_project_damp,
+                    max_iters=args.tto_project_iters,
                 )
             dt = time.perf_counter() - t0
 

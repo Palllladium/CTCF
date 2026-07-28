@@ -32,6 +32,7 @@ SMOKE="${SMOKE:-0}"
 RUN="${RUN:?set RUN=1|2|3|4}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+export CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"   # H-box default for profile --3; override to change
 
 COMMON="--config CTCF-CascadeA-VM-Unified --l3_svf 1 --ds OASIS ${PROFILE} --gpu ${GPU} \
         --max_epoch ${MAX_EPOCH} --w_ncc 1.0 --w_icon 0.05 --w_reg 1.0 --w_dice 1.0 \

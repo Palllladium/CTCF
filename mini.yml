@@ -1,0 +1,17 @@
+name: ctcf
+channels:
+  - conda-forge
+  - nvidia/label/cuda-12.8.0
+dependencies:
+  - _openmp_mutex=4.5
+  - ca-certificates=2026.3.19
+  - opencl-headers=2025.07.22
+  - numpy=2.2.6
+  - python=3.10.19
+  - python_abi=3.10
+  - python-dateutil=2.9.0.post0
+  - pip:
+      - torch==2.10.0
+      - torchaudio==2.10.0+cu128
+      - mamba-ssm==2.3.1
+prefix: /home/roman/miniconda3/envs/ctcf

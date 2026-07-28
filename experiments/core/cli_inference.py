@@ -131,6 +131,13 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         help="Per-pass blend strength toward the local-smooth field at folded voxels (--tto_project 1).",
     )
     group.add_argument(
+        "--tto_project_eps",
+        type=float,
+        default=0.0,
+        help="Projection margin: enforce det >= eps (a robust certificate that survives resampling) "
+        "instead of the det>0 knife-edge (--tto_project 1). Higher eps = more headroom, small Dice cost.",
+    )
+    group.add_argument(
         "--tto_lr_schedule",
         type=str,
         choices=list(TTO_SCHEDULES),
