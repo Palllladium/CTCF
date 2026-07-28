@@ -80,6 +80,12 @@ def _add_train_args(p: argparse.ArgumentParser) -> None:
         help="Initial learning rate.",
     )
     p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed (weights init, data shuffle). Vary across otherwise-identical runs for variance.",
+    )
+    p.add_argument(
         "--img_size",
         type=int,
         nargs=3,

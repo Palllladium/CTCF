@@ -251,7 +251,7 @@ def main():
     if args.w_reg is None:
         args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
-    device = setup_device(gpu_id=args.gpu, seed=0, deterministic=False)
+    device = setup_device(gpu_id=args.gpu, seed=args.seed, deterministic=False)
     runner = Runner(args, device)
     run_train(args=args, runner=runner, build_loaders=build_loaders)
 
