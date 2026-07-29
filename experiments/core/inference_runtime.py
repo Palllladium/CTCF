@@ -24,7 +24,7 @@ from utils import (
     mk_grid_img,
     setup_device,
 )
-from utils.field import digital_project
+from utils.field import digital_min_det, digital_project
 from utils.tto import TTOConfig, refine_flow
 
 
@@ -283,7 +283,9 @@ class InferRunner:
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
-            row = {"case_id": cid, "time_sec": dt, **row}
+            # Certificate margin of the final field: min over the ten determinants and all voxels.
+            # Positive => digitally diffeomorphic; the value is the margin the fold count hides.
+            row = {"case_id": cid, "time_sec": dt, "cert_min_det": digital_min_det(flow.float()), **row}
             if self.tto.enabled:
                 # Numeric only: write_results averages every column it is given.
                 row["tto_steps"] = result.steps_run

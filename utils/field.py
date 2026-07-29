@@ -366,6 +366,14 @@ def digital_project(
     return out, residual, applied
 
 
+def digital_min_det(flow: torch.Tensor) -> float:
+    """Smallest of the ten Liu-et-al. digital determinants over all interior voxels — the formal
+    certificate quantity. ``min_det >= eps`` proves the field is digitally diffeomorphic with a
+    margin of ``eps``; a fold *count* of zero only says min_det > 0, it never exposes the margin."""
+    with torch.no_grad():
+        return min(float(det.min().item()) for det in _digital_determinants(flow))
+
+
 def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:
     """Binary erosion of a mask by `iters` voxels (3x3x3 min over 26-neighbours); outside the volume
     counts as background, so the border erodes inward. `iters<=0` is a no-op.
