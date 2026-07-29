@@ -374,6 +374,94 @@ def digital_min_det(flow: torch.Tensor) -> float:
         return min(float(det.min().item()) for det in _digital_determinants(flow))
 
 
+def _trilinear_corner_targets(flow: torch.Tensor) -> dict[tuple[int, int, int], torch.Tensor]:
+    """Target coordinates phi = index + disp at the eight corners of every unit cell, each
+    [3, D-1, H-1, W-1] in (z,y,x) order. This is what grid_sample trilinearly interpolates."""
+    disp = flow[0]
+    d, h, w = disp.shape[1:]
+    zz, yy, xx = torch.meshgrid(
+        torch.arange(d, device=flow.device, dtype=flow.dtype),
+        torch.arange(h, device=flow.device, dtype=flow.dtype),
+        torch.arange(w, device=flow.device, dtype=flow.dtype),
+        indexing="ij",
+    )
+    trans = disp + torch.stack([zz, yy, xx], dim=0)
+    return {
+        (i, j, k): trans[:, i : i + d - 1, j : j + h - 1, k : k + w - 1] for i in (0, 1) for j in (0, 1) for k in (0, 1)
+    }
+
+
+def _trilinear_det_at(p: dict[tuple[int, int, int], torch.Tensor], a: float, b: float, c: float) -> torch.Tensor:
+    """det of the trilinear Jacobian at local coords (a,b,c) in [0,1]^3, for all cells at once.
+    Each Jacobian column is the partial of the trilinear map, bilinear in the other two coordinates."""
+    na, nb, nc = 1.0 - a, 1.0 - b, 1.0 - c
+    col_a = (
+        (p[1, 0, 0] - p[0, 0, 0]) * nb * nc
+        + (p[1, 1, 0] - p[0, 1, 0]) * b * nc
+        + (p[1, 0, 1] - p[0, 0, 1]) * nb * c
+        + (p[1, 1, 1] - p[0, 1, 1]) * b * c
+    )
+    col_b = (
+        (p[0, 1, 0] - p[0, 0, 0]) * na * nc
+        + (p[1, 1, 0] - p[1, 0, 0]) * a * nc
+        + (p[0, 1, 1] - p[0, 0, 1]) * na * c
+        + (p[1, 1, 1] - p[1, 0, 1]) * a * c
+    )
+    col_c = (
+        (p[0, 0, 1] - p[0, 0, 0]) * na * nb
+        + (p[1, 0, 1] - p[1, 0, 0]) * a * nb
+        + (p[0, 1, 1] - p[0, 1, 0]) * na * b
+        + (p[1, 1, 1] - p[1, 1, 0]) * a * b
+    )
+    return (
+        col_a[0] * (col_b[1] * col_c[2] - col_b[2] * col_c[1])
+        - col_a[1] * (col_b[0] * col_c[2] - col_b[2] * col_c[0])
+        + col_a[2] * (col_b[0] * col_c[1] - col_b[1] * col_c[0])
+    )
+
+
+def trilinear_min_det(flow: torch.Tensor, samples: int = 5) -> float:
+    """Tight, sound DETECTION of trilinear folding: minimum of det J of the actual trilinear
+    (grid_sample) deformation over an SxSxS lattice inside every unit cell. A negative value PROVES
+    the applied warp folds; the ten digital determinants only test the cell corners and miss an
+    interior dip, so digital-10 positivity does not imply this is >= 0."""
+    flow = flow.detach().float()
+    with torch.no_grad():
+        p = _trilinear_corner_targets(flow)
+        ts = torch.linspace(0.0, 1.0, samples).tolist()
+        return min(float(_trilinear_det_at(p, a, b, c).min().item()) for a in ts for b in ts for c in ts)
+
+
+def _values_to_bernstein_matrix(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """3x3 map from a degree-2 polynomial's values at {0, 1/2, 1} to its Bernstein coefficients."""
+    nodes = [0.0, 0.5, 1.0]
+    vander = [[1.0, t, t * t] for t in nodes]  # power basis at the nodes
+    val_to_pow = torch.linalg.inv(torch.tensor(vander, dtype=torch.float64))
+    pow_to_bern = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.5, 0.0], [1.0, 1.0, 1.0]], dtype=torch.float64)
+    return (pow_to_bern @ val_to_pow).to(device=device, dtype=dtype)
+
+
+def trilinear_cert_bound(flow: torch.Tensor) -> float:
+    """Sound Bernstein lower bound on det J of the trilinear deformation over EVERY cell. det J is
+    degree <=2 in each of (a,b,c); its 27 Bernstein coefficients bound it on the whole cell (convex-
+    hull property), so the global minimum coefficient is a rigorous lower bound. > 0 CERTIFIES the
+    materialized trilinear warp is everywhere orientation-preserving — the interpolation-consistent
+    certificate the corner-only digital criterion cannot give (a first-level bound, tightened by
+    subdivision if needed)."""
+    flow = flow.detach().float()
+    with torch.no_grad():
+        p = _trilinear_corner_targets(flow)
+        mat = _values_to_bernstein_matrix(flow.device, flow.dtype)
+        nodes = (0.0, 0.5, 1.0)
+        vals = torch.stack([_trilinear_det_at(p, a, b, c) for a in nodes for b in nodes for c in nodes]).reshape(
+            3, 3, 3, *p[0, 0, 0].shape[1:]
+        )
+        bern = torch.einsum("pa,abcijk->pbcijk", mat, vals)
+        bern = torch.einsum("pb,abcijk->apcijk", mat, bern)
+        bern = torch.einsum("pc,abcijk->abpijk", mat, bern)
+        return float(bern.min().item())
+
+
 def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:
     """Binary erosion of a mask by `iters` voxels (3x3x3 min over 26-neighbours); outside the volume
     counts as background, so the border erodes inward. `iters<=0` is a no-op.

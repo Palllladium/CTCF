@@ -24,7 +24,7 @@ from utils import (
     mk_grid_img,
     setup_device,
 )
-from utils.field import digital_min_det, digital_project
+from utils.field import digital_min_det, digital_project, trilinear_cert_bound, trilinear_min_det
 from utils.tto import TTOConfig, refine_flow
 
 
@@ -283,9 +283,19 @@ class InferRunner:
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
-            # Certificate margin of the final field: min over the ten determinants and all voxels.
-            # Positive => digitally diffeomorphic; the value is the margin the fold count hides.
-            row = {"case_id": cid, "time_sec": dt, "cert_min_det": digital_min_det(flow.float()), **row}
+            # Two certificates of the final field. cert_min_det: min over the ten DIGITAL determinants
+            # (corner/tetrahedral). tri_min_det / tri_cert_bound: the actual TRILINEAR warp grid_sample
+            # applies — a sampled detection min and a sound Bernstein lower bound. digital>0 does NOT
+            # imply trilinear>0, so a gap between them is a real interpolation-consistency failure.
+            fl = flow.float()
+            row = {
+                "case_id": cid,
+                "time_sec": dt,
+                "cert_min_det": digital_min_det(fl),
+                "tri_min_det": trilinear_min_det(fl),
+                "tri_cert_bound": trilinear_cert_bound(fl),
+                **row,
+            }
             if self.tto.enabled:
                 # Numeric only: write_results averages every column it is given.
                 row["tto_steps"] = result.steps_run

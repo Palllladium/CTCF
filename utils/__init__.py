@@ -26,6 +26,8 @@ from .field import (
     jacobian_nonpositive_percent,
     logdet_std_from_flow,
     neg_jacobian_penalty,
+    trilinear_cert_bound,
+    trilinear_min_det,
 )
 from .losses import DareDiffusion, Grad3d, NCCVxm, elastic_loss, icon_loss
 from .runtime import (
@@ -94,5 +96,7 @@ __all__ = [
     "save_checkpoint",
     "setup_device",
     "soft_dice_loss",
+    "trilinear_cert_bound",
+    "trilinear_min_det",
     "validate",
 ]
