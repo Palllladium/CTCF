@@ -91,6 +91,21 @@ infer LKU8_projonly_e0  "$LK_EXP" --ctcf_config CTCF-CascadeA-LKU8  --tto_mode n
 # shellcheck disable=SC2086
 infer IXI_projonly_e0 "$IXI_EXP" $VM --ds IXI --use_test --tto_mode none --tto_project 1 --tto_project_eps 0
 
+# --- Wave-1 500ep operating fields (weak-sup, VxM Unified SVF). Two questions: does 500ep SHRINK the
+#     trilinear residual vs 100ep A2, and does a heavier digital w_jac make the residual WORSE (the
+#     anti-correlation, now on TRAINED fields)? This also picks the operating field for the paper.
+#     Outputs are new, so a plain (FORCE=0) run SKIPs the 100ep rows above and computes only these. ---
+for item in NODIG:P16_W1_VXM_OASIS_LBL_NODIG J1:P16_W1_VXM_OASIS_LBL_DIG_J1 \
+            J5:P16_W1_VXM_OASIS_LBL_DIG_J5 J15:P16_W1_VXM_OASIS_LBL_DIG_J15; do
+  name="${item%%:*}"; exp="${item#*:}"
+  # shellcheck disable=SC2086
+  infer "P16_${name}_feedfwd"      "$exp" $VM --tto_mode none
+  # shellcheck disable=SC2086
+  infer "P16_${name}_projonly_e0"  "$exp" $VM --tto_mode none --tto_project 1 --tto_project_eps 0
+  # shellcheck disable=SC2086
+  infer "P16_${name}_projonly_e05" "$exp" $VM --tto_mode none --tto_project 1 --tto_project_eps 0.05
+done
+
 echo
 echo "===================== TRILINEAR GATE TABLE ====================="
 printf "%-20s %8s %9s %11s %11s %10s %10s\n" \
