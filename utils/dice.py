@@ -11,6 +11,21 @@ _IXI_MISSING_LABELS = frozenset({4, 17, 19, 24, 33, 35})
 IXI_VOI_LABELS = tuple(i for i in range(1, 37) if i not in _IXI_MISSING_LABELS)
 
 
+def soft_dice_loss(pred_onehot: torch.Tensor, target_onehot: torch.Tensor) -> torch.Tensor:
+    """Differentiable soft-Dice loss (1 - Dice) between a warped soft one-hot [B,C,D,H,W] and a target
+    one-hot, averaged over the foreground channels the target actually contains. Channel 0 (background)
+    and channels absent from the target are excluded, so a label missing in a dataset (or this pair)
+    does not inflate the score with a spurious 1.0.
+    """
+    dims = (2, 3, 4)
+    inter = (pred_onehot * target_onehot).sum(dim=dims)
+    union = pred_onehot.sum(dim=dims) + target_onehot.sum(dim=dims)
+    dsc = (2.0 * inter + 1e-5) / (union + 1e-5)
+    present = target_onehot.sum(dim=dims) > 0
+    present[:, 0] = False
+    return 1.0 - dsc[present].mean()
+
+
 def dice_val(y_pred: torch.Tensor, y_true: torch.Tensor, num_clus: int) -> torch.Tensor:
     """Mean multi-class Dice over one-hot tensors."""
     y_pred = nn.functional.one_hot(y_pred, num_classes=num_clus)

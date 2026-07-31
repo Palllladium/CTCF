@@ -11,11 +11,32 @@ import numpy as np
 import torch
 
 from utils import IXI_VOI_LABELS, OASIS_VOI_LABELS, digital_jacobian_metrics, logdet_std_from_flow
+from utils.field import digital_fold_percent, erode_mask, jacobian_nonpositive_percent
+
+
+def _fold_counts(flow: torch.Tensor, x_seg: torch.Tensor) -> dict[str, float]:
+    """The fold counts under one roof: the three finite-difference schemes differ by orders of magnitude
+    on one field, so a run must emit all of them or the numbers cannot be compared across papers.
+
+    - `central` is the community default (VoxelMorph/TransMorph lineage),
+    - `corners` the 8 one-sided schemes,
+    - `j_leq0` the full 10-determinant digital criterion (Liu et al., IJCV 2024).
+    - `brain`/`brain_erode2` are the digital-10 count restricted to the brain mask and to the mask
+    eroded by two voxels — the claim scope, and a probe of whether residual folds sit on the boundary.
+    """
+    j_leq0, ndv = digital_jacobian_metrics(flow, mask=x_seg)
+    return {
+        "j_leq0_percent": float(j_leq0),
+        "j_leq0_corners_percent": float(digital_fold_percent(flow, corners_only=True).item()),
+        "j_leq0_central_percent": float(jacobian_nonpositive_percent(flow, crop=1)),
+        "j_leq0_brain_percent": float(digital_fold_percent(flow, mask=x_seg).item()),
+        "j_leq0_brain_erode2_percent": float(digital_fold_percent(flow, mask=erode_mask(x_seg, 2)).item()),
+        "ndv_percent": float(ndv),
+    }
 
 
 def _ixi_jac_metrics(flow: torch.Tensor, x_seg: torch.Tensor) -> dict[str, float]:
-    j_leq0, ndv = digital_jacobian_metrics(flow, mask=x_seg)
-    return {"j_leq0_percent": float(j_leq0), "ndv_percent": float(ndv)}
+    return _fold_counts(flow, x_seg)
 
 
 def _ixi_jac_log(row: dict) -> str:
@@ -23,11 +44,12 @@ def _ixi_jac_log(row: dict) -> str:
 
 
 def _oasis_jac_metrics(flow: torch.Tensor, x_seg: torch.Tensor) -> dict[str, float]:
-    return {"sdlogj": float(logdet_std_from_flow(flow))}
+    # sdlogj stays first and unchanged: every published OASIS table is keyed on it.
+    return {"sdlogj": float(logdet_std_from_flow(flow)), **_fold_counts(flow, x_seg)}
 
 
 def _oasis_jac_log(row: dict) -> str:
-    return f" sdlogj={row['sdlogj']:.4f}"
+    return f" sdlogj={row['sdlogj']:.4f} j<=0%={row['j_leq0_percent']:.4f}"
 
 
 @dataclass

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from experiments.core.cli_ctcf import add_ctcf_override_args
-from utils.tto import TTO_MODES, TTO_SCHEDULES
+from utils.tto import TTO_JAC_MODES, TTO_MODES, TTO_SCHEDULES, TTO_STOP_MODES
 
 MODEL_CHOICES = [
     "tm-dca",
@@ -61,10 +61,108 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         help="Negative-Jacobian penalty weight.",
     )
     group.add_argument(
+        "--tto_w_ncc",
+        type=float,
+        default=1.0,
+        help="NCC similarity weight during TTO. Set 0 for a pure topology repair (barrier+anchor only), "
+        "so the field is not dragged toward the label-free NCC optimum.",
+    )
+    group.add_argument(
+        "--tto_anchor_w",
+        type=float,
+        default=0.0,
+        help="Proximal anchor weight ||flow-flow0||^2 pinning the refined field to the feed-forward one "
+        "(trust region). 0 = off (legacy). Pair with --tto_w_ncc 0 to move only the folded voxels.",
+    )
+    group.add_argument(
+        "--tto_jac_mode",
+        type=str,
+        choices=list(TTO_JAC_MODES),
+        default="central",
+        help="Topology penalty: central (legacy detJ, inert on SVF fields) | digital (hinge on the "
+        "ten Liu-et-al. determinants, non-zero gradient exactly where the field folds digitally) | "
+        "barrier (relaxed one-sided log-barrier on the same ten, holds the field admissible).",
+    )
+    group.add_argument(
         "--tto_jac_eps",
         type=float,
         default=0.0,
-        help="Overcorrection margin: penalise detJ < eps, not just detJ < 0.",
+        help="Digital-hinge overcorrection margin: penalise det < eps, not just det < 0 (a soft barrier).",
+    )
+    group.add_argument(
+        "--tto_barrier_t",
+        type=float,
+        default=0.1,
+        help="Barrier engagement threshold as a fraction of the identity determinant (--tto_jac_mode barrier).",
+    )
+    group.add_argument(
+        "--tto_topo_mask",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Restrict the digital penalty to the brain interior. 0 = whole volume (matches the "
+        "reported fold%% and is the stricter feasibility test); 1 = brain ROI (the eventual claim scope).",
+    )
+    group.add_argument(
+        "--tto_topo_erode",
+        type=int,
+        default=0,
+        help="Erode the topology mask by N voxels (needs --tto_topo_mask 1) to penalise strictly inside "
+        "the brain, clear of the mask-boundary interpolation layer.",
+    )
+    group.add_argument(
+        "--tto_project",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="After refinement, hard-project the field onto the digital-diffeomorphic set (contract "
+        "displacement toward identity at folded voxels until every determinant is positive).",
+    )
+    group.add_argument(
+        "--tto_project_iters",
+        type=int,
+        default=80,
+        help="Max feathered-projection passes (--tto_project 1).",
+    )
+    group.add_argument(
+        "--tto_project_damp",
+        type=float,
+        default=0.6,
+        help="Per-pass blend strength toward the local-smooth field at folded voxels (--tto_project 1).",
+    )
+    group.add_argument(
+        "--tto_project_eps",
+        type=float,
+        default=0.0,
+        help="Projection margin: enforce det >= eps (a robust certificate that survives resampling) "
+        "instead of the det>0 knife-edge (--tto_project 1). Higher eps = more headroom, small Dice cost.",
+    )
+    group.add_argument(
+        "--tto_tri_project",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Repair the field onto the TRILINEAR-diffeomorphic set: contract cells whose sound Bernstein "
+        "bound of the actual grid_sample warp fails, certifying the DEPLOYED warp (not the digital "
+        "surrogate). Runs after --tto_project; set --tto_project 0 to use it standalone.",
+    )
+    group.add_argument(
+        "--tto_tri_project_iters",
+        type=int,
+        default=80,
+        help="Max feathered trilinear-repair passes (--tto_tri_project 1).",
+    )
+    group.add_argument(
+        "--tto_tri_project_damp",
+        type=float,
+        default=0.6,
+        help="Per-pass blend toward the local-smooth field at trilinear-folding cells (--tto_tri_project 1).",
+    )
+    group.add_argument(
+        "--tto_tri_project_eps",
+        type=float,
+        default=0.0,
+        help="Trilinear-repair margin: certify tri_cert_bound >= eps over every cell (--tto_tri_project 1).",
     )
     group.add_argument(
         "--tto_lr_schedule",
@@ -72,6 +170,49 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         choices=list(TTO_SCHEDULES),
         default="cosine",
         help="LR schedule over the TTO steps.",
+    )
+    group.add_argument(
+        "--tto_svf_int_steps",
+        type=int,
+        default=7,
+        help="Scaling-and-squaring steps for --tto_mode svf.",
+    )
+    group.add_argument(
+        "--tto_stop",
+        type=str,
+        choices=list(TTO_STOP_MODES),
+        default="fixed",
+        help="Early stop rule; --tto_steps remains the ceiling.",
+    )
+    group.add_argument(
+        "--tto_fold_k",
+        type=float,
+        default=1.25,
+        help="Topology guard: allow folds up to fold_k x the network's own fold percentage.",
+    )
+    group.add_argument(
+        "--tto_fold_delta",
+        type=float,
+        default=0.01,
+        help="Topology guard: additive fold allowance, in percentage points.",
+    )
+    group.add_argument(
+        "--tto_fold_check_every",
+        type=int,
+        default=10,
+        help="Topology guard: steps between fold checks.",
+    )
+    group.add_argument(
+        "--tto_plateau_window",
+        type=int,
+        default=50,
+        help="Plateau guard: window over which the similarity gain is measured.",
+    )
+    group.add_argument(
+        "--tto_plateau_rel",
+        type=float,
+        default=0.02,
+        help="Plateau guard: stop when the window gain drops below this share of the total gain.",
     )
     group.add_argument(
         "--tto_mask",

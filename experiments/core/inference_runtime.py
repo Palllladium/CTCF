@@ -24,6 +24,14 @@ from utils import (
     mk_grid_img,
     setup_device,
 )
+from utils.field import (
+    digital_min_det,
+    digital_project,
+    trilinear_cert_bound,
+    trilinear_fold_percent,
+    trilinear_min_det,
+    trilinear_project,
+)
 from utils.tto import TTOConfig, refine_flow
 
 
@@ -61,7 +69,6 @@ def build_infer_dataset(ds_key: str, files: list[str], atlas_path: str | None):
 def build_infer_model(args, device):
     """Resolve the adapter and build its model with per-model CLI config keys."""
     adapter = get_model_adapter(args.model)
-    # Compact single-line case arms (per-branch build logic); see code_style.md.
     # fmt: off
     match adapter.key:
         case "tm-dca": model = adapter.build(time_steps=args.time_steps, config_key=args.tm_config)
@@ -185,15 +192,27 @@ class InferRunner:
             lr=args.tto_lr,
             w_reg=args.tto_w_reg,
             w_jac=args.tto_w_jac,
+            w_ncc=args.tto_w_ncc,
+            anchor_w=args.tto_anchor_w,
+            jac_mode=args.tto_jac_mode,
             jac_eps=args.tto_jac_eps,
+            barrier_t=args.tto_barrier_t,
+            topo_mask=bool(args.tto_topo_mask),
+            topo_erode=args.tto_topo_erode,
+            svf_int_steps=args.tto_svf_int_steps,
             lr_schedule=args.tto_lr_schedule,
             use_mask=bool(args.tto_mask),
             kan_degree=args.tto_kan_degree,
             kan_k=args.tto_kan_k,
             snapshot_at=tuple(args.tto_trace or ()),
+            stop_mode=args.tto_stop,
+            fold_k=args.tto_fold_k,
+            fold_delta=args.tto_fold_delta,
+            fold_check_every=args.tto_fold_check_every,
+            plateau_window=args.tto_plateau_window,
+            plateau_rel=args.tto_plateau_rel,
         )
         if self.tto.enabled:
-            # TTO backprops into the field only; freezing the weights keeps them out of the graph.
             for p in self.model.parameters():
                 p.requires_grad_(False)
 
@@ -259,13 +278,58 @@ class InferRunner:
                     mask=x_seg,
                 )
                 flow, snapshots = result.flow, result.snapshots
+
+            proj_folds, proj_iters = None, 0
+            if args.tto_project:
+                flow, proj_folds, proj_iters = digital_project(
+                    flow.float(),
+                    eps=args.tto_project_eps,
+                    damp=args.tto_project_damp,
+                    max_iters=args.tto_project_iters,
+                )
+            tri_proj_resid, tri_proj_iters = None, 0
+            if args.tto_tri_project:
+                flow, tri_proj_resid, tri_proj_iters = trilinear_project(
+                    flow.float(),
+                    eps=args.tto_tri_project_eps,
+                    damp=args.tto_tri_project_damp,
+                    max_iters=args.tto_tri_project_iters,
+                )
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
-            row = {"case_id": cid, "time_sec": dt, **row}
+            # Two certificates of the final field. cert_min_det: min over the ten DIGITAL determinants
+            # (corner/tetrahedral). tri_min_det / tri_cert_bound: the actual TRILINEAR warp grid_sample
+            # applies — a sampled detection min and a sound Bernstein lower bound. digital>0 does NOT
+            # imply trilinear>0, so a gap between them is a real interpolation-consistency failure.
+            fl = flow.float()
+            tri_fold = trilinear_fold_percent(fl)
+            row = {
+                "case_id": cid,
+                "time_sec": dt,
+                "cert_min_det": digital_min_det(fl),
+                "tri_min_det": trilinear_min_det(fl),
+                "tri_cert_bound": trilinear_cert_bound(fl),
+                # Audit: percent of cells that PROVABLY fold trilinearly, and whether this case folds
+                # at all (mean over cases -> fraction of cases folding) — the numbers digital10 hides.
+                "tri_fold_pct": tri_fold,
+                "tri_case_folds": float(tri_fold > 0.0),
+                **row,
+            }
             if self.tto.enabled:
-                row["tto_steps"] = self.tto.steps
+                # Numeric only: write_results averages every column it is given.
+                row["tto_steps"] = result.steps_run
+                row["tto_stopped_early"] = float(result.stop_reason != "fixed")
+                row["tto_folds_start"] = result.folds_start
+                row["tto_folds_end"] = result.folds_end
+                row["tto_fold_budget"] = result.fold_budget
                 row["fwd_sec"] = t_fwd
+            if args.tto_project:
+                row["proj_folds_end"] = proj_folds
+                row["proj_iters"] = float(proj_iters)
+            if args.tto_tri_project:
+                row["tri_proj_resid"] = tri_proj_resid
+                row["tri_proj_iters"] = float(tri_proj_iters)
 
             if args.hd95:
                 with torch.no_grad():
