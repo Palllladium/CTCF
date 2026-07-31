@@ -27,6 +27,7 @@ from utils import (
 from utils.field import (
     digital_min_det,
     digital_project,
+    perturb_flow,
     trilinear_cert_bound,
     trilinear_fold_percent,
     trilinear_min_det,
@@ -295,6 +296,10 @@ class InferRunner:
                     damp=args.tto_tri_project_damp,
                     max_iters=args.tto_tri_project_iters,
                 )
+            # Robustness test: perturb the certified field as a deployment step would; every metric below
+            # (Dice, tri_cert_bound, tri_fold_pct) is then read on the perturbed field — did the margin hold?
+            if args.tto_perturb != "none":
+                flow = perturb_flow(flow.float(), mode=args.tto_perturb, scale=args.tto_perturb_scale)
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)

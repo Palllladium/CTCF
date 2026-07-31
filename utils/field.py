@@ -527,6 +527,21 @@ def trilinear_project(
     return out, residual, applied
 
 
+def perturb_flow(flow: torch.Tensor, mode: str = "none", scale: float = 0.02) -> torch.Tensor:
+    """Emulate a deployment step that perturbs a displacement field AFTER it was certified, to test how
+    much certificate margin survives it. 'fp16' = round-trip through float16 storage (the common case);
+    'noise' = additive uniform +-scale voxels (an independent-per-voxel stress, harsher than fp16 since
+    it perturbs neighbour differences). The determinant depends on gradients, so a knife-edge certificate
+    (margin ~0) dies while a margin >= the induced Jacobian perturbation survives."""
+    if mode == "none":
+        return flow
+    if mode == "fp16":
+        return flow.half().float()
+    if mode == "noise":
+        return flow + (torch.rand_like(flow) * 2.0 - 1.0) * scale
+    raise ValueError(f"unknown perturb mode {mode!r} (none|fp16|noise)")
+
+
 def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:
     """Binary erosion of a mask by `iters` voxels (3x3x3 min over 26-neighbours); outside the volume
     counts as background, so the border erodes inward. `iters<=0` is a no-op.

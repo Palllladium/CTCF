@@ -165,6 +165,19 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         help="Trilinear-repair margin: certify tri_cert_bound >= eps over every cell (--tto_tri_project 1).",
     )
     group.add_argument(
+        "--tto_perturb",
+        choices=["none", "fp16", "noise"],
+        default="none",
+        help="After repair, perturb the field to test how much certificate margin survives a deployment "
+        "step: fp16 storage round-trip, or additive noise. Metrics are recomputed on the perturbed field.",
+    )
+    group.add_argument(
+        "--tto_perturb_scale",
+        type=float,
+        default=0.02,
+        help="Amplitude (voxels) of --tto_perturb noise.",
+    )
+    group.add_argument(
         "--tto_lr_schedule",
         type=str,
         choices=list(TTO_SCHEDULES),
