@@ -33,11 +33,13 @@ NSHARD="${NSHARD:-1}"                          # split the eval list across this
 SHARD="${SHARD:-0}"                            # this process runs evals where callno % NSHARD == SHARD
 _CALLNO=0                                      # global call counter, identical across processes (lockstep)
 
-# Parallel launch, one process per card 
-# (distinct out_dir per tag -> safe; only the table is serial):
-#   for s in 0 1 2 3 4 5; do
-#     CUDA_VISIBLE_DEVICES=$s SHARD=$s NSHARD=6 GPU=0 PROFILE=--3 CKPT_ROOTS="results results/DICELOSS" \
-#       nohup bash tools/runners/tto_trilinear.sh > tri_s$s.log 2>&1 &
+# Parallel launch, one process per card (distinct out_dir per tag -> safe; only the table is serial).
+# SHARD is a logical 0..NSHARD-1 index; the physical card is CUDA_VISIBLE_DEVICES, so keep them separate:
+#   cards="2 3 4 5 6 7"; i=0
+#   for dev in $cards; do
+#     CUDA_VISIBLE_DEVICES=$dev SHARD=$i NSHARD=6 GPU=0 PROFILE=--3 \
+#       nohup bash tools/runners/tto_trilinear.sh > tri_s$i.log 2>&1 &
+#     i=$((i+1))
 #   done; wait
 #   bash tools/runners/tto_trilinear.sh          # NSHARD=1: all SKIP, prints the full table
 
@@ -55,6 +57,8 @@ BASE="--model ctcf --ds OASIS ${PROFILE} --strict_ckpt 0 --gpu ${GPU} --print_ev
 # two-phase = proximal barrier (a32, Dice-preserving) then feathered projection.
 PROX="--tto_mode svf --tto_steps 400 --tto_jac_mode barrier --tto_w_jac 0.5 --tto_barrier_t 0.1 \
       --tto_w_ncc 0 --tto_w_reg 0 --tto_anchor_w 32"
+
+ck() { local p="results/$1/ckpt/best.pth"; [[ -f "$p" ]] && echo "$p" || echo "results/$1/ckpt/last.pth"; }
 
 infer() {
   local tag="$1" exp="$2"; shift 2
