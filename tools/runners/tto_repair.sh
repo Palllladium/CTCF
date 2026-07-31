@@ -12,8 +12,9 @@
 # Per checkpoint, four fields side by side:
 #   feedfwd        raw field (baseline Dice, its trilinear fold%)
 #   dproj_e0       digital projection (current mechanism — certifies the WRONG criterion, still folds)
-#   tri_e0         trilinear repair, knife-edge margin
-#   tri_e02        trilinear repair, robust margin 0.02 (survives resampling)
+#   tri_e0/e02     trilinear repair of the RAW field (fixes thousands of cells -> costly)
+#   chain_e0/e02   digital project (cheap bulk, thousands->~7 trilinear folds) THEN trilinear repair the
+#                  sparse residual -> the same certificate at (predicted) ~half the Dice cost
 # Checkpoints: A2 100ep champion + the P16 500ep operating candidates (J5/J15 win post-repair; NODIG for
 # contrast). All VxM Unified SVF, at default results/<EXP>/ckpt paths.
 #
@@ -68,6 +69,13 @@ for item in $CKPTS; do
   infer "${name}_tri_e0"  "$exp" $VM --tto_mode none --tto_tri_project 1 --tto_tri_project_eps 0
   # shellcheck disable=SC2086
   infer "${name}_tri_e02" "$exp" $VM --tto_mode none --tto_tri_project 1 --tto_tri_project_eps 0.02
+  # chained: cheap digital bulk removal, then trilinear repair certifies the sparse residual
+  # shellcheck disable=SC2086
+  infer "${name}_chain_e0"  "$exp" $VM --tto_mode none --tto_project 1 --tto_project_eps 0 \
+        --tto_tri_project 1 --tto_tri_project_eps 0
+  # shellcheck disable=SC2086
+  infer "${name}_chain_e02" "$exp" $VM --tto_mode none --tto_project 1 --tto_project_eps 0 \
+        --tto_tri_project 1 --tto_tri_project_eps 0.02
 done
 
 if [[ "$NSHARD" -ne 1 ]]; then echo "[shard $SHARD/$NSHARD done — run one plain pass for the table]"; exit 0; fi
