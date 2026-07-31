@@ -30,6 +30,7 @@ from utils.field import (
     trilinear_cert_bound,
     trilinear_fold_percent,
     trilinear_min_det,
+    trilinear_project,
 )
 from utils.tto import TTOConfig, refine_flow
 
@@ -286,6 +287,14 @@ class InferRunner:
                     damp=args.tto_project_damp,
                     max_iters=args.tto_project_iters,
                 )
+            tri_proj_resid, tri_proj_iters = None, 0
+            if args.tto_tri_project:
+                flow, tri_proj_resid, tri_proj_iters = trilinear_project(
+                    flow.float(),
+                    eps=args.tto_tri_project_eps,
+                    damp=args.tto_tri_project_damp,
+                    max_iters=args.tto_tri_project_iters,
+                )
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
@@ -318,6 +327,9 @@ class InferRunner:
             if args.tto_project:
                 row["proj_folds_end"] = proj_folds
                 row["proj_iters"] = float(proj_iters)
+            if args.tto_tri_project:
+                row["tri_proj_resid"] = tri_proj_resid
+                row["tri_proj_iters"] = float(tri_proj_iters)
 
             if args.hd95:
                 with torch.no_grad():

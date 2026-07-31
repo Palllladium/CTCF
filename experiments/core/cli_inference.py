@@ -138,6 +138,33 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "instead of the det>0 knife-edge (--tto_project 1). Higher eps = more headroom, small Dice cost.",
     )
     group.add_argument(
+        "--tto_tri_project",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Repair the field onto the TRILINEAR-diffeomorphic set: contract cells whose sound Bernstein "
+        "bound of the actual grid_sample warp fails, certifying the DEPLOYED warp (not the digital "
+        "surrogate). Runs after --tto_project; set --tto_project 0 to use it standalone.",
+    )
+    group.add_argument(
+        "--tto_tri_project_iters",
+        type=int,
+        default=80,
+        help="Max feathered trilinear-repair passes (--tto_tri_project 1).",
+    )
+    group.add_argument(
+        "--tto_tri_project_damp",
+        type=float,
+        default=0.6,
+        help="Per-pass blend toward the local-smooth field at trilinear-folding cells (--tto_tri_project 1).",
+    )
+    group.add_argument(
+        "--tto_tri_project_eps",
+        type=float,
+        default=0.0,
+        help="Trilinear-repair margin: certify tri_cert_bound >= eps over every cell (--tto_tri_project 1).",
+    )
+    group.add_argument(
         "--tto_lr_schedule",
         type=str,
         choices=list(TTO_SCHEDULES),

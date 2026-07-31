@@ -464,25 +464,67 @@ def _values_to_bernstein_matrix(device: torch.device, dtype: torch.dtype) -> tor
     return (pow_to_bern @ val_to_pow).to(device=device, dtype=dtype)
 
 
-def trilinear_cert_bound(flow: torch.Tensor) -> float:
-    """Sound Bernstein lower bound on det J of the trilinear deformation over EVERY cell. det J is
-    degree <=2 in each of (a,b,c); its 27 Bernstein coefficients bound it on the whole cell (convex-
-    hull property), so the global minimum coefficient is a rigorous lower bound. > 0 CERTIFIES the
-    materialized trilinear warp is everywhere orientation-preserving — the interpolation-consistent
-    certificate the corner-only digital criterion cannot give (a first-level bound, tightened by
-    subdivision if needed)."""
+def _trilinear_cell_cert_bound(flow: torch.Tensor) -> torch.Tensor:
+    """Per-cell sound Bernstein lower bound on det J of the trilinear deformation, shape [D-1,H-1,W-1].
+    det J is degree <=2 in each of (a,b,c); its 27 Bernstein coefficients bound it on the whole cell
+    (convex-hull property), so the per-cell minimum coefficient is a rigorous lower bound over the
+    continuum — a cell with value >= eps is CERTIFIED fold-free, no sampling gap."""
     flow = flow.detach().float()
+    p = _trilinear_corner_targets(flow)
+    mat = _values_to_bernstein_matrix(flow.device, flow.dtype)
+    nodes = (0.0, 0.5, 1.0)
+    vals = torch.stack([_trilinear_det_at(p, a, b, c) for a in nodes for b in nodes for c in nodes]).reshape(
+        3, 3, 3, *p[0, 0, 0].shape[1:]
+    )
+    bern = torch.einsum("pa,abcijk->pbcijk", mat, vals)
+    bern = torch.einsum("pb,abcijk->apcijk", mat, bern)
+    bern = torch.einsum("pc,abcijk->abpijk", mat, bern)
+    return bern.amin(dim=(0, 1, 2))
+
+
+def trilinear_cert_bound(flow: torch.Tensor) -> float:
+    """Global sound Bernstein lower bound over every cell (the min of `_trilinear_cell_cert_bound`).
+    > 0 CERTIFIES the materialized trilinear warp is everywhere orientation-preserving — the
+    interpolation-consistent certificate the corner-only digital criterion cannot give."""
     with torch.no_grad():
-        p = _trilinear_corner_targets(flow)
-        mat = _values_to_bernstein_matrix(flow.device, flow.dtype)
-        nodes = (0.0, 0.5, 1.0)
-        vals = torch.stack([_trilinear_det_at(p, a, b, c) for a in nodes for b in nodes for c in nodes]).reshape(
-            3, 3, 3, *p[0, 0, 0].shape[1:]
-        )
-        bern = torch.einsum("pa,abcijk->pbcijk", mat, vals)
-        bern = torch.einsum("pb,abcijk->apcijk", mat, bern)
-        bern = torch.einsum("pc,abcijk->abpijk", mat, bern)
-        return float(bern.min().item())
+        return float(_trilinear_cell_cert_bound(flow).min().item())
+
+
+def trilinear_project(
+    flow: torch.Tensor,
+    eps: float = 0.0,
+    damp: float = 0.6,
+    max_iters: int = 80,
+) -> tuple[torch.Tensor, float, int]:
+    """Repair a displacement field onto the TRILINEAR-diffeomorphic set. Each pass: flag every cell whose
+    sound Bernstein bound of the actual grid_sample warp is < eps, expand the flagged cells to the eight
+    voxels each touches, and blend those voxels' displacement toward the local (mean-smoothed) field under
+    a feathered weight — the same boundary-safe relaxation as `digital_project`, but gated on the
+    TRILINEAR certificate, not the digital determinants. Repeat until no cell fails (global
+    tri_cert_bound >= eps) or `max_iters`. Returns (repaired flow, residual trilinear fold %, passes).
+    A zero residual with the returned bound >= eps certifies the DEPLOYED warp is orientation-preserving
+    with margin eps; a non-zero residual is returned honestly, never as a false certificate."""
+    if flow.dim() != 5 or flow.shape[0] != 1 or flow.shape[1] != 3:
+        raise ValueError(f"Expected flow shape [1,3,D,H,W], got {tuple(flow.shape)}.")
+
+    def _smooth(t: torch.Tensor) -> torch.Tensor:
+        return F.avg_pool3d(F.pad(t, (1, 1, 1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
+
+    out = flow.detach().clone().float()
+    applied = 0
+    with torch.no_grad():
+        for _ in range(max_iters):
+            cell_bad = (_trilinear_cell_cert_bound(out) < eps).to(out.dtype)  # [D-1,H-1,W-1]
+            if not bool(cell_bad.any()):
+                break
+            # A voxel is touched if any of the (up to 8) cells incident to it is flagged: a 2^3 max over
+            # the cell grid padded by one, mapping [D-1,H-1,W-1] cells back to the [D,H,W] voxel grid.
+            vox = F.max_pool3d(F.pad(cell_bad[None, None], (1, 1, 1, 1, 1, 1)), kernel_size=2, stride=1)
+            feather = _smooth(_smooth(vox)).clamp(0.0, 1.0)  # blurred mask: no hard boundary
+            out = out * (1.0 - damp * feather) + _smooth(out) * (damp * feather)
+            applied += 1
+        residual = trilinear_fold_percent(out)
+    return out, residual, applied
 
 
 def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:

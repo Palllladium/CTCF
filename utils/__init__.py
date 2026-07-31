@@ -29,6 +29,7 @@ from .field import (
     trilinear_cert_bound,
     trilinear_fold_percent,
     trilinear_min_det,
+    trilinear_project,
 )
 from .losses import DareDiffusion, Grad3d, NCCVxm, elastic_loss, icon_loss
 from .runtime import (
@@ -100,5 +101,6 @@ __all__ = [
     "trilinear_cert_bound",
     "trilinear_fold_percent",
     "trilinear_min_det",
+    "trilinear_project",
     "validate",
 ]
