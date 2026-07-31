@@ -45,7 +45,20 @@ BASE="--model ctcf --ds OASIS ${PROFILE} --strict_ckpt 0 --gpu ${GPU} --print_ev
 PROX="--tto_mode svf --tto_steps 400 --tto_jac_mode barrier --tto_w_jac 0.5 --tto_barrier_t 0.1 \
       --tto_w_ncc 0 --tto_w_reg 0 --tto_anchor_w 32"
 
-ck() { local p="results/$1/ckpt/best.pth"; [[ -f "$p" ]] && echo "$p" || echo "results/$1/ckpt/last.pth"; }
+# Search each root in CKPT_ROOTS for <root>/<EXP>/ckpt/best.pth then last.pth. The P16 Wave-1 runs may
+# not sit under results/ (logs went to logs/DICELOSS/, so ckpts likely mirror that) — point CKPT_ROOTS
+# at the extra tree, e.g. CKPT_ROOTS="results results/DICELOSS /path/to/archive". Old P10/P14 ckpts stay
+# found via the default. Locate them first: find ~ -path '*P16_W1_VXM_OASIS*ckpt*' -name '*.pth'
+CKPT_ROOTS="${CKPT_ROOTS:-results}"
+ck() {
+  local exp="$1" root name
+  for root in $CKPT_ROOTS; do
+    for name in best.pth last.pth; do
+      [[ -f "$root/$exp/ckpt/$name" ]] && { echo "$root/$exp/ckpt/$name"; return; }
+    done
+  done
+  echo "${CKPT_ROOTS%% *}/$exp/ckpt/last.pth"
+}
 infer() {
   local tag="$1" exp="$2"; shift 2
   local out="$OUT_ROOT/$tag" ckpt; ckpt="$(ck "$exp")"
