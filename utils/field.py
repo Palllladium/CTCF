@@ -542,6 +542,30 @@ def perturb_flow(flow: torch.Tensor, mode: str = "none", scale: float = 0.02) ->
     raise ValueError(f"unknown perturb mode {mode!r} (none|fp16|noise)")
 
 
+def certified_max_step(candidate_fn, eps: float = 0.0, max_bisect: int = 12) -> tuple[float, torch.Tensor]:
+    """Largest step t in [0,1] whose candidate field is trilinear-certified (tri_cert_bound >= eps), by
+    bisection. ``candidate_fn(t)`` builds the field for step t, and ``candidate_fn(0)`` must be feasible
+    (the pre-step flow). Returns (t, certified_flow). This is the heart of certified iterative refinement:
+    an L3 (or TTO) update d is clipped to the largest topologically-safe fraction of itself, so every
+    iterate stays diffeomorphic on the DEPLOYED warp — no post-hoc repair, no folds introduced. The
+    caller chooses the space by how it builds candidate_fn (velocity: integrate t*d then compose;
+    displacement: t*d added / t*integrated-d composed)."""
+    with torch.no_grad():
+        full = candidate_fn(1.0)
+        if trilinear_cert_bound(full) >= eps:
+            return 1.0, full
+        lo, hi = 0.0, 1.0  # lo feasible (t=0 keeps the pre-step flow), hi infeasible
+        best_t, best_flow = 0.0, candidate_fn(0.0)
+        for _ in range(max_bisect):
+            mid = 0.5 * (lo + hi)
+            cand = candidate_fn(mid)
+            if trilinear_cert_bound(cand) >= eps:
+                lo, best_t, best_flow = mid, mid, cand
+            else:
+                hi = mid
+        return best_t, best_flow
+
+
 def erode_mask(mask: torch.Tensor, iters: int = 1) -> torch.Tensor:
     """Binary erosion of a mask by `iters` voxels (3x3x3 min over 26-neighbours); outside the volume
     counts as background, so the border erodes inward. `iters<=0` is a no-op.
