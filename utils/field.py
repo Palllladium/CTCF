@@ -420,16 +420,39 @@ def _trilinear_det_at(p: dict[tuple[int, int, int], torch.Tensor], a: float, b: 
     )
 
 
+def _trilinear_cell_min_det(flow: torch.Tensor, samples: int = 5) -> torch.Tensor:
+    """Per-cell minimum of det J of the trilinear deformation over an SxSxS interior lattice, shape
+    [D-1,H-1,W-1]. Sound for DETECTION: a cell whose value is < 0 provably folds (a real sample is
+    negative); the sampling only ever under-counts folds, never invents one."""
+    flow = flow.detach().float()
+    p = _trilinear_corner_targets(flow)
+    ts = torch.linspace(0.0, 1.0, samples).tolist()
+    cell_min: torch.Tensor | None = None
+    for a in ts:
+        for b in ts:
+            for c in ts:
+                det = _trilinear_det_at(p, a, b, c)
+                cell_min = det if cell_min is None else torch.minimum(cell_min, det)
+    return cell_min
+
+
 def trilinear_min_det(flow: torch.Tensor, samples: int = 5) -> float:
     """Tight, sound DETECTION of trilinear folding: minimum of det J of the actual trilinear
     (grid_sample) deformation over an SxSxS lattice inside every unit cell. A negative value PROVES
     the applied warp folds; the ten digital determinants only test the cell corners and miss an
     interior dip, so digital-10 positivity does not imply this is >= 0."""
-    flow = flow.detach().float()
     with torch.no_grad():
-        p = _trilinear_corner_targets(flow)
-        ts = torch.linspace(0.0, 1.0, samples).tolist()
-        return min(float(_trilinear_det_at(p, a, b, c).min().item()) for a in ts for b in ts for c in ts)
+        return float(_trilinear_cell_min_det(flow, samples).min().item())
+
+
+def trilinear_fold_percent(flow: torch.Tensor, samples: int = 5) -> float:
+    """Percent of cells that PROVABLY fold under the trilinear warp (some interior sample has det < 0)
+    — the interpolation-consistent analogue of digital_fold_percent, and a sound LOWER bound on the
+    true trilinear fold fraction (only cells with an actually-negative sample are counted). This is the
+    audit headline: how much of a field folds trilinearly even when digital_fold_percent reads zero."""
+    with torch.no_grad():
+        cell_min = _trilinear_cell_min_det(flow, samples)
+        return float((cell_min < 0).to(cell_min.dtype).mean().item() * 100.0)
 
 
 def _values_to_bernstein_matrix(device: torch.device, dtype: torch.dtype) -> torch.Tensor:

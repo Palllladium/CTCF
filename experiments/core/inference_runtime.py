@@ -24,7 +24,13 @@ from utils import (
     mk_grid_img,
     setup_device,
 )
-from utils.field import digital_min_det, digital_project, trilinear_cert_bound, trilinear_min_det
+from utils.field import (
+    digital_min_det,
+    digital_project,
+    trilinear_cert_bound,
+    trilinear_fold_percent,
+    trilinear_min_det,
+)
 from utils.tto import TTOConfig, refine_flow
 
 
@@ -288,12 +294,17 @@ class InferRunner:
             # applies — a sampled detection min and a sound Bernstein lower bound. digital>0 does NOT
             # imply trilinear>0, so a gap between them is a real interpolation-consistency failure.
             fl = flow.float()
+            tri_fold = trilinear_fold_percent(fl)
             row = {
                 "case_id": cid,
                 "time_sec": dt,
                 "cert_min_det": digital_min_det(fl),
                 "tri_min_det": trilinear_min_det(fl),
                 "tri_cert_bound": trilinear_cert_bound(fl),
+                # Audit: percent of cells that PROVABLY fold trilinearly, and whether this case folds
+                # at all (mean over cases -> fraction of cases folding) — the numbers digital10 hides.
+                "tri_fold_pct": tri_fold,
+                "tri_case_folds": float(tri_fold > 0.0),
                 **row,
             }
             if self.tto.enabled:

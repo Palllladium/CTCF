@@ -27,6 +27,7 @@ from .field import (
     logdet_std_from_flow,
     neg_jacobian_penalty,
     trilinear_cert_bound,
+    trilinear_fold_percent,
     trilinear_min_det,
 )
 from .losses import DareDiffusion, Grad3d, NCCVxm, elastic_loss, icon_loss
@@ -97,6 +98,7 @@ __all__ = [
     "setup_device",
     "soft_dice_loss",
     "trilinear_cert_bound",
+    "trilinear_fold_percent",
     "trilinear_min_det",
     "validate",
 ]

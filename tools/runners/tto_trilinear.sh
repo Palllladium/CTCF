@@ -28,6 +28,7 @@ GPU="${GPU:-0}"
 PROFILE="${PROFILE:---2}"
 PYBIN="${PYBIN:-python}"
 OUT_ROOT="${OUT_ROOT:-results/tto_trilinear}"
+FORCE="${FORCE:-0}"                            # 1 = recompute even if summary.csv exists (new columns)
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
@@ -48,7 +49,7 @@ ck() { local p="results/$1/ckpt/best.pth"; [[ -f "$p" ]] && echo "$p" || echo "r
 infer() {
   local tag="$1" exp="$2"; shift 2
   local out="$OUT_ROOT/$tag" ckpt; ckpt="$(ck "$exp")"
-  if [[ -f "$out/summary.csv" ]]; then echo "[SKIP] $tag"; return 0; fi
+  if [[ -f "$out/summary.csv" && "$FORCE" != "1" ]]; then echo "[SKIP] $tag"; return 0; fi
   if [[ ! -f "$ckpt" ]]; then echo "[MISS] $tag — no ckpt at $ckpt"; return 0; fi
   echo; echo "=== eval $tag ==="
   # shellcheck disable=SC2086
@@ -92,16 +93,19 @@ infer IXI_projonly_e0 "$IXI_EXP" $VM --ds IXI --use_test --tto_mode none --tto_p
 
 echo
 echo "===================== TRILINEAR GATE TABLE ====================="
-printf "%-20s %8s %10s %12s %12s %14s\n" "run" "dice" "digital10" "cert_min_det" "tri_min_det" "tri_cert_bound"
+printf "%-20s %8s %9s %11s %11s %10s %10s\n" \
+  "run" "dice" "digital10" "tri_min" "tri_bound" "tri_fold%" "case_fold%"
 for d in "$OUT_ROOT"/*/; do
   [[ -f "$d/summary.csv" ]] || continue
   get() { awk -F, -v k="$1" '$1==k{printf "%s",$2}' "$d/summary.csv"; }
   fmt() { local v; v="$(get "$1")"; [[ -z "$v" ]] && echo "-" || printf "%.5f" "$v"; }
-  printf "%-20s %8s %10s %12s %12s %14s\n" "$(basename "$d")" \
-    "$(fmt dice_mean)" "$(fmt j_leq0_percent)" "$(fmt cert_min_det)" \
-    "$(fmt tri_min_det)" "$(fmt tri_cert_bound)"
+  pct() { local v; v="$(get "$1")"; [[ -z "$v" ]] && echo "-" || printf "%.2f" "$(awk -v x="$v" 'BEGIN{print x*100}')"; }
+  printf "%-20s %8s %9s %11s %11s %10s %10s\n" "$(basename "$d")" \
+    "$(fmt dice_mean)" "$(fmt j_leq0_percent)" "$(fmt tri_min_det)" \
+    "$(fmt tri_cert_bound)" "$(fmt tri_fold_pct)" "$(pct tri_case_folds)"
 done
 echo
-echo "GATE: any projected row with tri_min_det < 0 -> projection injects trilinear folds (audit branch)."
-echo "      all projected tri_min_det >= 0        -> digital certificate is trilinear-safe (Dice branch)."
+echo "AUDIT: tri_fold% = mean %% of cells that PROVABLY fold trilinearly (digital10 hides these);"
+echo "       case_fold% = %% of the N cases with >=1 trilinear fold. tri_min<0 => that field folds."
+echo "Re-run with FORCE=1 to recompute existing rows with the new tri_fold columns."
 echo "Eval CSV: $OUT_ROOT/ (send back). Runs on the --2 box; independent of Wave 1 on the H-box."
