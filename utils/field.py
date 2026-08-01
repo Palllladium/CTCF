@@ -464,12 +464,12 @@ def _values_to_bernstein_matrix(device: torch.device, dtype: torch.dtype) -> tor
     return (pow_to_bern @ val_to_pow).to(device=device, dtype=dtype)
 
 
-def _trilinear_cell_cert_bound(flow: torch.Tensor) -> torch.Tensor:
-    """Per-cell sound Bernstein lower bound on det J of the trilinear deformation, shape [D-1,H-1,W-1].
-    det J is degree <=2 in each of (a,b,c); its 27 Bernstein coefficients bound it on the whole cell
-    (convex-hull property), so the per-cell minimum coefficient is a rigorous lower bound over the
-    continuum — a cell with value >= eps is CERTIFIED fold-free, no sampling gap."""
-    flow = flow.detach().float()
+def _trilinear_bernstein_coeffs(flow: torch.Tensor) -> torch.Tensor:
+    """The 27 Bernstein coefficients of det J per cell, [3,3,3,D-1,H-1,W-1], at the input's dtype and
+    grad. det J is degree <=2 in each of (a,b,c); these coefficients bound it on the whole cell (convex-
+    hull property), so the per-cell minimum is a rigorous lower bound and a hinge on them is a
+    differentiable trilinear-fold penalty. Grad-transparent (no detach), so callers pick precision:
+    the certificate runs this in float64/no_grad, the training penalty in float32 with grad."""
     p = _trilinear_corner_targets(flow)
     mat = _values_to_bernstein_matrix(flow.device, flow.dtype)
     nodes = (0.0, 0.5, 1.0)
@@ -478,16 +478,56 @@ def _trilinear_cell_cert_bound(flow: torch.Tensor) -> torch.Tensor:
     )
     bern = torch.einsum("pa,abcijk->pbcijk", mat, vals)
     bern = torch.einsum("pb,abcijk->apcijk", mat, bern)
-    bern = torch.einsum("pc,abcijk->abpijk", mat, bern)
-    return bern.amin(dim=(0, 1, 2))
+    return torch.einsum("pc,abcijk->abpijk", mat, bern)
+
+
+def _trilinear_cell_cert_bound(flow: torch.Tensor) -> torch.Tensor:
+    """Per-cell sound Bernstein lower bound on det J, [D-1,H-1,W-1], computed in FLOAT64 so the
+    certificate carries no float32 rounding of its own — a cell with value >= eps is CERTIFIED fold-free
+    (no sampling gap). At the fp32 deployment scale, eps only needs to clear the float32 grid_sample
+    discrepancy (~1e-6), so a small eps suffices."""
+    with torch.no_grad():
+        return _trilinear_bernstein_coeffs(flow.detach().double()).amin(dim=(0, 1, 2))
 
 
 def trilinear_cert_bound(flow: torch.Tensor) -> float:
-    """Global sound Bernstein lower bound over every cell (the min of `_trilinear_cell_cert_bound`).
+    """Global sound Bernstein lower bound over every cell (min of `_trilinear_cell_cert_bound`, float64).
     > 0 CERTIFIES the materialized trilinear warp is everywhere orientation-preserving — the
     interpolation-consistent certificate the corner-only digital criterion cannot give."""
     with torch.no_grad():
         return float(_trilinear_cell_cert_bound(flow).min().item())
+
+
+def trilinear_fold_penalty(
+    flow: torch.Tensor,
+    mode: str = "bernstein",
+    eps: float = 0.0,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Differentiable penalty that trains the DEPLOYED trilinear warp to be fold-free. 'bernstein': hinge
+    sum_k relu(eps - coeff_k) over the 27 per-cell Bernstein coefficients (the sound criterion; ~27 det
+    evals). 'sampled': hinge on det J at a 5x5x5 interior lattice per cell (a cheaper proxy). Both mean
+    over cells; `mask` (any [..,D,H,W]) restricts to the brain via each cell's lower corner."""
+    if mode == "bernstein":
+        pen_map = torch.relu(eps - _trilinear_bernstein_coeffs(flow)).sum(dim=(0, 1, 2))
+    elif mode == "sampled":
+        p = _trilinear_corner_targets(flow)
+        ts = torch.linspace(0.0, 1.0, 5, device=flow.device, dtype=flow.dtype).tolist()
+        pen_map = None
+        for a in ts:
+            for b in ts:
+                for c in ts:
+                    h = torch.relu(eps - _trilinear_det_at(p, a, b, c))
+                    pen_map = h if pen_map is None else pen_map + h
+    else:
+        raise ValueError(f"unknown trilinear penalty mode {mode!r} (bernstein|sampled)")
+    if mask is None:
+        return pen_map.mean()
+    m = mask
+    while m.dim() > 3:
+        m = m[0]
+    m = (m[:-1, :-1, :-1] > 0).to(pen_map.dtype)
+    return (pen_map * m).sum() / torch.clamp(m.sum(), min=1.0)
 
 
 def trilinear_project(

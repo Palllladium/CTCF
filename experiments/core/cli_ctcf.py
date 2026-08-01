@@ -100,10 +100,19 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--jac_mode",
         type=str,
-        choices=["central", "digital"],
+        choices=["central", "digital", "trilinear"],
         default="central",
-        help="Jacobian penalty: central (legacy detJ, inert on SVF fields) or digital (hinge on the "
-        "ten Liu-et-al. determinants). Default central keeps every prior run reproducible.",
+        help="Jacobian penalty: central (legacy detJ, inert on SVF fields), digital (hinge on the ten "
+        "Liu-et-al. determinants), or trilinear (hinge on the deployed grid_sample warp — the criterion "
+        "we certify). Default central keeps every prior run reproducible.",
+    )
+    group.add_argument(
+        "--tri_pen_mode",
+        type=str,
+        choices=["bernstein", "sampled"],
+        default="bernstein",
+        help="For --jac_mode trilinear: bernstein (sound 27-coefficient hinge) or sampled (cheaper "
+        "interior-lattice proxy).",
     )
     group.add_argument(
         "--w_dice",

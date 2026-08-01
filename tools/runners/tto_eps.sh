@@ -38,7 +38,7 @@ infer() {
   [[ "$NSHARD" -gt 1 && "$mine" != "$SHARD" ]] && return 0
   local out="$OUT_ROOT/$tag" ckpt; ckpt="$(ck "$exp")"
   if [[ -f "$out/summary.csv" && "$FORCE" != "1" ]]; then echo "[SKIP] $tag"; return 0; fi
-  if [[ ! -f "$ckpt" ]]; then echo "[MISS] $tag — no ckpt at $ckpt"; return 0; fi
+  if [[ ! -f "$ckpt" ]]; then echo "[MISS] $tag — no ckpt at $ckpt" >&2; return 0; fi
   echo; echo "=== eval $tag ==="
   # shellcheck disable=SC2086
   "${PYBIN}" -m experiments.inference $BASE --ckpt "$ckpt" --out_dir "$out" "$@"

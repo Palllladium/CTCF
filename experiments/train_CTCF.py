@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,7 @@ from utils import (
     neg_jacobian_penalty,
     setup_device,
     soft_dice_loss,
+    trilinear_fold_penalty,
 )
 
 # One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
@@ -169,7 +171,12 @@ class Runner:
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
-        jac_pen = digital_fold_penalty if args.jac_mode == "digital" else neg_jacobian_penalty
+        if args.jac_mode == "trilinear":
+            jac_pen = partial(trilinear_fold_penalty, mode=args.tri_pen_mode)
+        elif args.jac_mode == "digital":
+            jac_pen = digital_fold_penalty
+        else:
+            jac_pen = neg_jacobian_penalty
         L_jac = 0.5 * (jac_pen(flow_xy) + jac_pen(flow_yx)) * W_jac
 
         L_dice = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
