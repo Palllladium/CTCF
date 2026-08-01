@@ -22,6 +22,10 @@ _OVERRIDE_HELP = {
     "l2_full_res": "run L2 at full-res.",
     "l3_full_res": "run L3 at full-res.",
     "l3_svf": "integrate L3 delta as SVF via scaling-and-squaring.",
+    "l3_ls_space": "INFERENCE-ONLY certified line-search: clip each L3 update to the largest "
+    "trilinear-diffeomorphic fraction. off (default) | vel (integrate t*delta per probe) | disp "
+    "(integrate once, scale the increment).",
+    "l3_ls_eps": "certificate margin for --*l3_ls_space (tri_cert_bound >= eps at each L3 step).",
 }
 
 CTCF_OVERRIDE_KEYS = (*_INT_OVERRIDES, "l3_error_mode", "l3_corr_mode", *_BOOL_OVERRIDES)
@@ -165,6 +169,19 @@ def add_ctcf_override_args(p: argparse.ArgumentParser, prefix: str = "") -> None
         default=None,
         help=_OVERRIDE_HELP["l3_corr_mode"],
     )
+    group.add_argument(
+        f"--{prefix}l3_ls_space",
+        type=str,
+        choices=["off", "vel", "disp"],
+        default=None,
+        help=_OVERRIDE_HELP["l3_ls_space"],
+    )
+    group.add_argument(
+        f"--{prefix}l3_ls_eps",
+        type=float,
+        default=None,
+        help=_OVERRIDE_HELP["l3_ls_eps"],
+    )
     for name in _BOOL_OVERRIDES:
         group.add_argument(
             f"--{prefix}{name}",
@@ -285,6 +302,8 @@ def ctcf_overrides_from_args(args: argparse.Namespace, prefix: str = "") -> dict
     overrides = {name: getattr(args, f"{prefix}{name}") for name in _INT_OVERRIDES}
     overrides["l3_error_mode"] = getattr(args, f"{prefix}l3_error_mode")
     overrides["l3_corr_mode"] = getattr(args, f"{prefix}l3_corr_mode")
+    overrides["l3_ls_space"] = getattr(args, f"{prefix}l3_ls_space")
+    overrides["l3_ls_eps"] = getattr(args, f"{prefix}l3_ls_eps")
     for name in _BOOL_OVERRIDES:
         overrides[name] = optional_bool(getattr(args, f"{prefix}{name}"))
     return overrides
