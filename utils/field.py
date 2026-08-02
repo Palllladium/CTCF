@@ -5,6 +5,7 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def _crop_spatial(t: torch.Tensor, n: int) -> torch.Tensor:
@@ -498,38 +499,72 @@ def trilinear_cert_bound(flow: torch.Tensor) -> float:
         return float(_trilinear_cell_cert_bound(flow).min().item())
 
 
-def trilinear_fold_penalty(
-    flow: torch.Tensor,
-    mode: str = "bernstein",
-    eps: float = 0.0,
-    mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Differentiable penalty that trains the DEPLOYED trilinear warp to be fold-free. 'bernstein': hinge
-    sum_k relu(eps - coeff_k) over the 27 per-cell Bernstein coefficients (the sound criterion; ~27 det
-    evals). 'sampled': hinge on det J at a 5x5x5 interior lattice per cell (a cheaper proxy). Both mean
-    over cells; `mask` (any [..,D,H,W]) restricts to the brain via each cell's lower corner."""
+def _tri_pen_map(flow: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
+    """Per-cell trilinear-fold hinge map [D-1,H-1,W-1] for one (sub)volume. 'bernstein': hinge over the 27
+    sound Bernstein coefficients of det J; 'sampled': hinge on det J at a 3^3 interior lattice (a proxy that
+    can miss the true minimum between samples, hence not a certificate). Both retain ~27 full-res det
+    sub-graphs for backward — the caller tiles + checkpoints this to bound peak memory."""
     if mode == "bernstein":
-        pen_map = torch.relu(eps - _trilinear_bernstein_coeffs(flow)).sum(dim=(0, 1, 2))
-    elif mode == "sampled":
-        # 3^3 not 5^3: the Python loop retains one full-res autograd sub-graph PER sample for backward,
-        # so sample count (not FLOPs) drives training memory — 5^3 OOMs an 80 GB card, 3^3 fits (~bernstein).
+        return torch.relu(eps - _trilinear_bernstein_coeffs(flow)).sum(dim=(0, 1, 2))
+    if mode == "sampled":
         p = _trilinear_corner_targets(flow)
         ts = torch.linspace(0.0, 1.0, 3, device=flow.device, dtype=flow.dtype).tolist()
-        pen_map = None
+        pen_map: torch.Tensor | None = None
         for a in ts:
             for b in ts:
                 for c in ts:
                     h = torch.relu(eps - _trilinear_det_at(p, a, b, c))
                     pen_map = h if pen_map is None else pen_map + h
-    else:
-        raise ValueError(f"unknown trilinear penalty mode {mode!r} (bernstein|sampled)")
-    if mask is None:
-        return pen_map.mean()
-    m = mask
-    while m.dim() > 3:
-        m = m[0]
-    m = (m[:-1, :-1, :-1] > 0).to(pen_map.dtype)
-    return (pen_map * m).sum() / torch.clamp(m.sum(), min=1.0)
+        return pen_map
+    raise ValueError(f"unknown trilinear penalty mode {mode!r} (bernstein|sampled)")
+
+
+def trilinear_fold_penalty(
+    flow: torch.Tensor,
+    mode: str = "bernstein",
+    eps: float = 0.0,
+    mask: torch.Tensor | None = None,
+    tiles: int | None = None,
+) -> torch.Tensor:
+    """Differentiable penalty that trains the DEPLOYED trilinear warp to be fold-free. 'bernstein': hinge
+    sum_k relu(eps - coeff_k) over the 27 per-cell Bernstein coefficients (the sound criterion). 'sampled':
+    hinge on det J at a 3^3 interior lattice per cell (a cheaper proxy). Both mean over cells; `mask`
+    (any [..,D,H,W]) restricts to the brain via each cell's lower corner.
+
+    Memory: each mode retains ~27 full-res det sub-graphs for backward, which OOMs an 80 GB card at full
+    resolution. When training (grad on), the cells are split into `tiles` slabs along D and each slab's map
+    is gradient-checkpointed, so only one slab's graph is ever live — bounded peak, numerically identical to
+    the untiled result. Inference (no_grad) runs a single tile with no checkpoint (unchanged legacy path)."""
+    ckpt = torch.is_grad_enabled() and flow.requires_grad
+    n_tiles = (8 if ckpt else 1) if tiles is None else max(1, tiles)
+    n_cells_d = flow.shape[2] - 1
+    edges = torch.linspace(0, n_cells_d, n_tiles + 1).round().long().tolist()
+
+    m = None
+    if mask is not None:
+        m = mask
+        while m.dim() > 3:
+            m = m[0]
+        m = m[:-1, :-1, :-1] > 0  # cell grid [D-1,H-1,W-1], lower-corner membership
+
+    total = flow.new_zeros(())
+    count = 0.0
+    for t in range(n_tiles):
+        c0, c1 = edges[t], edges[t + 1]
+        if c1 <= c0:
+            continue
+        sub = flow[:, :, c0 : c1 + 1, :, :]  # +1 voxel to close the slab's top cells
+        pm = checkpoint(_tri_pen_map, sub, mode, float(eps), use_reentrant=False) if ckpt else _tri_pen_map(
+            sub, mode, float(eps)
+        )
+        if m is None:
+            total = total + pm.sum()
+            count += pm.numel()
+        else:
+            mt = m[c0:c1].to(pm.dtype)
+            total = total + (pm * mt).sum()
+            count += float(mt.sum().item())
+    return total / max(count, 1.0)
 
 
 def trilinear_project(

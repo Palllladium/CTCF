@@ -6,13 +6,14 @@
 # one run per card (6 cards). Winner picked later by POST-repair Dice + repair cost vs the Wave-1 digital
 # models (does targeting the RIGHT criterion beat the digital penalty, and does it shrink/kill the repair?).
 #
-#   bernstein  sound 27-coefficient hinge (aligned with the certificate, heavier: ~27 det evals + backward)
-#   sampled    cheaper 5^3 interior-lattice proxy
+#   bernstein  sound 27-coefficient hinge (aligned with the certificate)
+#   sampled    3^3 interior-lattice proxy (can miss the true between-sample minimum — not a certificate)
 #   RUN=1..3  bernstein  w_jac 1 / 5 / 15
 #   RUN=4..6  sampled    w_jac 1 / 5 / 15
 #
-# Runs ONE experiment in the foreground; wrap per card. Resumable (re-run the same command). The bernstein
-# penalty is memory/compute-heavier than digital — SMOKE-test one card first to rule out OOM/NaN:
+# Runs ONE experiment in the foreground; wrap per card. Resumable (re-run the same command). BOTH modes
+# retain ~27 full-res det sub-graphs; trilinear_fold_penalty now tiles+gradient-checkpoints them (8 slabs)
+# so an 80 GB card fits with --w_dice on. Still SMOKE-test one card first to confirm OOM/NaN are gone:
 #   CUDA_VISIBLE_DEVICES=2 RUN=1 SMOKE=1 MAX_EPOCH=3 bash tools/runners/train_wave2.sh
 #
 #   # the wave, one run per card GPU2-7:
