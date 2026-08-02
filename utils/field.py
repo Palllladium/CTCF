@@ -541,6 +541,32 @@ def trilinear_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: float =
         return float(_trilinear_cell_cert_bound(flow, subdiv_depth, eps).min().item())
 
 
+def displacement_grad_norm_max(flow: torch.Tensor) -> float:
+    """Max over voxels of the Frobenius norm of the displacement Jacobian d u (phi = id + u), central
+    differences. A SOUND GLOBAL-injectivity certificate: value < 1 => u is a contraction => phi is globally
+    injective (a homeomorphism onto its image), upgrading the fold-free (LOCAL orientation-preserving)
+    certificate to a genuine diffeomorphism. Frobenius >= the spectral norm, so the test is conservative but
+    sound. Fields with value >= 1 need the weaker boundary-injectivity + degree route (Ball 1981 / Kroemer
+    2020); `boundary_max_disp` supplies its other input."""
+    with torch.no_grad():
+        dz = F.pad(flow[:, :, 2:, :, :] - flow[:, :, :-2, :, :], pad=(0, 0, 0, 0, 1, 1)) * 0.5
+        dy = F.pad(flow[:, :, :, 2:, :] - flow[:, :, :, :-2, :], pad=(0, 0, 1, 1, 0, 0)) * 0.5
+        dx = F.pad(flow[:, :, :, :, 2:] - flow[:, :, :, :, :-2], pad=(1, 1, 0, 0, 0, 0)) * 0.5
+        frob2 = (dz * dz + dy * dy + dx * dx).sum(dim=1)  # sum of all nine partials^2 per voxel
+        return float(frob2.max().sqrt().item())
+
+
+def boundary_max_disp(flow: torch.Tensor) -> float:
+    """Max displacement magnitude ||u|| on the domain boundary (the six faces). ~0 means phi is the identity
+    on the boundary, so phi|boundary is trivially injective and — with the interior fold-free certificate —
+    phi is globally injective by degree theory (Ball 1981 / Kroemer 2020). Small boundary displacement is the
+    common registration case; this is the quantity that route needs."""
+    with torch.no_grad():
+        mag = flow.pow(2).sum(dim=1).sqrt()[0]  # [D,H,W]
+        faces = (mag[0], mag[-1], mag[:, 0], mag[:, -1], mag[:, :, 0], mag[:, :, -1])
+        return float(max(f.max().item() for f in faces))
+
+
 def _tri_pen_map(flow: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
     """Per-cell trilinear-fold hinge map [D-1,H-1,W-1] for one (sub)volume. 'bernstein': hinge over the 27
     sound Bernstein coefficients of det J; 'sampled': hinge on det J at a 3^3 interior lattice (a proxy that
@@ -567,11 +593,15 @@ def trilinear_fold_penalty(
     eps: float = 0.0,
     mask: torch.Tensor | None = None,
     tiles: int | None = None,
+    reduce: str = "mean",
 ) -> torch.Tensor:
     """Differentiable penalty that trains the DEPLOYED trilinear warp to be fold-free. 'bernstein': hinge
     sum_k relu(eps - coeff_k) over the 27 per-cell Bernstein coefficients (the sound criterion). 'sampled':
-    hinge on det J at a 3^3 interior lattice per cell (a cheaper proxy). Both mean over cells; `mask`
-    (any [..,D,H,W]) restricts to the brain via each cell's lower corner.
+    hinge on det J at a 3^3 interior lattice per cell (a cheaper proxy). `reduce` sets the cell average:
+    'mean' over ALL cells (the folds, being sparse, are smeared into a tiny gradient) or 'active' over only
+    the violating cells (hinge > 0), which concentrates the gradient where the field actually folds — a
+    CVaR-style reduction for the sparse-violation regime. `mask` (any [..,D,H,W]) restricts to the brain via
+    each cell's lower corner.
 
     Memory: each mode retains ~27 full-res det sub-graphs for backward, which OOMs an 80 GB card at full
     resolution. When training (grad on), the cells are split into `tiles` slabs along D and each slab's map
@@ -591,6 +621,7 @@ def trilinear_fold_penalty(
 
     total = flow.new_zeros(())
     count = 0.0
+    active = 0.0
     for t in range(n_tiles):
         c0, c1 = edges[t], edges[t + 1]
         if c1 <= c0:
@@ -602,11 +633,14 @@ def trilinear_fold_penalty(
         if m is None:
             total = total + pm.sum()
             count += pm.numel()
+            active += float((pm > 0).sum().item())
         else:
             mt = m[c0:c1].to(pm.dtype)
             total = total + (pm * mt).sum()
             count += float(mt.sum().item())
-    return total / max(count, 1.0)
+            active += float(((pm > 0) & (mt > 0)).sum().item())
+    denom = active if reduce == "active" else count
+    return total / max(denom, 1.0)
 
 
 def trilinear_project(

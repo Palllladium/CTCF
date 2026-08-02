@@ -115,6 +115,15 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         "interior-lattice proxy).",
     )
     group.add_argument(
+        "--tri_pen_reduce",
+        type=str,
+        choices=["mean", "active"],
+        default="mean",
+        help="For --jac_mode trilinear: reduce the per-cell hinge by 'mean' (over all cells) or 'active' "
+        "(over only violating cells). active concentrates the gradient where the field actually folds, since "
+        "folds are sparse and mean smears them into a near-zero signal.",
+    )
+    group.add_argument(
         "--w_dice",
         type=float,
         default=0.0,

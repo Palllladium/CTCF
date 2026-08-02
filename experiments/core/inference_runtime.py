@@ -25,8 +25,10 @@ from utils import (
     setup_device,
 )
 from utils.field import (
+    boundary_max_disp,
     digital_min_det,
     digital_project,
+    displacement_grad_norm_max,
     perturb_flow,
     trilinear_cert_bound,
     trilinear_fold_percent,
@@ -296,6 +298,7 @@ class InferRunner:
                     eps=args.tto_tri_project_eps,
                     damp=args.tto_tri_project_damp,
                     max_iters=args.tto_tri_project_iters,
+                    subdiv_depth=args.tto_tri_subdiv_depth,
                 )
             # Robustness test: perturb the certified field as a deployment step would; every metric below
             # (Dice, tri_cert_bound, tri_fold_pct) is then read on the perturbed field — did the margin hold?
@@ -315,11 +318,15 @@ class InferRunner:
                 "time_sec": dt,
                 "cert_min_det": digital_min_det(fl),
                 "tri_min_det": trilinear_min_det(fl),
-                "tri_cert_bound": trilinear_cert_bound(fl),
+                "tri_cert_bound": trilinear_cert_bound(fl, args.tto_tri_subdiv_depth, args.tto_tri_project_eps),
                 # Audit: percent of cells that PROVABLY fold trilinearly, and whether this case folds
                 # at all (mean over cases -> fraction of cases folding) — the numbers digital10 hides.
                 "tri_fold_pct": tri_fold,
                 "tri_case_folds": float(tri_fold > 0.0),
+                # Global-injectivity inputs (Ball/Kroemer): disp_grad_norm < 1 alone certifies GLOBAL
+                # injectivity; else pair the interior fold-free cert with a small boundary_max_disp.
+                "disp_grad_norm": displacement_grad_norm_max(fl),
+                "boundary_max_disp": boundary_max_disp(fl),
                 **row,
             }
             if self.tto.enabled:

@@ -172,7 +172,7 @@ class Runner:
 
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         if args.jac_mode == "trilinear":
-            jac_pen = partial(trilinear_fold_penalty, mode=args.tri_pen_mode)
+            jac_pen = partial(trilinear_fold_penalty, mode=args.tri_pen_mode, reduce=args.tri_pen_reduce)
         elif args.jac_mode == "digital":
             jac_pen = digital_fold_penalty
         else:

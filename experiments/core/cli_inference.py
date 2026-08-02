@@ -172,6 +172,14 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         help="Trilinear-repair margin: certify tri_cert_bound >= eps over every cell (--tto_tri_project 1).",
     )
     group.add_argument(
+        "--tto_tri_subdiv_depth",
+        type=int,
+        default=0,
+        help="Bernstein subdivision depth for the trilinear certificate/repair: refines the conservative "
+        "per-cell bound on sub-eps cells, certifying cells the coarse bound falsely flags (so fewer needless "
+        "repair contractions and a tighter reported tri_cert_bound). 0 = off (coarse first-level bound).",
+    )
+    group.add_argument(
         "--tto_perturb",
         choices=["none", "fp16", "noise"],
         default="none",
