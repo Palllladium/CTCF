@@ -482,21 +482,63 @@ def _trilinear_bernstein_coeffs(flow: torch.Tensor) -> torch.Tensor:
     return torch.einsum("pc,abcijk->abpijk", mat, bern)
 
 
-def _trilinear_cell_cert_bound(flow: torch.Tensor) -> torch.Tensor:
+def _trilinear_subdiv_matrices(device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    """de Casteljau split-at-midpoint maps for a degree-2 Bernstein polynomial: L takes its 3 coefficients
+    to those of its restriction to [0,1/2], R to [1/2,1]. Applied per axis they subdivide a cell into 8."""
+    left = torch.tensor([[1.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.25, 0.5, 0.25]], device=device, dtype=dtype)
+    right = torch.tensor([[0.25, 0.5, 0.25], [0.0, 0.5, 0.5], [0.0, 0.0, 1.0]], device=device, dtype=dtype)
+    return left, right
+
+
+def _trilinear_subdivide_min(coeffs: torch.Tensor, depth: int, mats=None) -> torch.Tensor:
+    """Tightest sound lower bound on det J over each cell after `depth` Bernstein (de Casteljau) subdivision
+    levels: recursively split every cell into 8 sub-cells and take the min sub-coefficient. Monotone
+    (>= the un-subdivided amin) and still sound (<= the true min det — subdivision only raises the bound).
+    `coeffs` is [3,3,3,N]; returns [N]."""
+    if depth <= 0:
+        return coeffs.amin(dim=(0, 1, 2))
+    if mats is None:
+        mats = _trilinear_subdiv_matrices(coeffs.device, coeffs.dtype)
+    left, right = mats
+    best: torch.Tensor | None = None
+    for m0 in (left, right):
+        c0 = torch.einsum("xi,ijkn->xjkn", m0, coeffs)
+        for m1 in (left, right):
+            c1 = torch.einsum("yj,xjkn->xykn", m1, c0)
+            for m2 in (left, right):
+                child = torch.einsum("zk,xykn->xyzn", m2, c1)
+                m = _trilinear_subdivide_min(child, depth - 1, mats)
+                best = m if best is None else torch.minimum(best, m)
+    return best
+
+
+def _trilinear_cell_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: float = 0.0) -> torch.Tensor:
     """Per-cell sound Bernstein lower bound on det J, [D-1,H-1,W-1], computed in FLOAT64 so the
     certificate carries no float32 rounding of its own — a cell with value >= eps is CERTIFIED fold-free
     (no sampling gap). At the fp32 deployment scale, eps only needs to clear the float32 grid_sample
-    discrepancy (~1e-6), so a small eps suffices."""
+    discrepancy (~1e-6), so a small eps suffices.
+
+    `subdiv_depth` > 0 refines only the cells whose coarse bound is < eps by that many de Casteljau
+    subdivision levels, tightening the (conservative) first-level bound and certifying cells it falsely
+    flags — sound throughout, and cheap because folding cells are sparse (few suspects to refine)."""
     with torch.no_grad():
-        return _trilinear_bernstein_coeffs(flow.detach().double()).amin(dim=(0, 1, 2))
+        coeffs = _trilinear_bernstein_coeffs(flow.detach().double())
+        bound = coeffs.amin(dim=(0, 1, 2))
+        if subdiv_depth > 0:
+            suspect = bound < eps
+            if bool(suspect.any()):
+                bound = bound.clone()
+                bound[suspect] = _trilinear_subdivide_min(coeffs[:, :, :, suspect], subdiv_depth)
+        return bound
 
 
-def trilinear_cert_bound(flow: torch.Tensor) -> float:
+def trilinear_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: float = 0.0) -> float:
     """Global sound Bernstein lower bound over every cell (min of `_trilinear_cell_cert_bound`, float64).
     > 0 CERTIFIES the materialized trilinear warp is everywhere orientation-preserving — the
-    interpolation-consistent certificate the corner-only digital criterion cannot give."""
+    interpolation-consistent certificate the corner-only digital criterion cannot give. `subdiv_depth`
+    tightens the bound on sub-eps cells (see `_trilinear_cell_cert_bound`)."""
     with torch.no_grad():
-        return float(_trilinear_cell_cert_bound(flow).min().item())
+        return float(_trilinear_cell_cert_bound(flow, subdiv_depth, eps).min().item())
 
 
 def _tri_pen_map(flow: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
@@ -572,8 +614,9 @@ def trilinear_project(
     eps: float = 0.0,
     damp: float = 0.6,
     max_iters: int = 80,
+    subdiv_depth: int = 0,
 ) -> tuple[torch.Tensor, float, int]:
-    """Repair a displacement field onto the TRILINEAR-diffeomorphic set. Each pass: flag every cell whose
+    """Repair a displacement field onto the TRILINEAR fold-free (orientation-preserving) set. Each pass: flag every cell whose
     sound Bernstein bound of the actual grid_sample warp is < eps, expand the flagged cells to the eight
     voxels each touches, and blend those voxels' displacement toward the local (mean-smoothed) field under
     a feathered weight — the same boundary-safe relaxation as `digital_project`, but gated on the
@@ -591,7 +634,7 @@ def trilinear_project(
     applied = 0
     with torch.no_grad():
         for _ in range(max_iters):
-            cell_bad = (_trilinear_cell_cert_bound(out) < eps).to(out.dtype)  # [D-1,H-1,W-1]
+            cell_bad = (_trilinear_cell_cert_bound(out, subdiv_depth, eps) < eps).to(out.dtype)  # [D-1,H-1,W-1]
             if not bool(cell_bad.any()):
                 break
             # A voxel is touched if any of the (up to 8) cells incident to it is flagged: a 2^3 max over
@@ -624,7 +667,7 @@ def certified_max_step(candidate_fn, eps: float = 0.0, max_bisect: int = 12) -> 
     bisection. ``candidate_fn(t)`` builds the field for step t, and ``candidate_fn(0)`` must be feasible
     (the pre-step flow). Returns (t, certified_flow). This is the heart of certified iterative refinement:
     an L3 (or TTO) update d is clipped to the largest topologically-safe fraction of itself, so every
-    iterate stays diffeomorphic on the DEPLOYED warp — no post-hoc repair, no folds introduced. The
+    iterate stays fold-free (orientation-preserving) on the DEPLOYED warp — no post-hoc repair, no folds introduced. The
     caller chooses the space by how it builds candidate_fn (velocity: integrate t*d then compose;
     displacement: t*d added / t*integrated-d composed)."""
     with torch.no_grad():
