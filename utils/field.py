@@ -511,8 +511,10 @@ def trilinear_fold_penalty(
     if mode == "bernstein":
         pen_map = torch.relu(eps - _trilinear_bernstein_coeffs(flow)).sum(dim=(0, 1, 2))
     elif mode == "sampled":
+        # 3^3 not 5^3: the Python loop retains one full-res autograd sub-graph PER sample for backward,
+        # so sample count (not FLOPs) drives training memory — 5^3 OOMs an 80 GB card, 3^3 fits (~bernstein).
         p = _trilinear_corner_targets(flow)
-        ts = torch.linspace(0.0, 1.0, 5, device=flow.device, dtype=flow.dtype).tolist()
+        ts = torch.linspace(0.0, 1.0, 3, device=flow.device, dtype=flow.dtype).tolist()
         pen_map = None
         for a in ts:
             for b in ts:
