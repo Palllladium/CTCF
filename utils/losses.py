@@ -82,6 +82,48 @@ class NCCVxm(nn.Module):
         return -(cc * m).sum() / torch.clamp(m.sum(), min=1.0)
 
 
+_MIND_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+
+
+def _mind_shift(x: torch.Tensor, dz: int, dy: int, dx: int) -> torch.Tensor:
+    """Edge-clamped (replicate) shift x[i] -> x[clamp(i+offset)] — NON-circular, unlike torch.roll, so
+    opposite faces of the volume are never treated as neighbours. Same convention as field.py."""
+    out = x
+    for dim, off in ((2, dz), (3, dy), (4, dx)):
+        if off == 0:
+            continue
+        n = out.shape[dim]
+        idx = torch.clamp(torch.arange(n, device=x.device) + off, 0, n - 1)
+        out = out.index_select(dim, idx)
+    return out
+
+
+def mind_descriptor(img: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """MIND-6 descriptor (Heinrich et al., MedIA 2012, six-neighbour form): for each 6-connected
+    neighbour, the 3x3x3 box patch-SSD to it, normalised by the local variance and exp'd, max-channel
+    normalised — a MODALITY/intensity-INVARIANT local signature, [B,6,D,H,W]. Box patch (not the paper's
+    Gaussian) and edge-clamped boundary; NOT bit-equivalent to MIND-SSC (12-edge self-similarity, deeds/
+    ConvexAdam). Aligning MIND (not raw intensity) is why it can survive contrast shifts NCC drifts on."""
+    dists = [
+        F.avg_pool3d(
+            F.pad((img - _mind_shift(img, dz, dy, dx)).pow(2), (1, 1, 1, 1, 1, 1), mode="replicate"),
+            kernel_size=3,
+            stride=1,
+        )
+        for dz, dy, dx in _MIND_OFFSETS
+    ]
+    dp = torch.cat(dists, dim=1)
+    var = dp.mean(dim=1, keepdim=True).clamp_min(eps)
+    mind = torch.exp(-dp / var)
+    return mind / mind.amax(dim=1, keepdim=True).clamp_min(eps)
+
+
+def mind_loss(fixed: torch.Tensor, moving: torch.Tensor) -> torch.Tensor:
+    """Mean-absolute MIND distance between two volumes; minimised when their anatomy aligns, regardless of
+    intensity/contrast differences (the leak-free cross-domain objective, as opposed to test labels)."""
+    return (mind_descriptor(fixed) - mind_descriptor(moving)).abs().mean()
+
+
 class DareDiffusion(nn.Module):
     """Spatially-adaptive diffusion regularisation: alpha(x) = 1 + beta * exp(-|grad flow|)."""
 

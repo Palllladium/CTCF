@@ -18,7 +18,7 @@ from utils.field import (
     jacobian_penalty_and_folds,
     neg_jacobian_penalty,
 )
-from utils.losses import Grad3d, NCCVxm
+from utils.losses import Grad3d, NCCVxm, mind_descriptor
 from utils.spatial import SpatialTransformer
 
 TTO_MODES = ("none", "disp", "svf", "inr", "kan", "randkan")
@@ -58,6 +58,7 @@ class TTOConfig:
     w_reg: float = 1.0
     w_jac: float = 0.005
     w_ncc: float = 1.0
+    w_mind: float = 0.0
     anchor_w: float = 0.0
     jac_mode: str = "central"
     jac_eps: float = 0.0
@@ -263,6 +264,8 @@ def refine_flow(
 
     ncc = NCCVxm(win=[cfg.ncc_win] * 3)
     reg = Grad3d(penalty="l2")
+    # MIND is intensity-invariant; its fixed-image descriptor is constant, so compute it once.
+    mind_fixed = mind_descriptor(fixed).detach() if cfg.w_mind > 0.0 else None
     loss_mask = mask if cfg.use_mask else None
     topo_mask = mask if cfg.topo_mask else None
     if topo_mask is not None and cfg.topo_erode > 0:
@@ -278,8 +281,12 @@ def refine_flow(
     for step in range(cfg.steps + 1):
         flow = param()
         warped = st_bilinear(moving, flow)
-        sim = ncc(fixed, warped, mask=loss_mask)
-        loss = cfg.w_ncc * sim + cfg.w_reg * reg(flow)
+        # `align` = the active similarity being minimised (NCC and/or MIND); the plateau guard tracks IT,
+        # not NCC unconditionally, so an NCC-vs-MIND comparison with early stopping is objective-consistent.
+        align = cfg.w_ncc * ncc(fixed, warped, mask=loss_mask) if cfg.w_ncc > 0.0 else flow.new_zeros(())
+        if mind_fixed is not None:
+            align = align + cfg.w_mind * (mind_fixed - mind_descriptor(warped)).abs().mean()
+        loss = align + cfg.w_reg * reg(flow)
         if cfg.anchor_w > 0.0:
             loss = loss + cfg.anchor_w * (flow - flow0.detach()).pow(2).mean()
 
@@ -306,7 +313,7 @@ def refine_flow(
         if step in cfg.snapshot_at:
             snapshots[step] = flow.detach()
 
-        sim_hist.append(float(sim.detach()))
+        sim_hist.append(float(align.detach()))
         if cfg.guards_plateau and _is_plateau(sim_hist, cfg):
             stop_reason = "plateau"
             break

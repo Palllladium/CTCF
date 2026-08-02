@@ -194,6 +194,7 @@ class InferRunner:
             w_reg=args.tto_w_reg,
             w_jac=args.tto_w_jac,
             w_ncc=args.tto_w_ncc,
+            w_mind=args.tto_w_mind,
             anchor_w=args.tto_anchor_w,
             jac_mode=args.tto_jac_mode,
             jac_eps=args.tto_jac_eps,

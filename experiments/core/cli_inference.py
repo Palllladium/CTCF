@@ -68,6 +68,13 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "so the field is not dragged toward the label-free NCC optimum.",
     )
     group.add_argument(
+        "--tto_w_mind",
+        type=float,
+        default=0.0,
+        help="MIND similarity weight during TTO — an intensity-INVARIANT objective for cross-domain "
+        "adaptation where NCC drifts to the intensity match. Pair with --tto_w_ncc 0 for pure MIND.",
+    )
+    group.add_argument(
         "--tto_anchor_w",
         type=float,
         default=0.0,
