@@ -567,6 +567,38 @@ def boundary_max_disp(flow: torch.Tensor) -> float:
         return float(max(f.max().item() for f in faces))
 
 
+def _face_tangential_lip(face: torch.Tensor) -> torch.Tensor:
+    """Max spectral norm of the tangential displacement Jacobian over one boundary face. `face` is [3,A,B]
+    (the three displacement components on the face; A,B the two in-plane directions). Central differences in
+    A and B give the 3x2 in-plane Jacobian; its spectral norm is sqrt of the top eigenvalue of the 2x2 Gram
+    matrix (exact 2x2 closed form)."""
+    ga = 0.5 * F.pad(face[:, 2:, :] - face[:, :-2, :], pad=(0, 0, 1, 1))  # d u / d A
+    gb = 0.5 * F.pad(face[:, :, 2:] - face[:, :, :-2], pad=(1, 1, 0, 0))  # d u / d B
+    g11 = (ga * ga).sum(0)
+    g22 = (gb * gb).sum(0)
+    g12 = (ga * gb).sum(0)
+    disc = torch.sqrt(torch.clamp((0.5 * (g11 - g22)) ** 2 + g12 * g12, min=0.0))
+    top_eig = 0.5 * (g11 + g22) + disc  # largest eigenvalue of the 2x2 SPD Gram
+    return torch.sqrt(torch.clamp(top_eig, min=0.0)).max()
+
+
+def boundary_tangential_lip(flow: torch.Tensor) -> float:
+    """Max tangential Lipschitz constant of the displacement over the six boundary faces (exact spectral norm
+    of the in-plane Jacobian). value < 1 SOUNDLY certifies phi maps each face injectively (u contracts along
+    each convex face, so ||phi(p)-phi(q)|| >= (1 - lip)||p-q|| > 0): with the interior fold-free certificate
+    this supplies the boundary-injectivity input the Ball/Kroemer global-injectivity theorem needs (cross-face
+    collision being precluded separately by a small `boundary_max_disp`). Weaker — fires more often — than the
+    global contraction test `displacement_grad_norm_max`, since the boundary is far smoother than the interior."""
+    with torch.no_grad():
+        u = flow[0]  # [3,D,H,W]
+        faces = (
+            u[:, 0, :, :], u[:, -1, :, :],   # z faces, tangential (H, W)
+            u[:, :, 0, :], u[:, :, -1, :],   # y faces, tangential (D, W)
+            u[:, :, :, 0], u[:, :, :, -1],   # x faces, tangential (D, H)
+        )
+        return float(torch.stack([_face_tangential_lip(f) for f in faces]).max().item())
+
+
 def _tri_pen_map(flow: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
     """Per-cell trilinear-fold hinge map [D-1,H-1,W-1] for one (sub)volume. 'bernstein': hinge over the 27
     sound Bernstein coefficients of det J; 'sampled': hinge on det J at a 3^3 interior lattice (a proxy that
