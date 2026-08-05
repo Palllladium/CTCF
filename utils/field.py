@@ -603,6 +603,52 @@ def boundary_tangential_lip(flow: torch.Tensor) -> float:
         return float(torch.stack([_face_tangential_lip(f) for f in faces]).max().item())
 
 
+def certified_local_clip(
+    flow_current: torch.Tensor,
+    flow_proposal: torch.Tensor,
+    eps: float = 0.0,
+    sweeps: int = 1,
+) -> torch.Tensor:
+    """8-parity-color certified LOCAL clip (Gate B). Moves each grid vertex from `flow_current` (which MUST be
+    certified: every cell's Bernstein coeff >= eps) toward `flow_proposal` by the largest per-vertex fraction
+    alpha in [0,1] that keeps every incident cell's 27 Bernstein coeffs >= eps. Vertices are swept in 8 parity
+    colors so no cell has two simultaneously-moved corners => each Bernstein coeff is AFFINE in the moved
+    vertex's step (rank-one Jacobian update; matrix-determinant lemma), giving a closed-form alpha. Sound and
+    feasibility-preserving (alpha=0 is always feasible). The LOCAL analogue of the failed global line-search:
+    only violating vertices shrink, safe ones keep alpha=1. Also a strictly-better repair than
+    `trilinear_project` (provably feasible + convergent). Returns the clipped, certified field (float32)."""
+    if flow_current.shape != flow_proposal.shape:
+        raise ValueError("current and proposal must share shape [1,3,D,H,W]")
+    with torch.no_grad():
+        cur = flow_current.detach().double()
+        prop = flow_proposal.detach().double()
+        _, _, d, h, w = cur.shape
+        zz, yy, xx = torch.meshgrid(
+            torch.arange(d, device=cur.device),
+            torch.arange(h, device=cur.device),
+            torch.arange(w, device=cur.device),
+            indexing="ij",
+        )
+        for _ in range(max(1, sweeps)):
+            for color in range(8):
+                ci, cj, ck = (color >> 2) & 1, (color >> 1) & 1, color & 1
+                cmask = (zz % 2 == ci) & (yy % 2 == cj) & (xx % 2 == ck)  # this color's vertices [D,H,W]
+                field1 = torch.where(cmask[None, None], prop, cur)  # this color's vertices fully at proposal
+                b0 = _trilinear_bernstein_coeffs(cur)  # [3,3,3,D-1,H-1,W-1], all >= eps (cur is certified)
+                s = _trilinear_bernstein_coeffs(field1) - b0  # per-cell affine slope of each coeff in alpha
+                ratio = torch.where(
+                    s < 0, (b0 - eps) / (-s).clamp_min(1e-30), torch.full_like(s, float("inf"))
+                )
+                alpha_cell = ratio.amin(dim=(0, 1, 2)).clamp(0.0, 1.0)  # max safe alpha per cell [D-1,H-1,W-1]
+                # each color vertex is the color-c corner of its <=8 incident cells; alpha_v = min over them
+                # (min-pool = -maxpool(-x); pad missing boundary cells with +inf so they never constrain)
+                padded = F.pad(alpha_cell[None, None], (1, 1, 1, 1, 1, 1), value=float("inf"))
+                alpha_v = (-F.max_pool3d(-padded, kernel_size=2, stride=1))[0, 0]  # [D,H,W]
+                alpha_v = torch.where(cmask, alpha_v.clamp(0.0, 1.0), torch.zeros_like(alpha_v))
+                cur = cur + alpha_v[None, None] * (prop - cur)
+        return cur.float()
+
+
 def _tri_pen_map(flow: torch.Tensor, mode: str, eps: float) -> torch.Tensor:
     """Per-cell trilinear-fold hinge map [D-1,H-1,W-1] for one (sub)volume. 'bernstein': hinge over the 27
     sound Bernstein coefficients of det J; 'sampled': hinge on det J at a 3^3 interior lattice (a proxy that
