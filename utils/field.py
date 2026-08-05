@@ -542,18 +542,24 @@ def trilinear_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: float =
 
 
 def displacement_grad_norm_max(flow: torch.Tensor) -> float:
-    """Max over voxels of the Frobenius norm of the displacement Jacobian d u (phi = id + u), central
-    differences. A SOUND GLOBAL-injectivity certificate: value < 1 => u is a contraction => phi is globally
-    injective (a homeomorphism onto its image), upgrading the fold-free (LOCAL orientation-preserving)
-    certificate to a genuine diffeomorphism. Frobenius >= the spectral norm, so the test is conservative but
-    sound. Fields with value >= 1 need the weaker boundary-injectivity + degree route (Ball 1981 / Kroemer
-    2020); `boundary_max_disp` supplies its other input."""
+    """SOUND upper bound on the max operator norm of the displacement Jacobian d u of the piecewise-TRILINEAR
+    interpolant (phi = id + u). Uses per-edge FORWARD differences u[i+1]-u[i] — the EXACT edge slopes of the
+    interpolant. Central differences are NOT a bound: they average adjacent edges and cancel (an alternating
+    field u_i=a(-1)^i has zero central difference but edge slope 2a). Within a cell the column d u/d a is a
+    convex combination of the four parallel a-edges, so a max over incident edges bounds it; the per-cell
+    Frobenius of the three column bounds >= the operator norm. value < 1 => u is a contraction => phi is
+    GLOBALLY injective (a homeomorphism onto its image), upgrading the fold-free (LOCAL) certificate to a
+    diffeomorphism. Conservative (Frobenius >= spectral, edge-max >= in-cell value) but SOUND. Fields with
+    value >= 1 need the weaker boundary route (Ball 1981 / Kroemer 2020); `boundary_max_disp` is its input."""
     with torch.no_grad():
-        dz = F.pad(flow[:, :, 2:, :, :] - flow[:, :, :-2, :, :], pad=(0, 0, 0, 0, 1, 1)) * 0.5
-        dy = F.pad(flow[:, :, :, 2:, :] - flow[:, :, :, :-2, :], pad=(0, 0, 1, 1, 0, 0)) * 0.5
-        dx = F.pad(flow[:, :, :, :, 2:] - flow[:, :, :, :, :-2], pad=(1, 1, 0, 0, 0, 0)) * 0.5
-        frob2 = (dz * dz + dy * dy + dx * dx).sum(dim=1)  # sum of all nine partials^2 per voxel
-        return float(frob2.max().sqrt().item())
+        u = flow
+        na = (u[:, :, 1:, :, :] - u[:, :, :-1, :, :]).pow(2).sum(1).sqrt()  # a-edge slope norms [1,D-1,H,W]
+        nb = (u[:, :, :, 1:, :] - u[:, :, :, :-1, :]).pow(2).sum(1).sqrt()  # [1,D,H-1,W]
+        nc = (u[:, :, :, :, 1:] - u[:, :, :, :, :-1]).pow(2).sum(1).sqrt()  # [1,D,H,W-1]
+        ca = F.max_pool3d(na.unsqueeze(1), kernel_size=(1, 2, 2), stride=1)  # max over the cell's 4 a-edges
+        cb = F.max_pool3d(nb.unsqueeze(1), kernel_size=(2, 1, 2), stride=1)
+        cc = F.max_pool3d(nc.unsqueeze(1), kernel_size=(2, 2, 1), stride=1)
+        return float(torch.sqrt(ca * ca + cb * cb + cc * cc).max().item())
 
 
 def boundary_max_disp(flow: torch.Tensor) -> float:
@@ -568,23 +574,21 @@ def boundary_max_disp(flow: torch.Tensor) -> float:
 
 
 def _face_tangential_lip(face: torch.Tensor) -> torch.Tensor:
-    """Max spectral norm of the tangential displacement Jacobian over one boundary face. `face` is [3,A,B]
-    (the three displacement components on the face; A,B the two in-plane directions). Central differences in
-    A and B give the 3x2 in-plane Jacobian; its spectral norm is sqrt of the top eigenvalue of the 2x2 Gram
-    matrix (exact 2x2 closed form)."""
-    ga = 0.5 * F.pad(face[:, 2:, :] - face[:, :-2, :], pad=(0, 0, 1, 1))  # d u / d A
-    gb = 0.5 * F.pad(face[:, :, 2:] - face[:, :, :-2], pad=(1, 1, 0, 0))  # d u / d B
-    g11 = (ga * ga).sum(0)
-    g22 = (gb * gb).sum(0)
-    g12 = (ga * gb).sum(0)
-    disc = torch.sqrt(torch.clamp((0.5 * (g11 - g22)) ** 2 + g12 * g12, min=0.0))
-    top_eig = 0.5 * (g11 + g22) + disc  # largest eigenvalue of the 2x2 SPD Gram
-    return torch.sqrt(torch.clamp(top_eig, min=0.0)).max()
+    """SOUND bound on the tangential Lipschitz constant over one boundary face, `face` is [3,A,B]. Per-edge
+    FORWARD differences are the exact in-plane edge slopes (central differences cancel and are NOT a bound);
+    within a face-cell each column is a convex combination of its two parallel edges (max-pool bounds it), and
+    the Frobenius of the two column bounds >= the spectral norm of the 3x2 in-plane Jacobian. Conservative but
+    sound."""
+    na = (face[:, 1:, :] - face[:, :-1, :]).pow(2).sum(0).sqrt()  # A-edge slope norms [A-1,B]
+    nb = (face[:, :, 1:] - face[:, :, :-1]).pow(2).sum(0).sqrt()  # [A,B-1]
+    ca = F.max_pool2d(na[None, None], kernel_size=(1, 2), stride=1)[0, 0]  # max over the 2 parallel A-edges
+    cb = F.max_pool2d(nb[None, None], kernel_size=(2, 1), stride=1)[0, 0]
+    return torch.sqrt(ca * ca + cb * cb).max()
 
 
 def boundary_tangential_lip(flow: torch.Tensor) -> float:
-    """Max tangential Lipschitz constant of the displacement over the six boundary faces (exact spectral norm
-    of the in-plane Jacobian). value < 1 SOUNDLY certifies phi maps each face injectively (u contracts along
+    """Max tangential Lipschitz constant of the displacement over the six boundary faces (a SOUND bound from
+    forward-difference edge slopes). value < 1 SOUNDLY certifies phi maps each face injectively (u contracts along
     each convex face, so ||phi(p)-phi(q)|| >= (1 - lip)||p-q|| > 0): with the interior fold-free certificate
     this supplies the boundary-injectivity input the Ball/Kroemer global-injectivity theorem needs (cross-face
     collision being precluded separately by a small `boundary_max_disp`). Weaker — fires more often — than the
