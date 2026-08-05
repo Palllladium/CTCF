@@ -74,7 +74,10 @@ def main():
     ap.add_argument("--eps", type=float, default=1e-3)
     ap.add_argument("--out", default="results/audit/run")
     ap.add_argument("--limit", type=int, default=0, help="cap the number of fields (0 = all)")
+    ap.add_argument("--device", default="auto", help="auto|cuda|cpu (float64 cert is far faster on a strong-FP64 GPU)")
     args = ap.parse_args()
+
+    dev = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
 
     files = sorted(glob.glob(args.flows if any(c in args.flows for c in "*?[") else os.path.join(args.flows, "*")))
     files = [f for f in files if f.endswith((".npz", ".npy"))]
@@ -84,12 +87,12 @@ def main():
         raise SystemExit(f"no .npz/.npy flow files under {args.flows}")
 
     labels = OASIS_VOI_LABELS  # IXI uses its own set; wire IXI_VOI_LABELS when auditing IXI fields
-    reg = RegisterModel((160, 192, 224), mode="nearest") if args.segs else None
+    reg = RegisterModel((160, 192, 224), mode="nearest").to(dev) if args.segs else None
     os.makedirs(args.out, exist_ok=True)
     rows = []
     for i, f in enumerate(files):
         arr = np.load(f)
-        flow = to_contract(arr["flow"] if f.endswith(".npz") else arr, args.source)
+        flow = to_contract(arr["flow"] if f.endswith(".npz") else arr, args.source).to(dev)
         r = {
             "field": Path(f).stem,
             # DISCREPANCY: three surrogate schemes vs the sound certificate.
@@ -101,7 +104,7 @@ def main():
         r["certified_feedfwd"] = float(r["tri_cert_bound"] >= args.eps)
         segs = segs_for(Path(f).stem, args.segs) if args.segs else None
         if segs is not None:
-            xs, ys = segs
+            xs, ys = (s.to(dev) for s in segs)
             with torch.no_grad():
                 d0 = float(np.mean(dice_per_label(reg((xs.float(), flow.float())).long(), ys.long(), labels)))
             r["dice_feedfwd"] = d0
