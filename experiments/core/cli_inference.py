@@ -180,6 +180,24 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "repair contractions and a tighter reported tri_cert_bound). 0 = off (coarse first-level bound).",
     )
     group.add_argument(
+        "--tto_clip_from_identity",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Gate B decisive experiment: instead of feathered repair, drive from the identity field toward "
+        "the network flow by the 8-color certified LOCAL clip (certified_local_clip). Result is CERTIFIED "
+        "fold-free by construction; measures how much Dice a per-vertex certified update keeps vs the "
+        "heuristic --tto_tri_project. Uses --tto_tri_project_eps as the margin. Standalone: set the other "
+        "repair flags to 0.",
+    )
+    group.add_argument(
+        "--tto_clip_sweeps",
+        type=int,
+        default=4,
+        help="Gauss-Seidel sweeps of the 8-color certified clip (--tto_clip_from_identity 1). More sweeps "
+        "recover more of the proposal at higher cost; feasibility is preserved at every sweep.",
+    )
+    group.add_argument(
         "--tto_perturb",
         choices=["none", "fp16", "noise"],
         default="none",

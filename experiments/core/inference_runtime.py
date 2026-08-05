@@ -27,6 +27,7 @@ from utils import (
 from utils.field import (
     boundary_max_disp,
     boundary_tangential_lip,
+    certified_local_clip,
     digital_min_det,
     digital_project,
     displacement_grad_norm_max,
@@ -300,6 +301,17 @@ class InferRunner:
                     damp=args.tto_tri_project_damp,
                     max_iters=args.tto_tri_project_iters,
                     subdiv_depth=args.tto_tri_subdiv_depth,
+                )
+            # Gate B decisive experiment: reach the network flow from the identity by the 8-color certified
+            # local clip. The result is CERTIFIED fold-free by construction (identity is certified; each
+            # vertex moves only as far as keeps every incident cell's 27 Bernstein coeffs >= eps), so its
+            # Dice is the certified-accuracy number to compare against the heuristic repair.
+            if args.tto_clip_from_identity:
+                flow = certified_local_clip(
+                    torch.zeros_like(flow.float()),
+                    flow.float(),
+                    eps=args.tto_tri_project_eps,
+                    sweeps=args.tto_clip_sweeps,
                 )
             # Robustness test: perturb the certified field as a deployment step would; every metric below
             # (Dice, tri_cert_bound, tri_fold_pct) is then read on the perturbed field — did the margin hold?
