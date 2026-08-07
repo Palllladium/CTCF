@@ -28,9 +28,11 @@ while [[ $r -le $NRUNS ]]; do
   launched=()
   for ((c=0; c<ncards && r<=NRUNS; c++)); do
     card=${CARD_ARR[$c]}
-    echo ">>> [train] RUN=$r on physical GPU ${card}  (log: abl_train_r${r}.log)"
+    echo ">>> [train] RUN=$r on physical GPU ${card}  (errors -> abl_err_r${r}.log; full per-epoch log in logs/<EXP>/)"
+    # stdout -> /dev/null (the trainer already writes the full per-epoch history to logs/<EXP>/logfile.log);
+    # only stderr (NaN warnings / tracebacks) is captured, so the returned logs are errors-only, not noise.
     CUDA_VISIBLE_DEVICES="$card" RUN="$r" PROFILE="$PROFILE" MAX_EPOCH="$MAX_EPOCH" SMOKE="$SMOKE" \
-      nohup bash "$HERE/loss_ablation.sh" > "abl_train_r${r}.log" 2>&1 &
+      nohup bash "$HERE/loss_ablation.sh" > /dev/null 2> "abl_err_r${r}.log" &
     launched+=("$r")
     r=$((r+1))
   done

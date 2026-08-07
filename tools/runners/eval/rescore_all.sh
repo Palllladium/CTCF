@@ -46,7 +46,7 @@ if [ "${SKIP_P10}" != "1" ]; then
     echo ""
     echo "########## 1/4  Phase 10 — headline 500ep + cross-dataset ##########"
     GPU="${GPU}" PATHS_PROFILE="${PROFILE}" OUT="${OUT}" \
-        bash tools/runners/phase10_inference.sh
+        bash tools/runners/archive/phases/phase10_inference.sh
 fi
 
 # 2. Phase 9 Stage 2 — the 24-config extended table. Training is skipped.         ~1.5-2.5 h
@@ -54,7 +54,7 @@ if [ "${SKIP_P9}" != "1" ]; then
     echo ""
     echo "########## 2/4  Phase 9 Stage 2 — extended table (inference only) ##########"
     SKIP_STAGE1=1 GPU="${GPU}" PATHS_PROFILE="${PROFILE}" OUT="${OUT}" \
-        bash tools/runners/phase9_matrix_and_inference.sh
+        bash tools/runners/archive/phases/phase9_matrix_and_inference.sh
 fi
 
 # 3. Phase 11 — 15 ablation configs + the CorrMLP/SACB competitor baselines.      ~1 h
@@ -62,7 +62,7 @@ if [ "${SKIP_P11}" != "1" ]; then
     echo ""
     echo "########## 3/4  Phase 11 — ablations + competitor baselines ##########"
     GPU="${GPU}" PATHS_PROFILE="${PROFILE}" OUT="${OUT}" \
-        bash tools/runners/phase11_infer_stats.sh
+        bash tools/runners/eval/phase11_infer_stats.sh
 fi
 
 # 4. Paper-1 baseline (Swin-DCA). Not covered by any inference runner: its checkpoints predate the
@@ -71,7 +71,7 @@ if [ "${SKIP_PAPER1}" != "1" ]; then
     echo ""
     echo "########## 4/4  Paper-1 Swin-DCA baseline ##########"
     BLOCK=RS GPU="${GPU}" PROFILE="${PROFILE}" \
-        bash tools/runners/tto_phase2.sh
+        bash tools/runners/archive/tto/tto_phase2.sh
 fi
 
 echo ""
