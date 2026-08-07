@@ -141,17 +141,17 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "--tto_project_eps",
         type=float,
         default=0.0,
-        help="Projection margin: enforce det >= eps (a robust certificate that survives resampling) "
-        "instead of the det>0 knife-edge (--tto_project 1). Higher eps = more headroom, small Dice cost.",
+        help="Digital-projection margin: target det >= eps instead of the det>0 knife-edge. It does not "
+        "certify the trilinear interpolant or survive arbitrary resampling without a new check.",
     )
     group.add_argument(
         "--tto_tri_project",
         type=int,
         choices=[0, 1],
         default=0,
-        help="Repair the field onto the TRILINEAR-diffeomorphic set: contract cells whose sound Bernstein "
-        "bound of the actual grid_sample warp fails, certifying the DEPLOYED warp (not the digital "
-        "surrogate). Runs after --tto_project; set --tto_project 0 to use it standalone.",
+        help="Heuristically repair cells that fail the sufficient trilinear Bernstein predicate. Collar mode "
+        "fails closed; a publication-grade machine verdict still requires utils.cert_exact on the saved "
+        "float32 field. Runs after --tto_project; set --tto_project 0 to use it standalone.",
     )
     group.add_argument(
         "--tto_tri_project_iters",
@@ -163,7 +163,7 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "--tto_tri_project_damp",
         type=float,
         default=0.6,
-        help="Per-pass blend toward the local-smooth field at trilinear-folding cells (--tto_tri_project 1).",
+        help="Per-pass blend toward the local-smooth field at cells failing the Bernstein screen.",
     )
     group.add_argument(
         "--tto_tri_project_eps",
@@ -184,11 +184,9 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         type=int,
         choices=[0, 1],
         default=0,
-        help="Gate B decisive experiment: instead of feathered repair, drive from the identity field toward "
-        "the network flow by the 8-color certified LOCAL clip (certified_local_clip). Result is CERTIFIED "
-        "fold-free by construction; measures how much Dice a per-vertex certified update keeps vs the "
-        "heuristic --tto_tri_project. Uses --tto_tri_project_eps as the margin. Standalone: set the other "
-        "repair flags to 0.",
+        help="Drive from identity toward the network field with the 8-color local clip. Feasibility is preserved "
+        "in float64 working arithmetic, but the final float32 field must be independently rechecked. Uses "
+        "--tto_tri_project_eps as its work margin.",
     )
     group.add_argument(
         "--tto_clip_sweeps",
@@ -202,10 +200,9 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         type=int,
         choices=[0, 1],
         default=0,
-        help="Identity-collar: taper the displacement to zero on a boundary shell so phi|boundary = id "
-        "(trivially injective). With the interior fold-free certificate this upgrades fold-free to GLOBAL "
-        "injectivity — a piecewise-trilinear homeomorphism (Ball 1981 / Kroemer 2020). Applied BEFORE the "
-        "repair chain; run --tto_tri_project 1 after it to re-certify the taper. boundary_max_disp -> ~0.",
+        help="Identity collar: taper displacement to exact zero on the six boundary faces. Requires a "
+        "boundary-constrained trilinear repair with positive margin; the saved field must then pass the exact "
+        "verifier. This supplies the identity-trace input to a separate global-invertibility theorem.",
     )
     group.add_argument(
         "--tto_collar_width",

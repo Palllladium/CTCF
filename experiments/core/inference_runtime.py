@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import math
 import os
 import time
 from pathlib import Path
@@ -26,11 +27,14 @@ from utils import (
 )
 from utils.field import (
     boundary_max_disp,
+    boundary_nonzero_count,
     boundary_tangential_lip,
+    boundary_vertex_mask,
     certified_local_clip,
     digital_min_det,
     digital_project,
     displacement_grad_norm_max,
+    enforce_identity_boundary,
     identity_collar,
     perturb_flow,
     trilinear_cert_bound,
@@ -153,6 +157,14 @@ class InferRunner:
 
     def __init__(self, args):
         self.args = args
+        if args.tto_collar and not args.tto_tri_project:
+            raise ValueError("--tto_collar requires --tto_tri_project 1: the taper must be repaired and checked")
+        if args.tto_collar and args.tto_tri_project_eps <= 0:
+            raise ValueError("--tto_collar requires --tto_tri_project_eps > 0 for a strict local margin")
+        if args.tto_collar and args.tto_perturb != "none":
+            raise ValueError(
+                "--tto_perturb changes the field after certification and is incompatible with --tto_collar"
+            )
         self.device = setup_device(args.gpu, seed=args.seed, deterministic=args.deterministic)
 
         ds_key = args.ds.upper()
@@ -286,12 +298,14 @@ class InferRunner:
                 )
                 flow, snapshots = result.flow, result.snapshots
 
-            # Identity-collar: taper the displacement to zero on a boundary shell so phi|boundary = id.
-            # With the interior fold-free certificate this upgrades fold-free to GLOBAL injectivity (a
-            # piecewise-trilinear homeomorphism, Ball 1981 / Kroemer 2020). Applied BEFORE the repair so the
-            # taper's own folds are re-certified by trilinear_project below; boundary_max_disp -> ~0 confirms it.
+            # Identity collar supplies an exact identity trace. Both repair stages must keep those vertices
+            # fixed; local positivity and the separate global-invertibility theorem are checked independently.
+            fixed_mask = None
+            fixed_values = None
             if args.tto_collar:
                 flow = identity_collar(flow.float(), width=args.tto_collar_width)
+                fixed_mask = boundary_vertex_mask(flow)
+                fixed_values = torch.zeros_like(flow)
 
             proj_folds, proj_iters = None, 0
             if args.tto_project:
@@ -300,20 +314,22 @@ class InferRunner:
                     eps=args.tto_project_eps,
                     damp=args.tto_project_damp,
                     max_iters=args.tto_project_iters,
+                    fixed_mask=fixed_mask,
+                    fixed_values=fixed_values,
                 )
-            tri_proj_resid, tri_proj_iters = None, 0
+            tri_proj_report = None
             if args.tto_tri_project:
-                flow, tri_proj_resid, tri_proj_iters = trilinear_project(
+                flow, tri_proj_report = trilinear_project(
                     flow.float(),
                     eps=args.tto_tri_project_eps,
                     damp=args.tto_tri_project_damp,
                     max_iters=args.tto_tri_project_iters,
                     subdiv_depth=args.tto_tri_subdiv_depth,
+                    fixed_mask=fixed_mask,
+                    fixed_values=fixed_values,
                 )
-            # Gate B decisive experiment: reach the network flow from the identity by the 8-color certified
-            # local clip. The result is CERTIFIED fold-free by construction (identity is certified; each
-            # vertex moves only as far as keeps every incident cell's 27 Bernstein coeffs >= eps), so its
-            # Dice is the certified-accuracy number to compare against the heuristic repair.
+            # The local clip preserves the work predicate in float64. Its float32 materialisation is not called
+            # machine-certified until the independent verifier has checked the saved bytes.
             if args.tto_clip_from_identity:
                 flow = certified_local_clip(
                     torch.zeros_like(flow.float()),
@@ -325,6 +341,26 @@ class InferRunner:
             # (Dice, tri_cert_bound, tri_fold_pct) is then read on the perturbed field — did the margin hold?
             if args.tto_perturb != "none":
                 flow = perturb_flow(flow.float(), mode=args.tto_perturb, scale=args.tto_perturb_scale)
+            final_tri_bound = None
+            if args.tto_collar:
+                flow = enforce_identity_boundary(flow)
+                if not bool(torch.isfinite(flow).all()):
+                    raise RuntimeError(f"{cid}: collar finalization produced NaN or Inf")
+                if boundary_nonzero_count(flow) != 0:
+                    raise RuntimeError(f"{cid}: identity-boundary invariant was lost")
+                final_tri_bound = trilinear_cert_bound(
+                    flow.float(), args.tto_tri_subdiv_depth, args.tto_tri_project_eps
+                )
+                if (
+                    tri_proj_report is None
+                    or not tri_proj_report.certified
+                    or not math.isfinite(final_tri_bound)
+                    or final_tri_bound < args.tto_tri_project_eps
+                ):
+                    status = "missing report" if tri_proj_report is None else tri_proj_report.status
+                    raise RuntimeError(
+                        f"{cid}: collar finalization failed closed ({status}, final_bound={final_tri_bound:.6g})"
+                    )
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
@@ -334,22 +370,31 @@ class InferRunner:
             # imply trilinear>0, so a gap between them is a real interpolation-consistency failure.
             fl = flow.float()
             tri_fold = trilinear_fold_percent(fl)
+            tri_bound = (
+                final_tri_bound
+                if final_tri_bound is not None
+                else trilinear_cert_bound(fl, args.tto_tri_subdiv_depth, args.tto_tri_project_eps)
+            )
+            bnd_nonzero = boundary_nonzero_count(fl)
             row = {
                 "case_id": cid,
                 "time_sec": dt,
                 "cert_min_det": digital_min_det(fl),
                 "tri_min_det": trilinear_min_det(fl),
-                "tri_cert_bound": trilinear_cert_bound(fl, args.tto_tri_subdiv_depth, args.tto_tri_project_eps),
+                "tri_cert_bound": tri_bound,
+                "bernstein_pass_float64": float(math.isfinite(tri_bound) and tri_bound >= args.tto_tri_project_eps),
                 # Audit: percent of cells that PROVABLY fold trilinearly, and whether this case folds
                 # at all (mean over cases -> fraction of cases folding) — the numbers digital10 hides.
                 "tri_fold_pct": tri_fold,
                 "tri_case_folds": float(tri_fold > 0.0),
                 # Global-injectivity inputs (Ball/Kroemer): disp_grad_norm < 1 alone certifies GLOBAL
-                # injectivity; else boundary_tan_lip < 1 certifies each face is injective, which with the
-                # interior fold-free cert + a small boundary_max_disp gives global injectivity by degree.
+                # injectivity. boundary_tan_lip < 1 only certifies each face separately; a merely "small"
+                # boundary displacement does not exclude cross-face collisions.
                 "disp_grad_norm": displacement_grad_norm_max(fl),
                 "boundary_tan_lip": boundary_tangential_lip(fl),
                 "boundary_max_disp": boundary_max_disp(fl),
+                "boundary_nonzero_count": float(bnd_nonzero),
+                "identity_boundary_exact": float(bnd_nonzero == 0),
                 **row,
             }
             if self.tto.enabled:
@@ -364,8 +409,10 @@ class InferRunner:
                 row["proj_folds_end"] = proj_folds
                 row["proj_iters"] = float(proj_iters)
             if args.tto_tri_project:
-                row["tri_proj_resid"] = tri_proj_resid
-                row["tri_proj_iters"] = float(tri_proj_iters)
+                row["tri_proj_certified"] = float(tri_proj_report.certified)
+                row["tri_proj_uncertified_cells"] = float(tri_proj_report.n_uncertified_cells)
+                row["tri_proj_sampled_negative_pct"] = tri_proj_report.sampled_negative_cell_percent
+                row["tri_proj_iters"] = float(tri_proj_report.iterations)
 
             if args.hd95:
                 with torch.no_grad():

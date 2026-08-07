@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -326,11 +327,48 @@ def digital_barrier_and_folds(
     return pen, folds
 
 
+def _vertex_constraint(
+    flow: torch.Tensor,
+    fixed_mask: torch.Tensor | None,
+    fixed_values: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Validate a vertex constraint and return a broadcastable boolean mask plus fixed values."""
+    if fixed_mask is None:
+        if fixed_values is not None:
+            raise ValueError("fixed_values requires fixed_mask")
+        return None
+    mask = fixed_mask.to(device=flow.device, dtype=torch.bool)
+    if mask.dim() == 3:
+        mask = mask[None, None]
+    elif mask.dim() == 4:
+        mask = mask[:, None]
+    if mask.dim() != 5 or mask.shape[0] not in (1, flow.shape[0]) or mask.shape[1] not in (1, flow.shape[1]):
+        raise ValueError(f"fixed_mask must broadcast to {tuple(flow.shape)}, got {tuple(mask.shape)}")
+    if tuple(mask.shape[-3:]) != tuple(flow.shape[-3:]):
+        raise ValueError(f"fixed_mask spatial shape {tuple(mask.shape[-3:])} != flow {tuple(flow.shape[-3:])}")
+    values = flow.detach().clone() if fixed_values is None else fixed_values.to(device=flow.device, dtype=flow.dtype)
+    if values.shape != flow.shape:
+        try:
+            values = torch.broadcast_to(values, flow.shape)
+        except RuntimeError as exc:
+            raise ValueError(f"fixed_values must broadcast to {tuple(flow.shape)}, got {tuple(values.shape)}") from exc
+    return mask, values
+
+
+def _apply_vertex_constraint(
+    candidate: torch.Tensor,
+    constraint: tuple[torch.Tensor, torch.Tensor] | None,
+) -> torch.Tensor:
+    return candidate if constraint is None else torch.where(constraint[0], constraint[1], candidate)
+
+
 def digital_project(
     flow: torch.Tensor,
     eps: float = 0.0,
     damp: float = 0.6,
     max_iters: int = 80,
+    fixed_mask: torch.Tensor | None = None,
+    fixed_values: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, float, int]:
     """Project a displacement field onto the digital-diffeomorphic set by feathered local relaxation:
     at voxels whose digital determinants fail (det <= eps), blend the displacement toward its local
@@ -347,7 +385,8 @@ def digital_project(
     def _smooth(t: torch.Tensor) -> torch.Tensor:
         return F.avg_pool3d(F.pad(t, (1, 1, 1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
 
-    out = flow.detach().clone()
+    constraint = _vertex_constraint(flow, fixed_mask, fixed_values)
+    out = _apply_vertex_constraint(flow.detach().clone(), constraint)
     d, h, w = out.shape[2:]
     applied = 0
     with torch.no_grad():
@@ -361,7 +400,8 @@ def digital_project(
             fail = torch.zeros((1, 1, d, h, w), device=out.device, dtype=out.dtype)
             fail[0, 0, 1:-1, 1:-1, 1:-1] = fail_interior.to(out.dtype)
             feather = _smooth(_smooth(fail)).clamp(0.0, 1.0)  # blurred mask: no hard boundary
-            out = out * (1.0 - damp * feather) + _smooth(out) * (damp * feather)
+            candidate = out * (1.0 - damp * feather) + _smooth(out) * (damp * feather)
+            out = _apply_vertex_constraint(candidate, constraint)
             applied += 1
         residual = float(digital_fold_percent(out).item())
     return out, residual, applied
@@ -514,13 +554,14 @@ def _trilinear_subdivide_min(coeffs: torch.Tensor, depth: int, mats=None) -> tor
 
 def _trilinear_cell_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: float = 0.0) -> torch.Tensor:
     """Per-cell sound Bernstein lower bound on det J, [D-1,H-1,W-1], computed in FLOAT64 so the
-    certificate carries no float32 rounding of its own — a cell with value >= eps is CERTIFIED fold-free
-    (no sampling gap). At the fp32 deployment scale, eps only needs to clear the float32 grid_sample
-    discrepancy (~1e-6), so a small eps suffices.
+    calculation avoids float32 rounding but is still an ordinary, non-directed float64 screen. A cell with
+    value comfortably above eps passes the mathematical sufficient condition numerically; publication-grade
+    machine verification of stored bytes is performed by ``utils.cert_exact``.
 
     `subdiv_depth` > 0 refines only the cells whose coarse bound is < eps by that many de Casteljau
     subdivision levels, tightening the (conservative) first-level bound and certifying cells it falsely
-    flags — sound throughout, and cheap because folding cells are sparse (few suspects to refine)."""
+    flags in exact arithmetic. The float64 implementation is an operational screen, not the final
+    machine-sound verdict."""
     with torch.no_grad():
         coeffs = _trilinear_bernstein_coeffs(flow.detach().double())
         bound = coeffs.amin(dim=(0, 1, 2))
@@ -533,10 +574,12 @@ def _trilinear_cell_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: f
 
 
 def trilinear_cert_bound(flow: torch.Tensor, subdiv_depth: int = 0, eps: float = 0.0) -> float:
-    """Global sound Bernstein lower bound over every cell (min of `_trilinear_cell_cert_bound`, float64).
-    > 0 CERTIFIES the materialized trilinear warp is everywhere orientation-preserving — the
-    interpolation-consistent certificate the corner-only digital criterion cannot give. `subdiv_depth`
-    tightens the bound on sub-eps cells (see `_trilinear_cell_cert_bound`)."""
+    """Global float64 Bernstein lower-bound estimate over all cells.
+
+    It is the fast operational screen for the sufficient orientation-preservation predicate. Because the
+    arithmetic is not outward-rounded, use ``utils.cert_exact`` on the final float32 bytes for a machine-sound
+    verdict. ``subdiv_depth`` tightens the bound on sub-eps cells (see `_trilinear_cell_cert_bound`).
+    """
     with torch.no_grad():
         return float(_trilinear_cell_cert_bound(flow, subdiv_depth, eps).min().item())
 
@@ -548,8 +591,8 @@ def displacement_grad_norm_max(flow: torch.Tensor) -> float:
     field u_i=a(-1)^i has zero central difference but edge slope 2a). Within a cell the column d u/d a is a
     convex combination of the four parallel a-edges, so a max over incident edges bounds it; the per-cell
     Frobenius of the three column bounds >= the operator norm. value < 1 => u is a contraction => phi is
-    GLOBALLY injective (a homeomorphism onto its image), upgrading the fold-free (LOCAL) certificate to a
-    diffeomorphism. Conservative (Frobenius >= spectral, edge-max >= in-cell value) but SOUND. Fields with
+    GLOBALLY injective and bi-Lipschitz onto its image. Conservative (Frobenius >= spectral,
+    edge-max >= in-cell value) but SOUND. Fields with
     value >= 1 need the weaker boundary route (Ball 1981 / Kroemer 2020); `boundary_max_disp` is its input."""
     with torch.no_grad():
         u = flow
@@ -563,14 +606,37 @@ def displacement_grad_norm_max(flow: torch.Tensor) -> float:
 
 
 def boundary_max_disp(flow: torch.Tensor) -> float:
-    """Max displacement magnitude ||u|| on the domain boundary (the six faces). ~0 means phi is the identity
-    on the boundary, so phi|boundary is trivially injective and — with the interior fold-free certificate —
-    phi is globally injective by degree theory (Ball 1981 / Kroemer 2020). Small boundary displacement is the
-    common registration case; this is the quantity that route needs."""
+    """Max displacement magnitude ||u|| on the six boundary faces.
+
+    This is a diagnostic, not a proof: only exact zero establishes an identity trace, and an unspecified
+    "small" value does not exclude collisions between distinct faces.
+    """
     with torch.no_grad():
         mag = flow.pow(2).sum(dim=1).sqrt()[0]  # [D,H,W]
         faces = (mag[0], mag[-1], mag[:, 0], mag[:, -1], mag[:, :, 0], mag[:, :, -1])
         return float(max(f.max().item() for f in faces))
+
+
+def boundary_vertex_mask(flow: torch.Tensor) -> torch.Tensor:
+    """Boolean ``[B,1,D,H,W]`` mask of the six outer vertex faces."""
+    if flow.dim() != 5 or flow.shape[1] != 3:
+        raise ValueError(f"Expected flow shape [B,3,D,H,W], got {tuple(flow.shape)}.")
+    mask = torch.zeros((flow.shape[0], 1, *flow.shape[-3:]), device=flow.device, dtype=torch.bool)
+    mask[:, :, (0, -1), :, :] = True
+    mask[:, :, :, (0, -1), :] = True
+    mask[:, :, :, :, (0, -1)] = True
+    return mask
+
+
+def enforce_identity_boundary(flow: torch.Tensor) -> torch.Tensor:
+    """Set all boundary displacement components to exact ``+0.0``."""
+    return torch.where(boundary_vertex_mask(flow), torch.zeros_like(flow), flow)
+
+
+def boundary_nonzero_count(flow: torch.Tensor) -> int:
+    """Number of non-zero displacement components on the unique boundary-vertex set."""
+    mask = boundary_vertex_mask(flow).expand_as(flow)
+    return int(torch.count_nonzero(flow.masked_select(mask)).item())
 
 
 def _face_tangential_lip(face: torch.Tensor) -> torch.Tensor:
@@ -589,16 +655,19 @@ def _face_tangential_lip(face: torch.Tensor) -> torch.Tensor:
 def boundary_tangential_lip(flow: torch.Tensor) -> float:
     """Max tangential Lipschitz constant of the displacement over the six boundary faces (a SOUND bound from
     forward-difference edge slopes). value < 1 SOUNDLY certifies phi maps each face injectively (u contracts along
-    each convex face, so ||phi(p)-phi(q)|| >= (1 - lip)||p-q|| > 0): with the interior fold-free certificate
-    this supplies the boundary-injectivity input the Ball/Kroemer global-injectivity theorem needs (cross-face
-    collision being precluded separately by a small `boundary_max_disp`). Weaker — fires more often — than the
-    global contraction test `displacement_grad_norm_max`, since the boundary is far smoother than the interior."""
+    each convex face, so ||phi(p)-phi(q)|| >= (1 - lip)||p-q|| > 0). It does not exclude collisions between
+    different faces; ``boundary_max_disp`` without a quantitative separation argument cannot close that gap.
+    This can fire more often than the global contraction test ``displacement_grad_norm_max`` because the
+    boundary may be smoother than the interior."""
     with torch.no_grad():
         u = flow[0]  # [3,D,H,W]
         faces = (
-            u[:, 0, :, :], u[:, -1, :, :],   # z faces, tangential (H, W)
-            u[:, :, 0, :], u[:, :, -1, :],   # y faces, tangential (D, W)
-            u[:, :, :, 0], u[:, :, :, -1],   # x faces, tangential (D, H)
+            u[:, 0, :, :],
+            u[:, -1, :, :],  # z faces, tangential (H, W)
+            u[:, :, 0, :],
+            u[:, :, -1, :],  # y faces, tangential (D, W)
+            u[:, :, :, 0],
+            u[:, :, :, -1],  # x faces, tangential (D, H)
         )
         return float(torch.stack([_face_tangential_lip(f) for f in faces]).max().item())
 
@@ -614,18 +683,22 @@ def _collar_ramp(n: int, width: int, device: torch.device, dtype: torch.dtype) -
 def identity_collar(flow: torch.Tensor, width: int = 4) -> torch.Tensor:
     """Force phi = id on the domain boundary by tapering the displacement to zero over a `width`-voxel collar.
     Returns flow * m, where m(x) = ra(d) rb(h) rc(w) is a product of per-axis smoothstep ramps that is 0 on the
-    union of the six faces and 1 at depth >= width from every face. phi|boundary = id is then trivially
-    injective, so WITH the interior fold-free certificate phi is GLOBALLY injective — a piecewise-trilinear
-    HOMEOMORPHISM onto the domain (Ball 1981 / Kroemer 2020). NOT a diffeomorphism: the trilinear gradient
-    jumps across cell faces. The collar only touches the `width`-voxel FOV border (background in brain MRI) so
-    Dice is unaffected; the taper can fold, so re-certify by running trilinear_project AFTER the collar."""
+    union of the six faces and 1 at depth >= width from every face. phi|boundary = id is a strong input to a
+    global-invertibility argument. A classical piecewise-trilinear HOMEOMORPHISM claim still requires all
+    theorem hypotheses to be checked explicitly. It is not a classical diffeomorphism:
+    the trilinear gradient jumps across cell faces. The collar can change accuracy and can introduce locally
+    uncertified cells; both effects must be measured, and all later repair operations must preserve the boundary."""
     if flow.dim() != 5 or flow.shape[1] != 3:
         raise ValueError(f"Expected flow shape [B,3,D,H,W], got {tuple(flow.shape)}.")
+    if width < 1:
+        raise ValueError(f"width must be >= 1, got {width}")
     _, _, d, h, w = flow.shape
+    if min(d, h, w) < 2:
+        raise ValueError(f"every spatial dimension must contain at least two vertices, got {(d, h, w)}")
     ra = _collar_ramp(d, width, flow.device, flow.dtype).view(1, 1, d, 1, 1)
     rb = _collar_ramp(h, width, flow.device, flow.dtype).view(1, 1, 1, h, 1)
     rc = _collar_ramp(w, width, flow.device, flow.dtype).view(1, 1, 1, 1, w)
-    return flow * (ra * rb * rc)
+    return enforce_identity_boundary(flow * (ra * rb * rc))
 
 
 def certified_local_clip(
@@ -639,9 +712,10 @@ def certified_local_clip(
     alpha in [0,1] that keeps every incident cell's 27 Bernstein coeffs >= eps. Vertices are swept in 8 parity
     colors so no cell has two simultaneously-moved corners => each Bernstein coeff is AFFINE in the moved
     vertex's step (rank-one Jacobian update; matrix-determinant lemma), giving a closed-form alpha. Sound and
-    feasibility-preserving (alpha=0 is always feasible). The LOCAL analogue of the failed global line-search:
-    only violating vertices shrink, safe ones keep alpha=1. Also a strictly-better repair than
-    `trilinear_project` (provably feasible + convergent). Returns the clipped, certified field (float32)."""
+    feasibility-preserving in float64 working arithmetic (alpha=0 is always feasible). The LOCAL analogue of
+    the failed global line-search: only constrained vertices shrink, safe ones keep alpha=1. The returned
+    float32 materialisation must be checked again, normally using a work margin above the published margin;
+    no accuracy dominance over ``trilinear_project`` is asserted."""
     if flow_current.shape != flow_proposal.shape:
         raise ValueError("current and proposal must share shape [1,3,D,H,W]")
     with torch.no_grad():
@@ -661,9 +735,7 @@ def certified_local_clip(
                 field1 = torch.where(cmask[None, None], prop, cur)  # this color's vertices fully at proposal
                 b0 = _trilinear_bernstein_coeffs(cur)  # [3,3,3,D-1,H-1,W-1], all >= eps (cur is certified)
                 s = _trilinear_bernstein_coeffs(field1) - b0  # per-cell affine slope of each coeff in alpha
-                ratio = torch.where(
-                    s < 0, (b0 - eps) / (-s).clamp_min(1e-30), torch.full_like(s, float("inf"))
-                )
+                ratio = torch.where(s < 0, (b0 - eps) / (-s).clamp_min(1e-30), torch.full_like(s, float("inf")))
                 alpha_cell = ratio.amin(dim=(0, 1, 2)).clamp(0.0, 1.0)  # max safe alpha per cell [D-1,H-1,W-1]
                 # each color vertex is the color-c corner of its <=8 incident cells; alpha_v = min over them
                 # (min-pool = -maxpool(-x); pad missing boundary cells with +inf so they never constrain)
@@ -734,8 +806,10 @@ def trilinear_fold_penalty(
         if c1 <= c0:
             continue
         sub = flow[:, :, c0 : c1 + 1, :, :]  # +1 voxel to close the slab's top cells
-        pm = checkpoint(_tri_pen_map, sub, mode, float(eps), use_reentrant=False) if ckpt else _tri_pen_map(
-            sub, mode, float(eps)
+        pm = (
+            checkpoint(_tri_pen_map, sub, mode, float(eps), use_reentrant=False)
+            if ckpt
+            else _tri_pen_map(sub, mode, float(eps))
         )
         if m is None:
             total = total + pm.sum()
@@ -750,42 +824,79 @@ def trilinear_fold_penalty(
     return total / max(denom, 1.0)
 
 
+@dataclass(frozen=True)
+class TrilinearProjectionReport:
+    """Operational (float64) result of the heuristic Bernstein repair.
+
+    This report is deliberately separate from the machine-sound verifier in ``utils.cert_exact``.  A failed
+    sufficient predicate is called *uncertified*, not folded; ``sampled_negative_cell_percent`` is the separate
+    witnessed-fold diagnostic.
+    """
+
+    certified: bool
+    cert_bound: float
+    n_uncertified_cells: int
+    sampled_negative_cell_percent: float
+    iterations: int
+    status: str
+
+
 def trilinear_project(
     flow: torch.Tensor,
     eps: float = 0.0,
     damp: float = 0.6,
     max_iters: int = 80,
     subdiv_depth: int = 0,
-) -> tuple[torch.Tensor, float, int]:
+    fixed_mask: torch.Tensor | None = None,
+    fixed_values: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, TrilinearProjectionReport]:
     """Repair a displacement field onto the TRILINEAR fold-free (orientation-preserving) set. Each pass: flag every cell whose
     sound Bernstein bound of the actual grid_sample warp is < eps, expand the flagged cells to the eight
     voxels each touches, and blend those voxels' displacement toward the local (mean-smoothed) field under
     a feathered weight — the same boundary-safe relaxation as `digital_project`, but gated on the
     TRILINEAR certificate, not the digital determinants. Repeat until no cell fails (global
-    tri_cert_bound >= eps) or `max_iters`. Returns (repaired flow, residual trilinear fold %, passes).
-    A zero residual with the returned bound >= eps certifies the DEPLOYED warp is orientation-preserving
-    with margin eps; a non-zero residual is returned honestly, never as a false certificate."""
+    tri_cert_bound >= eps) or `max_iters`. Returns the repaired flow and a structured report.
+    A report with ``certified=True`` and bound >= eps establishes the Bernstein sufficient predicate in the
+    repair's working arithmetic.  The returned structured report cannot confuse a zero sampled-fold count with passing the
+    sufficient Bernstein predicate.  ``fixed_mask`` vertices are restored after every update; this is required
+    by the identity-boundary collar.  The heuristic is not guaranteed to converge and reports failure closed."""
     if flow.dim() != 5 or flow.shape[0] != 1 or flow.shape[1] != 3:
         raise ValueError(f"Expected flow shape [1,3,D,H,W], got {tuple(flow.shape)}.")
 
     def _smooth(t: torch.Tensor) -> torch.Tensor:
         return F.avg_pool3d(F.pad(t, (1, 1, 1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
 
-    out = flow.detach().clone().float()
+    constraint = _vertex_constraint(flow, fixed_mask, fixed_values)
+    out = _apply_vertex_constraint(flow.detach().clone().float(), constraint)
     applied = 0
     with torch.no_grad():
         for _ in range(max_iters):
-            cell_bad = (_trilinear_cell_cert_bound(out, subdiv_depth, eps) < eps).to(out.dtype)  # [D-1,H-1,W-1]
+            bounds = _trilinear_cell_cert_bound(out, subdiv_depth, eps)
+            cell_safe = torch.isfinite(bounds) & (bounds >= eps)
+            cell_bad = (~cell_safe).to(out.dtype)  # [D-1,H-1,W-1]; NaN/Inf fail closed
             if not bool(cell_bad.any()):
                 break
             # A voxel is touched if any of the (up to 8) cells incident to it is flagged: a 2^3 max over
             # the cell grid padded by one, mapping [D-1,H-1,W-1] cells back to the [D,H,W] voxel grid.
             vox = F.max_pool3d(F.pad(cell_bad[None, None], (1, 1, 1, 1, 1, 1)), kernel_size=2, stride=1)
             feather = _smooth(_smooth(vox)).clamp(0.0, 1.0)  # blurred mask: no hard boundary
-            out = out * (1.0 - damp * feather) + _smooth(out) * (damp * feather)
+            candidate = out * (1.0 - damp * feather) + _smooth(out) * (damp * feather)
+            out = _apply_vertex_constraint(candidate, constraint)
             applied += 1
-        residual = trilinear_fold_percent(out)
-    return out, residual, applied
+        final_bounds = _trilinear_cell_cert_bound(out, subdiv_depth, eps)
+        final_safe = torch.isfinite(final_bounds) & (final_bounds >= eps)
+        n_uncertified = int((~final_safe).sum().item())
+        cert_bound = float(final_bounds.min().item())
+        sampled_negative = trilinear_fold_percent(out)
+    report = TrilinearProjectionReport(
+        certified=n_uncertified == 0,
+        cert_bound=cert_bound,
+        n_uncertified_cells=n_uncertified,
+        sampled_negative_cell_percent=sampled_negative,
+        iterations=applied,
+        status="certified" if n_uncertified == 0 else "max_iters_uncertified",
+    )
+    return out, report
 
 
 def perturb_flow(flow: torch.Tensor, mode: str = "none", scale: float = 0.02) -> torch.Tensor:

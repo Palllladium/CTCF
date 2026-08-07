@@ -21,6 +21,7 @@ EPS="${EPS:-0.001}"
 _CALLNO=0
 NSHARD="${NSHARD:-1}"
 SHARD="${SHARD:-0}"
+SMOKE="${SMOKE:-0}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
@@ -39,14 +40,16 @@ infer() {
   [[ "$NSHARD" -gt 1 && "$mine" != "$SHARD" ]] && return 0
   local out="$OUT_ROOT/$tag" ckpt; ckpt="$(ck "$exp")"
   if [[ -f "$out/summary.csv" && "$FORCE" != "1" ]]; then echo "[SKIP] $tag"; return 0; fi
-  if [[ ! -f "$ckpt" ]]; then echo "[MISS] $tag — no ckpt at $ckpt" >&2; return 0; fi
+  if [[ ! -f "$ckpt" ]]; then echo "[FAIL] $tag — no ckpt at $ckpt" >&2; return 1; fi
   echo; echo "=== eval $tag ==="
   # shellcheck disable=SC2086
   "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$ckpt" --out_dir "$out" "$@"
 }
 
 echo "########## Loss-ablation eval (eps=${EPS}) ##########"
-for e in $EXPS; do
+for base_exp in $EXPS; do
+  e="$base_exp"
+  [[ "$SMOKE" == "1" ]] && e="${e}_SMOKE"
   infer "${e}__FF"  "$e"                # feed-forward (may fold trilinearly)
   # shellcheck disable=SC2086
   infer "${e}__REP" "$e" $CHAIN         # certified trilinear repair
@@ -56,13 +59,15 @@ if [[ "$NSHARD" -ne 1 ]]; then echo "[shard $SHARD/$NSHARD done]"; exit 0; fi
 
 echo
 echo "===================== LOSS-ABLATION TABLE (OASIS, post-repair = metric of record) ====================="
-printf "%-38s %9s %13s %11s\n" "run" "dice" "tri_cert_bnd" "tri_fold%"
+printf "%-38s %9s %13s %11s\n" "run" "dice" "tri_cert_min" "tri_fold%"
 for d in "$OUT_ROOT"/*/; do
   [[ -f "$d/summary.csv" ]] || continue
   get() { awk -F, -v k="$1" '$1==k{printf "%s",$2}' "$d/summary.csv"; }
+  get_col() { awk -F, -v k="$1" -v c="$2" '$1==k{printf "%s",$c}' "$d/summary.csv"; }
   fmt() { local v; v="$(get "$1")"; [[ -z "$v" ]] && echo "-" || printf "%.5f" "$v"; }
+  cert_min="$(get_col tri_cert_bound 6)"; [[ -n "$cert_min" ]] || cert_min="$(get tri_cert_bound)"
   printf "%-38s %9s %13s %11s\n" "$(basename "$d")" \
-    "$(fmt dice_mean)" "$(fmt tri_cert_bound)" "$(fmt tri_fold_pct)"
+    "$(fmt dice_mean)" "$cert_min" "$(fmt tri_fold_pct)"
 done
 echo
 echo "READ: winner = highest __REP dice (cert_bnd >= ${EPS}). NOICON/NOICON_NOJAC __REP > FULL __REP => the"

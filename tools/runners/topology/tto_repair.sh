@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Phase 15f — the MAKE-OR-BREAK: trilinear-aware repair of the deployed warp (EVAL only).
+# Trilinear-aware repair of the deployed warp (EVAL only).
 #
 # The gate proved every digital-certified field folds under the trilinear warp grid_sample applies.
-# trilinear_project repairs onto the TRILINEAR-diffeomorphic set (contract cells whose sound Bernstein
-# bound < eps until tri_cert_bound >= eps everywhere). This runner asks the one question that decides
-# whether Paper 3 is a guarantee-carrying METHOD (strong TMI) or just an audit:
+# trilinear_project heuristically contracts cells whose sufficient Bernstein bound is below eps. A successful
+# operational report still has to be checked on the saved float32 bytes by utils.cert_exact before it becomes
+# the machine-checked result used in a claim. This runner asks:
 #
-#   Does the repair certify the DEPLOYED warp (tri_cert_bound >= eps, tri_fold% = 0) at a Dice cost
+#   Does the repair satisfy the sufficient predicate (tri_cert_bound >= eps) at a Dice cost
 #   we can defend (target <= ~0.003 vs feed-forward)?
 #
 # Per checkpoint, four fields side by side:
@@ -22,10 +22,10 @@
 #   cards="2 3 4 5 6 7"; i=0
 #   for dev in $cards; do
 #     CUDA_VISIBLE_DEVICES=$dev SHARD=$i NSHARD=6 GPU=0 PROFILE=--3 \
-#       nohup bash tools/runners/tto_repair.sh > rep_s$i.log 2>&1 &
+#       nohup bash tools/runners/topology/tto_repair.sh > rep_s$i.log 2>&1 &
 #     i=$((i+1))
 #   done; wait
-#   bash tools/runners/tto_repair.sh          # NSHARD=1: all SKIP, prints the table
+#   bash tools/runners/topology/tto_repair.sh  # NSHARD=1: all SKIP, prints the table
 set -e
 
 GPU="${GPU:-0}"
@@ -52,7 +52,7 @@ infer() {
   [[ "$NSHARD" -gt 1 && "$mine" != "$SHARD" ]] && return 0
   local out="$OUT_ROOT/$tag" ckpt; ckpt="$(ck "$exp")"
   if [[ -f "$out/summary.csv" && "$FORCE" != "1" ]]; then echo "[SKIP] $tag"; return 0; fi
-  if [[ ! -f "$ckpt" ]]; then echo "[MISS] $tag — no ckpt at $ckpt"; return 0; fi
+  if [[ ! -f "$ckpt" ]]; then echo "[FAIL] $tag — no ckpt at $ckpt" >&2; return 1; fi
   echo; echo "=== eval $tag ==="
   # shellcheck disable=SC2086
   "${PYBIN}" -m experiments.inference $BASE --ckpt "$ckpt" --out_dir "$out" "$@"
@@ -82,17 +82,21 @@ if [[ "$NSHARD" -ne 1 ]]; then echo "[shard $SHARD/$NSHARD done — run one plai
 
 echo
 echo "===================== TRILINEAR REPAIR TABLE ====================="
-printf "%-18s %8s %11s %13s %10s %9s\n" "run" "dice" "tri_fold%" "tri_cert_bnd" "tri_iters" "tri_resid"
+printf "%-18s %8s %11s %13s %10s %12s\n" "run" "dice" "tri_fold%" "tri_cert_min" "tri_iters" "uncert_cells"
 for d in "$OUT_ROOT"/*/; do
   [[ -f "$d/summary.csv" ]] || continue
   get() { awk -F, -v k="$1" '$1==k{printf "%s",$2}' "$d/summary.csv"; }
+  get_col() { awk -F, -v k="$1" -v c="$2" '$1==k{printf "%s",$c}' "$d/summary.csv"; }
   fmt() { local v; v="$(get "$1")"; [[ -z "$v" ]] && echo "-" || printf "%.5f" "$v"; }
-  printf "%-18s %8s %11s %13s %10s %9s\n" "$(basename "$d")" \
-    "$(fmt dice_mean)" "$(fmt tri_fold_pct)" "$(fmt tri_cert_bound)" \
-    "$(fmt tri_proj_iters)" "$(fmt tri_proj_resid)"
+  cert_min="$(get_col tri_cert_bound 6)"; [[ -n "$cert_min" ]] || cert_min="$(get tri_cert_bound)"
+  uncert_max="$(get_col tri_proj_uncertified_cells 7)"
+  [[ -n "$uncert_max" ]] || uncert_max="$(get tri_proj_uncertified_cells)"
+  printf "%-18s %8s %11s %13s %10s %12s\n" "$(basename "$d")" \
+    "$(fmt dice_mean)" "$(fmt tri_fold_pct)" "$cert_min" \
+    "$(fmt tri_proj_iters)" "${uncert_max:--}"
 done
 echo
-echo "VERDICT: on each *_tri_e0/_tri_e02 row, tri_cert_bound >= eps AND tri_fold% = 0 => the DEPLOYED"
-echo "  warp is CERTIFIED. Dice delta vs the same *_feedfwd row = the cost of the guarantee."
-echo "  cost <= ~0.003 across ckpts => the guarantee-carrying METHOD holds (strong-TMI mechanism)."
+echo "READ: an operational pass requires tri_cert_min >= eps and uncert_cells = 0 for every case."
+echo "  Save the fields and run utils.cert_exact on their float32 bytes before making a machine-sound claim."
+echo "  Dice delta vs the same *_feedfwd row is the empirical cost of repair."
 echo "Eval CSV: $OUT_ROOT/ (send back)."

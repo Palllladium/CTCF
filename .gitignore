@@ -25,9 +25,8 @@ Thumbs.db
 
 # Local project docs
 CLAUDE.md
-tools/paper/
 tools/archive/
-paper/
+/paper/
 /main.tex
 
 # Runtime outputs
