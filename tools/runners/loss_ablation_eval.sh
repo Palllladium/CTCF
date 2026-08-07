@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Loss-ablation EVAL (inference only). Scores the 8 loss_ablation.sh checkpoints by the metric of record =
+# POST-repair certified Dice (the guarantee lives at inference, so the winner is the loss config whose REPAIRED
+# field has the highest certified Dice, NOT the highest feed-forward Dice). For each checkpoint: feed-forward
+# vs certified trilinear-repair, Dice + cert + fold%. Same VM-Unified anchor + chain repair as stageb_repair_eval
+# so numbers are directly comparable. OASIS only (the ablation trains OASIS).
+#
+# READ the table: repair cost = REP-FF. Compare against FULL:
+#   - if NOICON / NOICON_NOJAC repair to a HIGHER certified Dice than FULL, the certificate makes those soft
+#     losses redundant and dropping them RECOVERS Dice (an improvement to keep, not just an ablation);
+#   - if TRI_ACTIVE repairs above the best digital (FULL / TRI_MEAN), targeting the deployed trilinear criterion
+#     with the sparse-aware reduce finally beats the digital penalty (reverses Stage-B's mean-reduce tie).
+set -e
+
+GPU="${GPU:-0}"
+PROFILE="${PROFILE:---3}"
+PYBIN="${PYBIN:-python}"
+OUT_ROOT="${OUT_ROOT:-results/loss_ablation}"
+FORCE="${FORCE:-0}"
+EPS="${EPS:-0.001}"
+_CALLNO=0
+NSHARD="${NSHARD:-1}"
+SHARD="${SHARD:-0}"
+
+export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+
+VM="--ctcf_config CTCF-CascadeA-VM-Unified --ctcf_l3_svf 1"
+COMMON="--model ctcf ${PROFILE} --strict_ckpt 0 --gpu ${GPU} --print_every 5 --ds OASIS --tto_mode none"
+CHAIN="--tto_project 1 --tto_project_eps 0 --tto_tri_project 1 --tto_tri_project_eps ${EPS}"
+
+EXPS="P18_ABL_VXM_OASIS_FULL P18_ABL_VXM_OASIS_NOICON P18_ABL_VXM_OASIS_NOJAC \
+P18_ABL_VXM_OASIS_NOICON_NOJAC P18_ABL_VXM_OASIS_NOREG P18_ABL_VXM_OASIS_TRI_MEAN \
+P18_ABL_VXM_OASIS_TRI_ACTIVE P18_ABL_VXM_OASIS_ICON_L2"
+
+ck() { local p="results/$1/ckpt/best.pth"; [[ -f "$p" ]] && echo "$p" || echo "results/$1/ckpt/last.pth"; }
+infer() {
+  local tag="$1" exp="$2"; shift 2
+  local mine=$(( _CALLNO % NSHARD )); _CALLNO=$(( _CALLNO + 1 ))
+  [[ "$NSHARD" -gt 1 && "$mine" != "$SHARD" ]] && return 0
+  local out="$OUT_ROOT/$tag" ckpt; ckpt="$(ck "$exp")"
+  if [[ -f "$out/summary.csv" && "$FORCE" != "1" ]]; then echo "[SKIP] $tag"; return 0; fi
+  if [[ ! -f "$ckpt" ]]; then echo "[MISS] $tag — no ckpt at $ckpt" >&2; return 0; fi
+  echo; echo "=== eval $tag ==="
+  # shellcheck disable=SC2086
+  "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$ckpt" --out_dir "$out" "$@"
+}
+
+echo "########## Loss-ablation eval (eps=${EPS}) ##########"
+for e in $EXPS; do
+  infer "${e}__FF"  "$e"                # feed-forward (may fold trilinearly)
+  # shellcheck disable=SC2086
+  infer "${e}__REP" "$e" $CHAIN         # certified trilinear repair
+done
+
+if [[ "$NSHARD" -ne 1 ]]; then echo "[shard $SHARD/$NSHARD done]"; exit 0; fi
+
+echo
+echo "===================== LOSS-ABLATION TABLE (OASIS, post-repair = metric of record) ====================="
+printf "%-38s %9s %13s %11s\n" "run" "dice" "tri_cert_bnd" "tri_fold%"
+for d in "$OUT_ROOT"/*/; do
+  [[ -f "$d/summary.csv" ]] || continue
+  get() { awk -F, -v k="$1" '$1==k{printf "%s",$2}' "$d/summary.csv"; }
+  fmt() { local v; v="$(get "$1")"; [[ -z "$v" ]] && echo "-" || printf "%.5f" "$v"; }
+  printf "%-38s %9s %13s %11s\n" "$(basename "$d")" \
+    "$(fmt dice_mean)" "$(fmt tri_cert_bound)" "$(fmt tri_fold_pct)"
+done
+echo
+echo "READ: winner = highest __REP dice (cert_bnd >= ${EPS}). NOICON/NOICON_NOJAC __REP > FULL __REP => the"
+echo "  certificate makes the soft loss redundant (keep the drop). TRI_ACTIVE __REP > FULL/TRI_MEAN __REP =>"
+echo "  the corrected trilinear target (active reduce) beats the digital penalty post-repair."

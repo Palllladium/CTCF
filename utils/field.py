@@ -603,6 +603,31 @@ def boundary_tangential_lip(flow: torch.Tensor) -> float:
         return float(torch.stack([_face_tangential_lip(f) for f in faces]).max().item())
 
 
+def _collar_ramp(n: int, width: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """1-D smoothstep ramp: 0 at the two ends (the boundary faces), 1 at depth >= width inward."""
+    idx = torch.arange(n, device=device, dtype=dtype)
+    dist = torch.minimum(idx, (n - 1) - idx)
+    t = (dist / float(max(width, 1))).clamp(0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def identity_collar(flow: torch.Tensor, width: int = 4) -> torch.Tensor:
+    """Force phi = id on the domain boundary by tapering the displacement to zero over a `width`-voxel collar.
+    Returns flow * m, where m(x) = ra(d) rb(h) rc(w) is a product of per-axis smoothstep ramps that is 0 on the
+    union of the six faces and 1 at depth >= width from every face. phi|boundary = id is then trivially
+    injective, so WITH the interior fold-free certificate phi is GLOBALLY injective — a piecewise-trilinear
+    HOMEOMORPHISM onto the domain (Ball 1981 / Kroemer 2020). NOT a diffeomorphism: the trilinear gradient
+    jumps across cell faces. The collar only touches the `width`-voxel FOV border (background in brain MRI) so
+    Dice is unaffected; the taper can fold, so re-certify by running trilinear_project AFTER the collar."""
+    if flow.dim() != 5 or flow.shape[1] != 3:
+        raise ValueError(f"Expected flow shape [B,3,D,H,W], got {tuple(flow.shape)}.")
+    _, _, d, h, w = flow.shape
+    ra = _collar_ramp(d, width, flow.device, flow.dtype).view(1, 1, d, 1, 1)
+    rb = _collar_ramp(h, width, flow.device, flow.dtype).view(1, 1, 1, h, 1)
+    rc = _collar_ramp(w, width, flow.device, flow.dtype).view(1, 1, 1, 1, w)
+    return flow * (ra * rb * rc)
+
+
 def certified_local_clip(
     flow_current: torch.Tensor,
     flow_proposal: torch.Tensor,

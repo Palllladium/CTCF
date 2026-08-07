@@ -31,6 +31,7 @@ from utils.field import (
     digital_min_det,
     digital_project,
     displacement_grad_norm_max,
+    identity_collar,
     perturb_flow,
     trilinear_cert_bound,
     trilinear_fold_percent,
@@ -284,6 +285,13 @@ class InferRunner:
                     mask=x_seg,
                 )
                 flow, snapshots = result.flow, result.snapshots
+
+            # Identity-collar: taper the displacement to zero on a boundary shell so phi|boundary = id.
+            # With the interior fold-free certificate this upgrades fold-free to GLOBAL injectivity (a
+            # piecewise-trilinear homeomorphism, Ball 1981 / Kroemer 2020). Applied BEFORE the repair so the
+            # taper's own folds are re-certified by trilinear_project below; boundary_max_disp -> ~0 confirms it.
+            if args.tto_collar:
+                flow = identity_collar(flow.float(), width=args.tto_collar_width)
 
             proj_folds, proj_iters = None, 0
             if args.tto_project:

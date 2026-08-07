@@ -198,6 +198,23 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "recover more of the proposal at higher cost; feasibility is preserved at every sweep.",
     )
     group.add_argument(
+        "--tto_collar",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Identity-collar: taper the displacement to zero on a boundary shell so phi|boundary = id "
+        "(trivially injective). With the interior fold-free certificate this upgrades fold-free to GLOBAL "
+        "injectivity — a piecewise-trilinear homeomorphism (Ball 1981 / Kroemer 2020). Applied BEFORE the "
+        "repair chain; run --tto_tri_project 1 after it to re-certify the taper. boundary_max_disp -> ~0.",
+    )
+    group.add_argument(
+        "--tto_collar_width",
+        type=int,
+        default=4,
+        help="Width in voxels of the identity-collar smoothstep taper (--tto_collar 1). Wider = gentler ramp "
+        "(lower fold risk in the taper), but zeroes more of the FOV border (background in brain MRI).",
+    )
+    group.add_argument(
         "--tto_perturb",
         choices=["none", "fp16", "noise"],
         default="none",
