@@ -2,7 +2,7 @@
 
 Paper 1's map used the central-difference determinant under log|.|, which (a) is the wrong scheme (it does not
 test the trilinear interpolant grid_sample deploys) and (b) HIDES the sign (a fold, det<0, is invisible under
-|.|). This figure reads SAVED flow fields (produced by `experiments.inference --save_flow 1`) and renders, for
+|.|). This figure reads SAVED flow fields (produced by `experiments.inference --save_flow`) and renders, for
 one slice, three panels per field:
 
   1. signed trilinear det J   -- the DEPLOYED grid_sample determinant (min over 5^3 samples per cell), on a

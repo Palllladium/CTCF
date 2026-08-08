@@ -28,11 +28,11 @@ echo "########## Jacobian figure | $EXP | pair $PAIR ##########"
 # feed-forward: save flow, NO repair (the folds the central log|det| map hides are here)
 # shellcheck disable=SC2086
 [[ -f "$FF_DIR/flows/flow_${PAIR}.npz" ]] || \
-  "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$CKPT" --out_dir "$FF_DIR" --save_flow 1 --tto_project 0 --tto_tri_project 0
+  "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$CKPT" --out_dir "$FF_DIR" --save_flow --tto_project 0 --tto_tri_project 0
 # certified repair: save the repaired flow (folds gone, tri_cert_bound >= eps)
 # shellcheck disable=SC2086
 [[ -f "$REP_DIR/flows/flow_${PAIR}.npz" ]] || \
-  "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$CKPT" --out_dir "$REP_DIR" --save_flow 1 $CHAIN
+  "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$CKPT" --out_dir "$REP_DIR" --save_flow $CHAIN
 
 echo ">>> rendering $OUT"
 "${PYBIN}" tools/paper/plot_deployed_jacobian.py \
