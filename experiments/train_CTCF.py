@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -171,13 +170,23 @@ class Runner:
             L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
+        tri_stats = None
         if args.jac_mode == "trilinear":
-            jac_pen = partial(trilinear_fold_penalty, mode=args.tri_pen_mode, reduce=args.tri_pen_reduce)
-        elif args.jac_mode == "digital":
-            jac_pen = digital_fold_penalty
+            p_xy, s_xy = trilinear_fold_penalty(
+                flow_xy, mode=args.tri_pen_mode, reduce=args.tri_pen_reduce, return_stats=True
+            )
+            p_yx, s_yx = trilinear_fold_penalty(
+                flow_yx, mode=args.tri_pen_mode, reduce=args.tri_pen_reduce, return_stats=True
+            )
+            raw_pen = 0.5 * (p_xy + p_yx)
+            L_jac = raw_pen * W_jac
+            tri_stats = {
+                "jac_active_frac": 0.5 * (s_xy["active_frac"] + s_yx["active_frac"]),
+                "jac_raw": float(raw_pen.item()),
+            }
         else:
-            jac_pen = neg_jacobian_penalty
-        L_jac = 0.5 * (jac_pen(flow_xy) + jac_pen(flow_yx)) * W_jac
+            jac_pen = digital_fold_penalty if args.jac_mode == "digital" else neg_jacobian_penalty
+            L_jac = 0.5 * (jac_pen(flow_xy) + jac_pen(flow_yx)) * W_jac
 
         L_dice = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
         if args.w_dice > 0.0 and x_seg is not None:
@@ -234,6 +243,20 @@ class Runner:
             "alpha_l3": alpha_l3,
             "warm": warm,
         }
+        if tri_stats is not None:
+            logs.update(tri_stats)
+            if args.log_tri_gradnorm:
+                # Decoupled from the main graph: recompute the penalty on the detached field and take the
+                # gradient w.r.t. the field only. Measures how hard the penalty pushes the deformation
+                # (the runaway signal), without perturbing the model's backward or the AMP scaler.
+                gn = 0.0
+                for f in (flow_xy, flow_yx):
+                    fd = f.detach().clone().requires_grad_(True)
+                    pen = trilinear_fold_penalty(fd, mode=args.tri_pen_mode, reduce=args.tri_pen_reduce)
+                    (g,) = torch.autograd.grad(pen, fd)
+                    gn += 0.5 * float(g.norm().item())
+                logs["jac_gradnorm"] = gn
+
         if self.use_ema:
             logs["ema"] = float(L_ema.item())
 

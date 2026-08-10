@@ -70,4 +70,9 @@ def format_metric_suffix(ndvp: float | None, sdlogj: float | None) -> str:
 def format_train_suffix(meters: dict[str, AverageMeter]) -> str:
     if "alpha_l1" not in meters:
         return ""
-    return f" | a1={meters['alpha_l1'].val:.3f} a3={meters['alpha_l3'].val:.3f} w={meters['warm'].val:.3f}"
+    suffix = f" | a1={meters['alpha_l1'].val:.3f} a3={meters['alpha_l3'].val:.3f} w={meters['warm'].val:.3f}"
+    if "jac_active_frac" in meters:  # trilinear penalty diagnostics (runaway watch)
+        suffix += f" jac_af={meters['jac_active_frac'].avg:.2e} jac_raw={meters['jac_raw'].avg:.3e}"
+    if "jac_gradnorm" in meters:
+        suffix += f" jac_gn={meters['jac_gradnorm'].avg:.3e}"
+    return suffix

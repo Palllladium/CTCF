@@ -27,14 +27,17 @@ MAX_EPOCH="${MAX_EPOCH:-100}"
 SMOKE="${SMOKE:-0}"
 RUN="${RUN:?set RUN=1..8}"
 TRI_ACTIVE_W="${TRI_ACTIVE_W:-5}"
+LOG_GN="${LOG_GN:-0}"           # 1 = also log the trilinear penalty's grad norm (runaway watch; extra backward)
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 export CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"
 
 # Anchor: weak-sup (w_dice 1.0) VxM Unified SVF OASIS. Per-run flags override w_reg/w_icon/w_jac/jac_mode/
 # tri_pen_*/icon_mode only. FULL = the current operating point (digital penalty at w_jac 5 = Stage-B best).
+# --log_tri_gradnorm is inert unless a run uses --jac_mode trilinear; active_frac/jac_raw log automatically.
 COMMON="--config CTCF-CascadeA-VM-Unified --l3_svf 1 --ds OASIS ${PROFILE} --gpu ${GPU} \
-        --max_epoch ${MAX_EPOCH} --w_ncc 1.0 --w_dice 1.0 --seed 0 --use_tb 1 --save_ckpt 1"
+        --max_epoch ${MAX_EPOCH} --w_ncc 1.0 --w_dice 1.0 --seed 0 --use_tb 1 --save_ckpt 1 \
+        --log_tri_gradnorm ${LOG_GN}"
 
 case "$RUN" in
   1) EXP=P18_ABL_VXM_OASIS_FULL;        LOSS="--w_reg 1.0 --w_icon 0.05 --w_jac 5 --jac_mode digital" ;;
@@ -43,7 +46,8 @@ case "$RUN" in
   4) EXP=P18_ABL_VXM_OASIS_NOICON_NOJAC;LOSS="--w_reg 1.0 --w_icon 0.0  --w_jac 0 --jac_mode central" ;;
   5) EXP=P18_ABL_VXM_OASIS_NOREG;       LOSS="--w_reg 0.0 --w_icon 0.05 --w_jac 5 --jac_mode digital" ;;
   6) EXP=P18_ABL_VXM_OASIS_TRI_MEAN;    LOSS="--w_reg 1.0 --w_icon 0.05 --w_jac 5 --jac_mode trilinear --tri_pen_mode bernstein --tri_pen_reduce mean" ;;
-  7) EXP=P18_ABL_VXM_OASIS_TRI_ACTIVE;  LOSS="--w_reg 1.0 --w_icon 0.05 --w_jac ${TRI_ACTIVE_W} --jac_mode trilinear --tri_pen_mode bernstein --tri_pen_reduce active" ;;
+  7) if [[ "${TRI_ACTIVE_W}" == "5" ]]; then EXP=P18_ABL_VXM_OASIS_TRI_ACTIVE; else EXP="P18_ABL_VXM_OASIS_TRI_ACTIVE_W${TRI_ACTIVE_W}"; fi
+     LOSS="--w_reg 1.0 --w_icon 0.05 --w_jac ${TRI_ACTIVE_W} --jac_mode trilinear --tri_pen_mode bernstein --tri_pen_reduce active" ;;
   8) EXP=P18_ABL_VXM_OASIS_ICON_L2;     LOSS="--w_reg 1.0 --w_icon 0.05 --w_jac 5 --jac_mode digital --icon_mode l2" ;;
   *) echo "RUN must be 1..8"; exit 1 ;;
 esac

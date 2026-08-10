@@ -773,7 +773,8 @@ def trilinear_fold_penalty(
     mask: torch.Tensor | None = None,
     tiles: int | None = None,
     reduce: str = "mean",
-) -> torch.Tensor:
+    return_stats: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
     """Differentiable penalty that trains the DEPLOYED trilinear warp to be fold-free. 'bernstein': hinge
     sum_k relu(eps - coeff_k) over the 27 per-cell Bernstein coefficients (the sound criterion). 'sampled':
     hinge on det J at a 3^3 interior lattice per cell (a cheaper proxy). `reduce` sets the cell average:
@@ -821,7 +822,13 @@ def trilinear_fold_penalty(
             count += float(mt.sum().item())
             active += float(((pm > 0) & (mt > 0)).sum().item())
     denom = active if reduce == "active" else count
-    return total / max(denom, 1.0)
+    loss = total / max(denom, 1.0)
+    if return_stats:
+        # active = violating cells; count = evaluated cells. active_frac drives the 'active'-reduce
+        # amplification (1/active_frac vs mean), so it is the runaway diagnostic for the sparse regime.
+        stats = {"active": active, "count": count, "active_frac": active / max(count, 1.0)}
+        return loss, stats
+    return loss
 
 
 @dataclass(frozen=True)

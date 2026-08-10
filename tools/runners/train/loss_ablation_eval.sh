@@ -31,7 +31,8 @@ CHAIN="--tto_project 1 --tto_project_eps 0 --tto_tri_project 1 --tto_tri_project
 
 EXPS="P18_ABL_VXM_OASIS_FULL P18_ABL_VXM_OASIS_NOICON P18_ABL_VXM_OASIS_NOJAC \
 P18_ABL_VXM_OASIS_NOICON_NOJAC P18_ABL_VXM_OASIS_NOREG P18_ABL_VXM_OASIS_TRI_MEAN \
-P18_ABL_VXM_OASIS_TRI_ACTIVE P18_ABL_VXM_OASIS_ICON_L2"
+P18_ABL_VXM_OASIS_TRI_ACTIVE P18_ABL_VXM_OASIS_ICON_L2 \
+P18_ABL_VXM_OASIS_TRI_ACTIVE_W0.005 P18_ABL_VXM_OASIS_TRI_ACTIVE_W0.05"
 
 ck() { local p="results/$1/ckpt/best.pth"; [[ -f "$p" ]] && echo "$p" || echo "results/$1/ckpt/last.pth"; }
 infer() {

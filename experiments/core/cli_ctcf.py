@@ -124,6 +124,15 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         "folds are sparse and mean smears them into a near-zero signal.",
     )
     group.add_argument(
+        "--log_tri_gradnorm",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="For --jac_mode trilinear: also log the L2 norm of the penalty's gradient w.r.t. the field "
+        "(a decoupled extra backward). Off by default; enable for the scale-matched TRI_ACTIVE sweep to "
+        "watch the runaway (active-reduce amplifies the gradient by ~1/active_frac as folds get sparse).",
+    )
+    group.add_argument(
         "--w_dice",
         type=float,
         default=0.0,
