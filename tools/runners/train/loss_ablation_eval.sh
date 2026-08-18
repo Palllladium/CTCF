@@ -5,11 +5,7 @@
 # vs certified trilinear-repair, Dice + cert + fold%. Same VM-Unified anchor + chain repair as stageb_repair_eval
 # so numbers are directly comparable. OASIS only (the ablation trains OASIS).
 #
-# READ the table: repair cost = REP-FF. Compare against FULL:
-#   - if NOICON / NOICON_NOJAC repair to a HIGHER certified Dice than FULL, the certificate makes those soft
-#     losses redundant and dropping them RECOVERS Dice (an improvement to keep, not just an ablation);
-#   - if TRI_ACTIVE repairs above the best digital (FULL / TRI_MEAN), targeting the deployed trilinear criterion
-#     with the sparse-aware reduce finally beats the digital penalty (reverses Stage-B's mean-reduce tie).
+# The table is descriptive: conclusions must be computed from the observed rows, not declared in advance.
 set -e
 
 GPU="${GPU:-0}"
@@ -26,7 +22,7 @@ SMOKE="${SMOKE:-0}"
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 
 VM="--ctcf_config CTCF-CascadeA-VM-Unified --ctcf_l3_svf 1"
-COMMON="--model ctcf ${PROFILE} --strict_ckpt 0 --gpu ${GPU} --print_every 5 --ds OASIS --tto_mode none"
+COMMON="--model ctcf ${PROFILE} --strict_ckpt 1 --deterministic --time_steps 6 --gpu ${GPU} --print_every 5 --ds OASIS --tto_mode none"
 CHAIN="--tto_project 1 --tto_project_eps 0 --tto_tri_project 1 --tto_tri_project_eps ${EPS}"
 
 EXPS="P18_ABL_VXM_OASIS_FULL P18_ABL_VXM_OASIS_NOICON P18_ABL_VXM_OASIS_NOJAC \
@@ -34,7 +30,7 @@ P18_ABL_VXM_OASIS_NOICON_NOJAC P18_ABL_VXM_OASIS_NOREG P18_ABL_VXM_OASIS_TRI_MEA
 P18_ABL_VXM_OASIS_TRI_ACTIVE P18_ABL_VXM_OASIS_ICON_L2 \
 P18_ABL_VXM_OASIS_TRI_ACTIVE_W0.005 P18_ABL_VXM_OASIS_TRI_ACTIVE_W0.05"
 
-ck() { local p="results/$1/ckpt/best.pth"; [[ -f "$p" ]] && echo "$p" || echo "results/$1/ckpt/last.pth"; }
+ck() { echo "results/$1/ckpt/best.pth"; }
 infer() {
   local tag="$1" exp="$2"; shift 2
   local mine=$(( _CALLNO % NSHARD )); _CALLNO=$(( _CALLNO + 1 ))
@@ -43,6 +39,8 @@ infer() {
   if [[ -f "$out/summary.csv" && "$FORCE" != "1" ]]; then echo "[SKIP] $tag"; return 0; fi
   if [[ ! -f "$ckpt" ]]; then echo "[FAIL] $tag — no ckpt at $ckpt" >&2; return 1; fi
   echo; echo "=== eval $tag ==="
+  printf '[COMMAND] %q ' "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$ckpt" --out_dir "$out" "$@"
+  printf '\n'
   # shellcheck disable=SC2086
   "${PYBIN}" -m experiments.inference $COMMON $VM --ckpt "$ckpt" --out_dir "$out" "$@"
 }
@@ -71,6 +69,5 @@ for d in "$OUT_ROOT"/*/; do
     "$(fmt dice_mean)" "$cert_min" "$(fmt tri_fold_pct)"
 done
 echo
-echo "READ: winner = highest __REP dice (cert_bnd >= ${EPS}). NOICON/NOICON_NOJAC __REP > FULL __REP => the"
-echo "  certificate makes the soft loss redundant (keep the drop). TRI_ACTIVE __REP > FULL/TRI_MEAN __REP =>"
-echo "  the corrected trilinear target (active reduce) beats the digital penalty post-repair."
+echo "READ: among rows with cert_bnd >= ${EPS}, rank configurations by the observed __REP dice."
+echo "This runner does not print a pre-declared scientific interpretation; derive it from the table."

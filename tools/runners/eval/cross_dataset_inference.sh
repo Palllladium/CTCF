@@ -10,8 +10,8 @@
 #   results/infer/cross_dataset_summary.csv  (aggregated final table)
 #
 # Usage:
-#   bash tools/runners/cross_dataset_inference.sh --paths-profile 3 --gpu 0
-#   bash tools/runners/cross_dataset_inference.sh --paths-profile 2 --gpu 0 --dry-run
+#   bash tools/runners/eval/cross_dataset_inference.sh --paths-profile 3 --gpu 0
+#   bash tools/runners/eval/cross_dataset_inference.sh --paths-profile 2 --gpu 0 --dry-run
 #
 # Checkpoint resolution:
 #   1) Each experiment is associated with a *folder* under $RESULTS_ROOT.
@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORK_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$WORK_DIR"
 
 RESULTS_ROOT="${RESULTS_ROOT:-$RESULTS_ROOT_DEFAULT}"
@@ -189,7 +189,7 @@ for i in "${!EXPERIMENTS[@]}"; do
 
   # Choose the right model-specific config flag
   case "$MODEL" in
-    ctcf)      CFG_FLAG="--ctcf_config $CONFIG_KEY" ;;
+    ctcf)      CFG_FLAG="--ctcf_config $CONFIG_KEY --time_steps 6" ;;
     tm-dca)    CFG_FLAG="--tm_config $CONFIG_KEY"   ;;
     utsrmorph) CFG_FLAG="--utsr_config $CONFIG_KEY" ;;
     *) echo "Unknown model: $MODEL"; exit 1 ;;
@@ -201,7 +201,8 @@ for i in "${!EXPERIMENTS[@]}"; do
     --ds $EVAL_DS \
     --$PATHS_PROFILE \
     --gpu $GPU \
-    --strict_ckpt 0 \
+    --strict_ckpt 1 \
+    --deterministic \
     --hd95 \
     --print_every 5 \
     --out_dir $OUT_DIR \

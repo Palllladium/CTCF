@@ -45,24 +45,36 @@ from utils.field import (
 from utils.tto import TTOConfig, refine_flow
 
 
-def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> None:
-    """Load checkpoint weights; on strict mismatch, warn and fall back to a tolerant load."""
+def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> dict[str, object]:
+    """Load checkpoint weights and return an explicit, machine-readable load report."""
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt.get("state_dict", ckpt.get("model", ckpt)) if isinstance(ckpt, dict) else ckpt
 
     if strict:
         try:
             model.load_state_dict(sd, strict=True)
-            return
         except RuntimeError as e:
-            print(f"[WARN] Strict checkpoint load failed: {e}")
-            print("[WARN] Falling back to tolerant load. Pass --strict_ckpt 0 to silence this warning.")
+            raise RuntimeError(f"Strict checkpoint load failed for '{ckpt_path}': {e}") from e
+        report = {
+            "strict": True,
+            "state_key_count": len(sd),
+            "missing_keys": [],
+            "unexpected_keys": [],
+        }
+        print(f"[INFO] Strict checkpoint load succeeded: {len(sd)} keys from {ckpt_path}")
+        return report
 
     missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing:
         print(f"[WARN] Missing keys: {len(missing)} (first 10): {missing[:10]}")
     if unexpected:
         print(f"[WARN] Unexpected keys: {len(unexpected)} (first 10): {unexpected[:10]}")
+    return {
+        "strict": False,
+        "state_key_count": len(sd),
+        "missing_keys": list(missing),
+        "unexpected_keys": list(unexpected),
+    }
 
 
 def build_infer_dataset(ds_key: str, files: list[str], atlas_path: str | None):
