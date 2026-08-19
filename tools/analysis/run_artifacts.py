@@ -9,11 +9,12 @@ import json
 import os
 import platform
 import tempfile
+from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 REGENERATED_LEGACY_BUFFERS = frozenset({"st_half.grid"})
 
@@ -62,10 +63,8 @@ def atomic_write_text(path: Path, text: str) -> None:
             stream.write(text)
         os.replace(tmp_name, path)
     except BaseException:
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
         raise
 
 
@@ -122,9 +121,7 @@ def write_dataset_manifest(paths_profile: int, dataset_splits: list[str], output
                     "split": split,
                     "path": name,
                     "bytes": stat.st_size,
-                    "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
                 }
             )
 
@@ -137,9 +134,7 @@ def write_dataset_manifest(paths_profile: int, dataset_splits: list[str], output
                     "split": "atlas",
                     "path": atlas,
                     "bytes": stat.st_size,
-                    "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
                 }
             )
 
@@ -166,8 +161,7 @@ def validate_result_directory(datasets: Path, result_dir: Path, dataset: str, sp
         summary_n = int(json.load(stream)["n_cases"])
     if expected <= 0 or observed != expected or summary_n != expected:
         raise ValueError(
-            f"Case-count mismatch for {dataset}/{split}: "
-            f"expected={expected}, per_case={observed}, summary={summary_n}"
+            f"Case-count mismatch for {dataset}/{split}: expected={expected}, per_case={observed}, summary={summary_n}"
         )
     return expected
 

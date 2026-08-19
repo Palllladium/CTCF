@@ -62,13 +62,10 @@ def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) 
                 (name for name, _ in model.named_buffers()),
             )
             if not compatibility.compatible:
-                raise RuntimeError(
-                    f"Strict checkpoint load failed for '{ckpt_path}': {strict_error}"
-                ) from strict_error
+                raise RuntimeError(f"Strict checkpoint load failed for '{ckpt_path}': {strict_error}") from strict_error
             allowed = list(compatibility.allowed_missing_buffers)
             print(
-                "[INFO] Strict checkpoint compatibility succeeded with "
-                f"regenerated deterministic buffer(s): {allowed}"
+                f"[INFO] Strict checkpoint compatibility succeeded with regenerated deterministic buffer(s): {allowed}"
             )
             return {
                 "strict": True,

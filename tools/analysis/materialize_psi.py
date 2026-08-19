@@ -38,9 +38,7 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="Output directory for the materialized Psi .npz files.")
     args = ap.parse_args()
 
-    paths = sorted(
-        glob.glob(os.path.join(args.flows, "*.npz")) if os.path.isdir(args.flows) else glob.glob(args.flows)
-    )
+    paths = sorted(glob.glob(os.path.join(args.flows, "*.npz")) if os.path.isdir(args.flows) else glob.glob(args.flows))
     if not paths:
         raise SystemExit(f"no .npz flows matched {args.flows!r}")
     os.makedirs(args.out, exist_ok=True)
