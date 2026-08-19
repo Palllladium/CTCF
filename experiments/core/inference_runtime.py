@@ -16,6 +16,7 @@ from experiments.core.cli_ctcf import ctcf_overrides_from_args
 from experiments.core.inference_metrics import metric_profile_for, write_results, write_trace
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import get_dataset_paths
+from tools.analysis.run_artifacts import classify_checkpoint_incompatibilities
 from utils import (
     NumpyType,
     RegisterModel,
@@ -53,12 +54,36 @@ def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) 
     if strict:
         try:
             model.load_state_dict(sd, strict=True)
-        except RuntimeError as e:
-            raise RuntimeError(f"Strict checkpoint load failed for '{ckpt_path}': {e}") from e
+        except RuntimeError as strict_error:
+            missing, unexpected = model.load_state_dict(sd, strict=False)
+            compatibility = classify_checkpoint_incompatibilities(
+                missing,
+                unexpected,
+                (name for name, _ in model.named_buffers()),
+            )
+            if not compatibility.compatible:
+                raise RuntimeError(
+                    f"Strict checkpoint load failed for '{ckpt_path}': {strict_error}"
+                ) from strict_error
+            allowed = list(compatibility.allowed_missing_buffers)
+            print(
+                "[INFO] Strict checkpoint compatibility succeeded with "
+                f"regenerated deterministic buffer(s): {allowed}"
+            )
+            return {
+                "strict": True,
+                "torch_strict": False,
+                "state_key_count": len(sd),
+                "missing_keys": allowed,
+                "allowed_missing_buffers": allowed,
+                "unexpected_keys": [],
+            }
         report = {
             "strict": True,
+            "torch_strict": True,
             "state_key_count": len(sd),
             "missing_keys": [],
+            "allowed_missing_buffers": [],
             "unexpected_keys": [],
         }
         print(f"[INFO] Strict checkpoint load succeeded: {len(sd)} keys from {ckpt_path}")

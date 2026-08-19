@@ -9,9 +9,41 @@ import json
 import os
 import platform
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+
+REGENERATED_LEGACY_BUFFERS = frozenset({"st_half.grid"})
+
+
+@dataclass(frozen=True)
+class CheckpointCompatibility:
+    allowed_missing_buffers: tuple[str, ...]
+    disallowed_missing_keys: tuple[str, ...]
+    unexpected_keys: tuple[str, ...]
+
+    @property
+    def compatible(self) -> bool:
+        return not self.disallowed_missing_keys and not self.unexpected_keys
+
+
+def classify_checkpoint_incompatibilities(
+    missing_keys: Iterable[str],
+    unexpected_keys: Iterable[str],
+    model_buffer_names: Iterable[str],
+) -> CheckpointCompatibility:
+    """Allow only explicitly known, model-owned deterministic legacy buffers."""
+    missing = set(missing_keys)
+    unexpected = set(unexpected_keys)
+    buffers = set(model_buffer_names)
+    allowed = missing & REGENERATED_LEGACY_BUFFERS & buffers
+    return CheckpointCompatibility(
+        allowed_missing_buffers=tuple(sorted(allowed)),
+        disallowed_missing_keys=tuple(sorted(missing - allowed)),
+        unexpected_keys=tuple(sorted(unexpected)),
+    )
 
 
 def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -232,10 +264,13 @@ def finalize_run(args: argparse.Namespace) -> Path:
             raise ValueError(f"Expected {args.expected_preflights} preflight reports, found {len(preflights)}")
         for item in preflights:
             load = item.get("load") or {}
+            missing = set(load.get("missing_keys") or [])
+            allowed_missing = set(load.get("allowed_missing_buffers") or [])
             if (
                 item["status"] != "PASS"
                 or load.get("strict") is not True
-                or load.get("missing_keys")
+                or missing != allowed_missing
+                or not allowed_missing.issubset(REGENERATED_LEGACY_BUFFERS)
                 or load.get("unexpected_keys")
             ):
                 raise ValueError("A COMPLETE run requires successful strict checkpoint preflights")

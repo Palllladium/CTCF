@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from tools.analysis.run_artifacts import (
     aggregate_summaries,
+    classify_checkpoint_incompatibilities,
     finalize_run,
     validate_result_directory,
     write_dataset_manifest,
@@ -19,8 +20,39 @@ from tools.analysis.run_artifacts import (
 
 
 class RunArtifactsTest(unittest.TestCase):
+    def test_only_known_model_owned_legacy_buffer_is_allowed(self) -> None:
+        compatible = classify_checkpoint_incompatibilities(
+            ["st_half.grid"],
+            [],
+            ["st_full.grid", "st_half.grid"],
+        )
+        self.assertTrue(compatible.compatible)
+        self.assertEqual(compatible.allowed_missing_buffers, ("st_half.grid",))
+
+        unknown = classify_checkpoint_incompatibilities(
+            ["st_half.grid", "level2.weight"],
+            [],
+            ["st_full.grid", "st_half.grid"],
+        )
+        self.assertFalse(unknown.compatible)
+        self.assertEqual(unknown.disallowed_missing_keys, ("level2.weight",))
+
+        not_a_buffer = classify_checkpoint_incompatibilities(
+            ["st_half.grid"],
+            [],
+            ["st_full.grid"],
+        )
+        self.assertFalse(not_a_buffer.compatible)
+
+        unexpected = classify_checkpoint_incompatibilities(
+            [],
+            ["obsolete.weight"],
+            ["st_full.grid", "st_half.grid"],
+        )
+        self.assertFalse(unexpected.compatible)
+
     def test_command_line_modules_are_importable_from_repo_root(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
+        repo_root = Path(__file__).resolve().parents[3]
         for module in ("tools.analysis.run_artifacts", "tools.analysis.checkpoint_preflight"):
             result = subprocess.run(
                 [sys.executable, "-m", module, "--help"],
@@ -125,6 +157,18 @@ class RunArtifactsTest(unittest.TestCase):
 
             data = json.loads(preflight.read_text(encoding="utf-8"))
             data["load"]["missing_keys"] = ["missing.weight"]
+            preflight.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "strict checkpoint preflights"):
+                finalize_run(args)
+
+            data["load"]["missing_keys"] = ["st_half.grid"]
+            data["load"]["allowed_missing_buffers"] = ["st_half.grid"]
+            preflight.write_text(json.dumps(data), encoding="utf-8")
+            manifest = finalize_run(args)
+            self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["status"], "COMPLETE")
+
+            data["load"]["missing_keys"] = ["missing.weight"]
+            data["load"]["allowed_missing_buffers"] = ["missing.weight"]
             preflight.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "strict checkpoint preflights"):
                 finalize_run(args)
