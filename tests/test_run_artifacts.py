@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +19,18 @@ from tools.analysis.run_artifacts import (
 
 
 class RunArtifactsTest(unittest.TestCase):
+    def test_command_line_modules_are_importable_from_repo_root(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for module in ("tools.analysis.run_artifacts", "tools.analysis.checkpoint_preflight"):
+            result = subprocess.run(
+                [sys.executable, "-m", module, "--help"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dataset_manifest_and_result_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

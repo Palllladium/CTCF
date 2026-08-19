@@ -72,13 +72,13 @@ run_logged() {
 
 write_dataset_manifest() {
   local -a cmd=(
-    "$PYBIN" tools/analysis/run_artifacts.py dataset-manifest
+    "$PYBIN" -m tools.analysis.run_artifacts dataset-manifest
     --paths-profile "$PATHS_PROFILE"
     --dataset-split OASIS:val
     --output "$RUN_ROOT/datasets.tsv"
   )
   [[ "$MODE" == "all" || "$MODE" == "journal" ]] && cmd+=(--dataset-split IXI:test)
-  "${cmd[@]}"
+  run_logged "dataset_manifest" "${cmd[@]}"
 }
 
 capture_environment() {
@@ -134,7 +134,7 @@ P18_EXPS=(
 preflight() {
   local tag="$1" checkpoint="$2" config="$3" l3_svf="$4" expected_sha="$5"
   local -a cmd=(
-    "$PYBIN" tools/analysis/checkpoint_preflight.py
+    "$PYBIN" -m tools.analysis.checkpoint_preflight
     --checkpoint "$checkpoint"
     --ctcf-config "$config"
     --time-steps 6
@@ -147,7 +147,7 @@ preflight() {
 
 validate_result_dir() {
   local result_dir="$1" dataset="$2" split="$3"
-  "$PYBIN" tools/analysis/run_artifacts.py validate-result \
+  "$PYBIN" -m tools.analysis.run_artifacts validate-result \
     --datasets "$RUN_ROOT/datasets.tsv" \
     --result-dir "$result_dir" \
     --dataset "$dataset" \
@@ -164,7 +164,7 @@ aggregate_results() {
     expected=4
     patterns=(--summary-glob 'journal/*/summary.json')
   fi
-  "$PYBIN" tools/analysis/run_artifacts.py aggregate \
+  "$PYBIN" -m tools.analysis.run_artifacts aggregate \
     --run-root "$RUN_ROOT" \
     "${patterns[@]}" \
     --expected-count "$expected" \
@@ -191,7 +191,7 @@ finalize() {
   local expected_preflights=12
   [[ "$MODE" == "p18" ]] && expected_preflights=10
   [[ "$MODE" == "journal" ]] && expected_preflights=2
-  if ! "$PYBIN" tools/analysis/run_artifacts.py finalize \
+  if ! "$PYBIN" -m tools.analysis.run_artifacts finalize \
     --run-root "$RUN_ROOT" \
     --run-id "$RUN_ID" \
     --status "$status" \
