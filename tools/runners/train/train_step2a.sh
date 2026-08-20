@@ -28,12 +28,13 @@ PROFILE="${PROFILE:---2}"
 PYBIN="${PYBIN:-python}"
 BLOCK="${BLOCK:-ALL}"
 OUT_ROOT="${OUT_ROOT:-results/step2a_eval}"
+USE_TB="${USE_TB:-0}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 want() { [[ "$BLOCK" == "ALL" || "$BLOCK" == "$1" ]]; }
 
 VXM="--config CTCF-CascadeA-VM-Unified --l3_svf 1"
-OASIS="--ds OASIS ${PROFILE} --gpu ${GPU} --max_epoch ${MAX_EPOCH} --use_tb 1 --save_ckpt 1 \
+OASIS="--ds OASIS ${PROFILE} --gpu ${GPU} --max_epoch ${MAX_EPOCH} --use_tb ${USE_TB} --save_ckpt 1 \
         --w_ncc 1.0 --w_icon 0.05 --w_reg 1.0"
 
 A0_EXP="P10_LONGRUN_VXM_UNIFIED_SVF_OASIS"   # existing unsup baseline

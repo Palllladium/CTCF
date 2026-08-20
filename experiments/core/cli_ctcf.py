@@ -28,7 +28,14 @@ _OVERRIDE_HELP = {
     "l3_ls_eps": "certificate margin for --*l3_ls_space (tri_cert_bound >= eps at each L3 step).",
 }
 
-CTCF_OVERRIDE_KEYS = (*_INT_OVERRIDES, "l3_error_mode", "l3_corr_mode", *_BOOL_OVERRIDES)
+CTCF_OVERRIDE_KEYS = (
+    *_INT_OVERRIDES,
+    "l3_error_mode",
+    "l3_corr_mode",
+    "l3_ls_space",
+    "l3_ls_eps",
+    *_BOOL_OVERRIDES,
+)
 
 
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:

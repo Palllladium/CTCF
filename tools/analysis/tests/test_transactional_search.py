@@ -15,10 +15,14 @@ from tools.analysis.transactional_search import (
     CandidateScreen,
     _local_ncc_map,
     build_proposal,
+    certified_local_clip_candidate,
     commit_exact_candidate,
+    field_change_statistics,
     geometry_mask,
     load_flow_npz,
+    ncc_loss_from_normalized,
     phi_to_psi_displacement,
+    proposal_support_weights,
     psi_to_phi_displacement,
     sample_at_psi,
     save_flow_npz_atomic,
@@ -47,8 +51,51 @@ class TransactionalSearchTest(unittest.TestCase):
 
     def test_voxel_grid_is_reused_for_equal_contracts(self) -> None:
         first = voxel_grid_like(torch.zeros((1, 3, 7, 8, 9)))
+        snapshot = first.clone()
         second = voxel_grid_like(torch.ones((1, 3, 7, 8, 9)))
         self.assertEqual(first.data_ptr(), second.data_ptr())
+        phi = torch.zeros((1, 3, 7, 8, 9))
+        psi_to_phi_displacement(phi_to_psi_displacement(phi))
+        sample_at_psi(torch.zeros((1, 1, 7, 8, 9)), phi)
+        torch.testing.assert_close(first, snapshot, atol=0, rtol=0)
+
+    def test_support_weighted_ncc_and_change_statistics_are_well_formed(self) -> None:
+        shape = (7, 8, 9)
+        generator = torch.Generator().manual_seed(91)
+        fixed = torch.randn((1, 1, *shape), generator=generator)
+        moving = fixed.clone()
+        psi = torch.zeros((1, 3, *shape))
+        mask = geometry_mask(shape, 2, fixed.device)
+        proposal = torch.zeros_like(psi)
+        proposal[:, 2, 3, 3, 3] = 0.25
+        weights = proposal_support_weights(proposal, mask)
+        loss = ncc_loss_from_normalized(fixed, moving, psi, mask, weights=weights)
+        self.assertTrue(torch.isfinite(torch.tensor(loss)))
+
+        output = psi + 0.5 * proposal
+        stats = field_change_statistics(psi, proposal, output, mask)
+        self.assertAlmostEqual(stats["effective_alpha_mean"], 0.5)
+        self.assertAlmostEqual(stats["retained_norm_ratio"], 0.5)
+        self.assertEqual(stats["orthogonal_residual_max"], 0.0)
+
+    def test_local_clip_wrapper_checks_precondition_and_boundary(self) -> None:
+        shape = (7, 8, 9)
+        current = torch.zeros((1, 3, *shape))
+        mask = geometry_mask(shape, 2, current.device)
+        delta = torch.zeros_like(current)
+        output, report = certified_local_clip_candidate(current, delta, mask, work_eps=0.0011)
+        torch.testing.assert_close(output, current, atol=0, rtol=0)
+        self.assertGreaterEqual(report["output_fast_cert_bound"], 0.0011)
+
+        bad_boundary = delta.clone()
+        bad_boundary[:, :, 0, 0, 0] = 0.1
+        with self.assertRaisesRegex(RuntimeError, "boundary"):
+            certified_local_clip_candidate(current, bad_boundary, mask, work_eps=0.0011)
+
+        unsafe = current.clone()
+        unsafe[:, 0, 3, 3, 3] = -4.0
+        with self.assertRaisesRegex(RuntimeError, "precondition"):
+            certified_local_clip_candidate(unsafe, torch.zeros_like(unsafe), mask, work_eps=0.0011)
 
     def test_batch_greater_than_one_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "shape"):

@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 from tools.analysis.run_artifacts import sha256_file
 from utils.cert_exact import certify_flow_exact
-from utils.field import identity_collar
+from utils.field import boundary_vertex_mask, certified_local_clip, identity_collar, trilinear_cert_bound
 
 Offset = tuple[int, int, int]
 FeatureKind = Literal["mind", "intensity"]
@@ -92,6 +92,8 @@ def voxel_grid_like(field: torch.Tensor) -> torch.Tensor:
     """Return a cached immutable [1,3,D,H,W] z-y-x identity grid."""
     _require_field(field, "field")
     d, h, w = field.shape[-3:]
+    # The returned tensor is shared by every equal shape/device/dtype contract.
+    # Consumers must stay out-of-place; an in-place write would poison the cache.
     return _cached_voxel_grid(d, h, w, field.device, field.dtype)
 
 
@@ -259,6 +261,35 @@ def _local_ncc_map(fixed: torch.Tensor, moving: torch.Tensor, win: int = 9, eps:
     return -(cross.square() / (fixed_var * moving_var))
 
 
+def ncc_loss_from_normalized(
+    fixed_normalized: torch.Tensor,
+    moving_normalized: torch.Tensor,
+    psi_displacement: torch.Tensor,
+    mask: torch.Tensor,
+    win: int = 9,
+    eps: float = 1e-5,
+    weights: torch.Tensor | None = None,
+) -> float:
+    """Masked FP64 mean of the registered NCC loss, optionally proposal-weighted."""
+    warped = sample_at_psi(moving_normalized, psi_displacement)
+    valid = mask & valid_sample_mask(psi_displacement)
+    loss_map = _local_ncc_map(fixed_normalized, warped, win=win, eps=eps)
+    values = loss_map.masked_select(valid)
+    if values.numel() == 0 or not bool(torch.isfinite(values).all()):
+        return float("nan")
+    if weights is not None:
+        if weights.shape != mask.shape:
+            raise ValueError(f"weights must have shape {tuple(mask.shape)}, got {tuple(weights.shape)}")
+        selected_weights = weights.to(loss_map.dtype).masked_select(valid)
+        if not bool(torch.isfinite(selected_weights).all()) or bool((selected_weights < 0).any()):
+            return float("nan")
+        denominator = selected_weights.double().sum()
+        if float(denominator.item()) <= 0.0:
+            return float("nan")
+        return float((values.double() * selected_weights.double()).sum().div(denominator).item())
+    return float(values.double().mean().item())
+
+
 def utility_loss(
     fixed: torch.Tensor,
     moving: torch.Tensor,
@@ -266,15 +297,145 @@ def utility_loss(
     mask: torch.Tensor,
     win: int = 9,
     eps: float = 1e-5,
+    weights: torch.Tensor | None = None,
 ) -> float:
     fixed_norm = masked_zscore(fixed, mask)
     moving_norm = masked_zscore(moving, mask)
-    warped = sample_at_psi(moving_norm, psi_displacement)
-    valid = mask & valid_sample_mask(psi_displacement)
-    values = _local_ncc_map(fixed_norm, warped, win=win, eps=eps).masked_select(valid)
-    if values.numel() == 0 or not bool(torch.isfinite(values).all()):
-        return float("nan")
-    return float(values.double().mean().item())
+    return ncc_loss_from_normalized(
+        fixed_norm,
+        moving_norm,
+        psi_displacement,
+        mask,
+        win=win,
+        eps=eps,
+        weights=weights,
+    )
+
+
+def proposal_support_weights(proposal: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Continuous label-free support weights derived once from the proposed residual norm."""
+    _require_field(proposal, "proposal")
+    if mask.shape != (proposal.shape[0], 1, *proposal.shape[-3:]):
+        raise ValueError(f"mask must have shape [1,1,D,H,W], got {tuple(mask.shape)}")
+    magnitude = proposal.square().sum(dim=1, keepdim=True).sqrt()
+    return torch.where(mask, magnitude, torch.zeros_like(magnitude))
+
+
+def field_change_statistics(
+    initial: torch.Tensor,
+    requested_delta: torch.Tensor,
+    output: torch.Tensor,
+    mask: torch.Tensor,
+    changed_threshold: float = 1e-7,
+) -> dict[str, float]:
+    """Summarise how much of a requested residual survives a topology operator.
+
+    The effective alpha is the least-squares scalar per voxel along the requested
+    direction. It is exact for `certified_local_clip`; a non-zero orthogonal residual
+    exposes direction changes introduced by a heuristic repair.
+    """
+    _require_field(initial, "initial")
+    _require_field(requested_delta, "requested_delta")
+    _require_field(output, "output")
+    if initial.shape != requested_delta.shape or initial.shape != output.shape:
+        raise ValueError("initial, requested_delta and output must share shape")
+    if mask.shape != (initial.shape[0], 1, *initial.shape[-3:]):
+        raise ValueError(f"mask must have shape [1,1,D,H,W], got {tuple(mask.shape)}")
+
+    actual = output - initial
+    requested_norm = requested_delta.square().sum(dim=1, keepdim=True).sqrt()
+    actual_norm = actual.square().sum(dim=1, keepdim=True).sqrt()
+    requested_sq = requested_delta.square().sum(dim=1, keepdim=True)
+    active = mask & (requested_norm > changed_threshold)
+    evaluated = mask
+    if not bool(evaluated.any()):
+        raise ValueError("statistics mask is empty")
+
+    actual_values = actual_norm.masked_select(evaluated).double()
+    requested_values = requested_norm.masked_select(evaluated).double()
+    alpha = (actual * requested_delta).sum(dim=1, keepdim=True) / requested_sq.clamp_min(1e-20)
+    projected = alpha * requested_delta
+    orthogonal_norm = (actual - projected).square().sum(dim=1, keepdim=True).sqrt()
+    alpha_values = alpha.masked_select(active).double()
+    orthogonal_values = orthogonal_norm.masked_select(active).double()
+    if alpha_values.numel() == 0:
+        alpha_values = actual_values.new_zeros(1)
+        orthogonal_values = actual_values.new_zeros(1)
+
+    def quantile(values: torch.Tensor, q: float) -> float:
+        return float(torch.quantile(values, q).item())
+
+    requested_sum = requested_values.sum()
+    retained = (
+        actual_values.sum() / requested_sum if float(requested_sum.item()) > 0.0 else actual_values.new_tensor(0.0)
+    )
+    return {
+        "requested_norm_mean": float(requested_values.mean().item()),
+        "requested_norm_max": float(requested_values.max().item()),
+        "actual_norm_mean": float(actual_values.mean().item()),
+        "actual_norm_p50": quantile(actual_values, 0.50),
+        "actual_norm_p95": quantile(actual_values, 0.95),
+        "actual_norm_p99": quantile(actual_values, 0.99),
+        "actual_norm_max": float(actual_values.max().item()),
+        "changed_voxel_fraction": float((actual_values > changed_threshold).double().mean().item()),
+        "retained_norm_ratio": float(retained.item()),
+        "effective_alpha_min": float(alpha_values.min().item()),
+        "effective_alpha_mean": float(alpha_values.mean().item()),
+        "effective_alpha_p50": quantile(alpha_values, 0.50),
+        "effective_alpha_p95": quantile(alpha_values, 0.95),
+        "effective_alpha_max": float(alpha_values.max().item()),
+        "effective_alpha_zero_fraction": float((alpha_values <= 1e-6).double().mean().item()),
+        "effective_alpha_partial_fraction": float(
+            ((alpha_values > 1e-6) & (alpha_values < 1.0 - 1e-6)).double().mean().item()
+        ),
+        "effective_alpha_full_fraction": float((alpha_values >= 1.0 - 1e-6).double().mean().item()),
+        "orthogonal_residual_mean": float(orthogonal_values.mean().item()),
+        "orthogonal_residual_max": float(orthogonal_values.max().item()),
+    }
+
+
+def certified_local_clip_candidate(
+    current: torch.Tensor,
+    requested_delta: torch.Tensor,
+    mask: torch.Tensor,
+    work_eps: float = 0.0011,
+    sweeps: int = 1,
+) -> tuple[torch.Tensor, dict[str, float | int | str]]:
+    """Apply local clip only after checking its certified-current and boundary preconditions."""
+    _require_field(current, "current")
+    _require_field(requested_delta, "requested_delta")
+    if current.shape != requested_delta.shape:
+        raise ValueError("current and requested_delta must share shape")
+    if sweeps < 1:
+        raise ValueError("sweeps must be >= 1")
+    if not bool(torch.isfinite(current).all()) or not bool(torch.isfinite(requested_delta).all()):
+        raise ValueError("current and requested_delta must be finite")
+
+    current_bound = trilinear_cert_bound(current, eps=work_eps)
+    if not math.isfinite(current_bound) or current_bound < work_eps:
+        raise RuntimeError(
+            f"certified_local_clip precondition failed: current bound {current_bound} < work_eps {work_eps}"
+        )
+    target = (current + requested_delta).float()
+    boundary = boundary_vertex_mask(current).expand_as(current)
+    if not torch.equal(target.masked_select(boundary), current.masked_select(boundary)):
+        raise RuntimeError("certified_local_clip target must preserve the current boundary byte-for-byte")
+
+    output = certified_local_clip(current, target, eps=work_eps, sweeps=sweeps)
+    if not bool(torch.isfinite(output).all()):
+        raise RuntimeError("certified_local_clip returned a non-finite field")
+    if not torch.equal(output.masked_select(boundary), current.masked_select(boundary)):
+        raise RuntimeError("certified_local_clip changed the protected boundary")
+    output_bound = trilinear_cert_bound(output, eps=work_eps)
+    report: dict[str, float | int | str] = {
+        "operator": "CERTIFIED_LOCAL_CLIP",
+        "sweeps": sweeps,
+        "work_eps": work_eps,
+        "current_fast_cert_bound": current_bound,
+        "output_fast_cert_bound": output_bound,
+        **field_change_statistics(current, requested_delta, output, mask),
+    }
+    return output, report
 
 
 def mind_distance(

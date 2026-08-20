@@ -28,6 +28,7 @@ SMOKE="${SMOKE:-0}"
 RUN="${RUN:?set RUN=1..8}"
 TRI_ACTIVE_W="${TRI_ACTIVE_W:-5}"
 LOG_GN="${LOG_GN:-0}"           # 1 = also log the trilinear penalty's grad norm (runaway watch; extra backward)
+USE_TB="${USE_TB:-0}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 export CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"
@@ -36,7 +37,7 @@ export CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"
 # tri_pen_*/icon_mode only. FULL = the current operating point (digital penalty at w_jac 5 = Stage-B best).
 # --log_tri_gradnorm is inert unless a run uses --jac_mode trilinear; active_frac/jac_raw log automatically.
 COMMON="--config CTCF-CascadeA-VM-Unified --l3_svf 1 --ds OASIS ${PROFILE} --gpu ${GPU} \
-        --max_epoch ${MAX_EPOCH} --w_ncc 1.0 --w_dice 1.0 --seed 0 --use_tb 1 --save_ckpt 1 \
+        --max_epoch ${MAX_EPOCH} --w_ncc 1.0 --w_dice 1.0 --seed 0 --use_tb ${USE_TB} --save_ckpt 1 \
         --log_tri_gradnorm ${LOG_GN}"
 
 case "$RUN" in

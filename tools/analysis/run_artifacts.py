@@ -208,12 +208,15 @@ def aggregate_summaries(run_root: Path, patterns: list[str], expected_count: int
     return len(summaries)
 
 
-def write_output_index(run_root: Path, output: Path, excluded_names: set[str]) -> int:
+def write_output_index(run_root: Path, output: Path, excluded_paths: set[str]) -> int:
     rows = []
-    for path in sorted(p for p in run_root.rglob("*") if p.is_file() and p.name not in excluded_names):
+    for path in sorted(p for p in run_root.rglob("*") if p.is_file()):
+        relative = path.relative_to(run_root).as_posix()
+        if relative in excluded_paths:
+            continue
         rows.append(
             {
-                "relative_path": path.relative_to(run_root).as_posix(),
+                "relative_path": relative,
                 "bytes": path.stat().st_size,
                 "sha256": sha256_file(path),
             }
@@ -236,7 +239,9 @@ def finalize_run(args: argparse.Namespace) -> Path:
 
     outputs = run_root / "outputs.tsv"
     manifest_path = run_root / "run_manifest.json"
-    write_output_index(run_root, outputs, {outputs.name, manifest_path.name})
+    # Exclude only the two self-referential root files. Nested stage manifests are
+    # independent outputs and must remain covered by the top-level index.
+    write_output_index(run_root, outputs, {outputs.relative_to(run_root).as_posix(), manifest_path.name})
 
     preflights = []
     for path in sorted((run_root / "preflight").glob("*.json")):

@@ -16,10 +16,27 @@ from tools.analysis.run_artifacts import (
     finalize_run,
     validate_result_directory,
     write_dataset_manifest,
+    write_output_index,
 )
 
 
 class RunArtifactsTest(unittest.TestCase):
+    def test_output_index_keeps_nested_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "stage" / "run_manifest.json"
+            nested.parent.mkdir()
+            nested.write_text("nested\n", encoding="utf-8")
+            (root / "run_manifest.json").write_text("root\n", encoding="utf-8")
+            output = root / "outputs.tsv"
+
+            count = write_output_index(root, output, {"outputs.tsv", "run_manifest.json"})
+
+            self.assertEqual(count, 1)
+            with output.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream, delimiter="\t"))
+            self.assertEqual([row["relative_path"] for row in rows], ["stage/run_manifest.json"])
+
     def test_only_known_model_owned_legacy_buffer_is_allowed(self) -> None:
         compatible = classify_checkpoint_incompatibilities(
             ["st_half.grid"],

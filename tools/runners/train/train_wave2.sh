@@ -30,13 +30,14 @@ PYBIN="${PYBIN:-python}"
 MAX_EPOCH="${MAX_EPOCH:-500}"
 SMOKE="${SMOKE:-0}"
 RUN="${RUN:?set RUN=1..6}"
+USE_TB="${USE_TB:-0}"
 
 export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
 export CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"
 
 COMMON="--config CTCF-CascadeA-VM-Unified --l3_svf 1 --ds OASIS ${PROFILE} --gpu ${GPU} \
         --max_epoch ${MAX_EPOCH} --w_ncc 1.0 --w_icon 0.05 --w_reg 1.0 --w_dice 1.0 \
-        --seed 0 --use_tb 1 --save_ckpt 1"
+        --seed 0 --use_tb ${USE_TB} --save_ckpt 1"
 
 case "$RUN" in
   1) EXP=P17_W2_VXM_OASIS_TRI_BERN_J1;  JAC="--jac_mode trilinear --tri_pen_mode bernstein --w_jac 1" ;;
