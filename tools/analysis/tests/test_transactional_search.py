@@ -3,12 +3,20 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
 from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.run_search_gate_c0 import _run_case, _summarise
+from tools.analysis.run_search_gate_c1 import (
+    CLAIM_EPS,
+    WORK_EPS,
+    _build_local_candidate,
+    _deformation_quality_metrics,
+    _operator_rule_rows,
+)
 from tools.analysis.transactional_search import (
     OFFSETS,
     ZERO_OFFSET_INDEX,
@@ -96,6 +104,82 @@ class TransactionalSearchTest(unittest.TestCase):
         unsafe[:, 0, 3, 3, 3] = -4.0
         with self.assertRaisesRegex(RuntimeError, "precondition"):
             certified_local_clip_candidate(unsafe, torch.zeros_like(unsafe), mask, work_eps=0.0011)
+
+    def test_c1_float32_work_margin_loss_continues_to_claim_check(self) -> None:
+        shape = (7, 8, 9)
+        current = torch.zeros((1, 3, *shape))
+        proposal = torch.zeros_like(current)
+        mask = geometry_mask(shape, 2, current.device)
+        output_bound = (WORK_EPS + CLAIM_EPS) / 2.0
+        report = {
+            "output_fast_cert_bound": output_bound,
+            "alpha_min": 0.5,
+            "alpha_mean": 0.5,
+            "alpha_max": 0.5,
+        }
+        spec = {
+            "operator": "certified_local_clip",
+            "scale": 1.0,
+            "sweeps": 1,
+        }
+        with patch(
+            "tools.analysis.run_search_gate_c1.certified_local_clip_candidate",
+            return_value=(current.clone(), report),
+        ):
+            requested, candidate, observed = _build_local_candidate(spec, current, proposal, mask)
+        torch.testing.assert_close(requested, proposal, atol=0, rtol=0)
+        torch.testing.assert_close(candidate, current, atol=0, rtol=0)
+        self.assertEqual(observed["status"], "COMPLETE_BELOW_WORK_MARGIN")
+        self.assertFalse(observed["retained_work_margin_after_float32"])
+        self.assertTrue(observed["retained_claim_margin_after_float32"])
+
+    def test_c1_geometry_metrics_separate_measured_counts_from_exact_guarantee(self) -> None:
+        field = torch.zeros((1, 3, 7, 8, 9))
+        certified = _deformation_quality_metrics(field, exact_certified=True)
+        self.assertEqual(certified["j_leq0_central_percent"], 0.0)
+        self.assertEqual(certified["j_leq0_digital10_percent"], 0.0)
+        self.assertEqual(certified["trilinear_fold_percent_upper_bound"], 0.0)
+        self.assertEqual(certified["trilinear_fold_status"], "ZERO_BY_EXACT_CERTIFICATE")
+
+        unverified = _deformation_quality_metrics(field, exact_certified=False)
+        self.assertIsNone(unverified["trilinear_fold_percent_upper_bound"])
+        self.assertEqual(unverified["trilinear_fold_status"], "NOT_ESTABLISHED")
+
+    def test_c1_rule_summary_reports_absolute_dice_sdlogj_and_folds(self) -> None:
+        rows = []
+        for accepted, baseline_dice, candidate_dice, baseline_sdlogj, candidate_sdlogj in (
+            (True, 0.70, 0.71, 0.20, 0.19),
+            (False, 0.80, 0.79, 0.30, 0.31),
+        ):
+            row = {
+                "candidate_id": "candidate",
+                "family": "local",
+                "feature": "mind",
+                "orientation": "target_centered",
+                "operator": "certified_local_clip",
+                "operator_status": "COMPLETE",
+                "scale": 1.0,
+                "sweeps": 1,
+                "coefficient_index": None,
+                "baseline_dice": baseline_dice,
+                "candidate_dice": candidate_dice,
+                "candidate_dice_delta": candidate_dice - baseline_dice,
+                "baseline_sdlogj": baseline_sdlogj,
+                "candidate_sdlogj": candidate_sdlogj,
+                "candidate_sdlogj_delta": candidate_sdlogj - baseline_sdlogj,
+                "baseline_j_leq0_central_percent": 0.0,
+                "candidate_j_leq0_central_percent": 0.0,
+                "baseline_j_leq0_digital10_percent": 0.0,
+                "candidate_j_leq0_digital10_percent": 0.0,
+            }
+            for rule in ("topology_only", "mind", "ncc9", "support_ncc9", "mind_and_ncc9"):
+                row[f"rule_{rule}"] = accepted
+            rows.append(row)
+        summary = next(row for row in _operator_rule_rows(rows) if row["rule"] == "mind")
+        self.assertAlmostEqual(summary["returned_dice_mean"], (0.71 + 0.80) / 2)
+        self.assertAlmostEqual(summary["returned_sdlogj_mean"], (0.19 + 0.30) / 2)
+        self.assertEqual(summary["returned_j_leq0_digital10_percent_max"], 0.0)
+        self.assertEqual(summary["returned_trilinear_fold_percent_upper_bound"], 0.0)
 
     def test_batch_greater_than_one_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "shape"):

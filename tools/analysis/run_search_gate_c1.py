@@ -58,7 +58,14 @@ from tools.analysis.transactional_search import (
 )
 from utils import setup_device
 from utils.cert_exact import certify_flow_exact
-from utils.field import boundary_vertex_mask, trilinear_cert_bound, trilinear_project
+from utils.field import (
+    boundary_vertex_mask,
+    digital_fold_percent,
+    jacobian_nonpositive_percent,
+    logdet_std_from_flow,
+    trilinear_cert_bound,
+    trilinear_project,
+)
 
 PROTOCOL_ID = "CTCF-SEARCH-GATE-C1-V1"
 SPLIT_PROTOCOL_ID = "CTCF-GATE-C0-V1-SALTED-IXI-VAL-58"
@@ -195,6 +202,28 @@ def _require_finite(values: dict[str, Any], label: str) -> None:
 def _sync(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def _deformation_quality_metrics(field: torch.Tensor, *, exact_certified: bool) -> dict[str, Any]:
+    """Report paper-facing geometry without conflating a sampled count with the exact certificate."""
+    metrics: dict[str, Any] = {
+        "sdlogj": float(logdet_std_from_flow(field)),
+        "j_leq0_central_percent": float(jacobian_nonpositive_percent(field, crop=1)),
+        "j_leq0_digital10_percent": float(digital_fold_percent(field).item()),
+        "trilinear_fold_percent_upper_bound": 0.0 if exact_certified else None,
+        "trilinear_fold_status": "ZERO_BY_EXACT_CERTIFICATE" if exact_certified else "NOT_ESTABLISHED",
+    }
+    _require_finite(
+        {
+            key: value
+            for key, value in metrics.items()
+            if key not in {"trilinear_fold_percent_upper_bound", "trilinear_fold_status"}
+        },
+        "deformation quality metrics",
+    )
+    if any(float(metrics[key]) < 0.0 for key in ("sdlogj", "j_leq0_central_percent", "j_leq0_digital10_percent")):
+        raise RuntimeError("Deformation quality metrics must be non-negative")
+    return metrics
 
 
 def _select_cases(stage: str, paths_profile: int) -> tuple[list[str], str, list[str]]:
@@ -781,9 +810,26 @@ def _evaluate_candidate(
         "baseline_dice": None,
         "candidate_dice": None,
         "candidate_dice_delta": None,
+        "baseline_sdlogj": None,
+        "candidate_sdlogj": None,
+        "candidate_sdlogj_delta": None,
+        "baseline_j_leq0_central_percent": None,
+        "candidate_j_leq0_central_percent": None,
+        "baseline_j_leq0_digital10_percent": None,
+        "candidate_j_leq0_digital10_percent": None,
+        "baseline_trilinear_fold_percent_upper_bound": None,
+        "candidate_trilinear_fold_percent_upper_bound": None,
+        "baseline_trilinear_fold_status": None,
+        "candidate_trilinear_fold_status": None,
         "action": None,
         "final_dice": None,
         "accepted_dice_delta": None,
+        "final_sdlogj": None,
+        "accepted_sdlogj_delta": None,
+        "final_j_leq0_central_percent": None,
+        "final_j_leq0_digital10_percent": None,
+        "final_trilinear_fold_percent_upper_bound": None,
+        "final_trilinear_fold_status": None,
         "final_npz_sha256": None,
         "final_array_sha256": None,
         "final_exact_status": None,
@@ -835,9 +881,26 @@ def _operator_failure_row(
         "baseline_dice": None,
         "candidate_dice": None,
         "candidate_dice_delta": None,
+        "baseline_sdlogj": None,
+        "candidate_sdlogj": None,
+        "candidate_sdlogj_delta": None,
+        "baseline_j_leq0_central_percent": None,
+        "candidate_j_leq0_central_percent": None,
+        "baseline_j_leq0_digital10_percent": None,
+        "candidate_j_leq0_digital10_percent": None,
+        "baseline_trilinear_fold_percent_upper_bound": None,
+        "candidate_trilinear_fold_percent_upper_bound": None,
+        "baseline_trilinear_fold_status": None,
+        "candidate_trilinear_fold_status": None,
         "action": None,
         "final_dice": None,
         "accepted_dice_delta": None,
+        "final_sdlogj": None,
+        "accepted_sdlogj_delta": None,
+        "final_j_leq0_central_percent": None,
+        "final_j_leq0_digital10_percent": None,
+        "final_trilinear_fold_percent_upper_bound": None,
+        "final_trilinear_fold_status": None,
         "final_npz_sha256": None,
         "final_array_sha256": None,
         "final_exact_status": None,
@@ -877,9 +940,21 @@ def _build_local_candidate(
             work_eps=WORK_EPS,
             sweeps=int(spec["sweeps"]),
         )
-        if float(report["output_fast_cert_bound"]) < WORK_EPS:
-            raise RuntimeError("certified_local_clip returned below the working certificate margin")
-        return requested, output, {"status": "COMPLETE", **report}
+        output_bound = float(report["output_fast_cert_bound"])
+        if not math.isfinite(output_bound):
+            raise RuntimeError("certified_local_clip returned a non-finite certificate bound")
+        retained_work_margin = output_bound >= WORK_EPS
+        retained_claim_margin = output_bound >= CLAIM_EPS
+        return (
+            requested,
+            output,
+            {
+                "status": "COMPLETE" if retained_work_margin else "COMPLETE_BELOW_WORK_MARGIN",
+                **report,
+                "retained_work_margin_after_float32": retained_work_margin,
+                "retained_claim_margin_after_float32": retained_claim_margin,
+            },
+        )
     if spec["operator"] == "trilinear_project":
         fixed_mask = boundary_vertex_mask(initial_psi)
         target = (initial_psi + requested).float()
@@ -924,17 +999,34 @@ def _atomic_copy(source: Path, destination: Path) -> None:
             os.unlink(temporary)
 
 
-POST_DECISION_LABEL_FIELDS = {
+POST_DECISION_EVALUATION_FIELDS = {
     "baseline_dice",
     "candidate_dice",
     "candidate_dice_delta",
     "final_dice",
     "accepted_dice_delta",
+    "baseline_sdlogj",
+    "candidate_sdlogj",
+    "candidate_sdlogj_delta",
+    "final_sdlogj",
+    "accepted_sdlogj_delta",
+    "baseline_j_leq0_central_percent",
+    "candidate_j_leq0_central_percent",
+    "final_j_leq0_central_percent",
+    "baseline_j_leq0_digital10_percent",
+    "candidate_j_leq0_digital10_percent",
+    "final_j_leq0_digital10_percent",
+    "baseline_trilinear_fold_percent_upper_bound",
+    "candidate_trilinear_fold_percent_upper_bound",
+    "final_trilinear_fold_percent_upper_bound",
+    "baseline_trilinear_fold_status",
+    "candidate_trilinear_fold_status",
+    "final_trilinear_fold_status",
 }
 
 
 def _decision_input_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in row.items() if key not in POST_DECISION_LABEL_FIELDS}
+    return {key: value for key, value in row.items() if key not in POST_DECISION_EVALUATION_FIELDS}
 
 
 def _decision_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -1312,20 +1404,34 @@ def _run_case(
     baseline_dice = _dice(initial_psi, moving_seg, fixed_seg, labels)
     if not _is_finite_number(baseline_dice):
         raise RuntimeError(f"Non-finite baseline Dice for {case_id}")
+    baseline_geometry = _deformation_quality_metrics(initial_psi, exact_certified=True)
     for row, candidate_field in zip(rows, evaluated_fields, strict=True):
         row["baseline_dice"] = baseline_dice
+        for key, value in baseline_geometry.items():
+            row[f"baseline_{key}"] = value
         if candidate_field is not None:
             candidate_dice = _dice(candidate_field, moving_seg, fixed_seg, labels)
             if not _is_finite_number(candidate_dice):
                 raise RuntimeError(f"Non-finite candidate Dice for {case_id}/{row['candidate_id']}")
             row["candidate_dice"] = candidate_dice
             row["candidate_dice_delta"] = candidate_dice - baseline_dice
+            candidate_geometry = _deformation_quality_metrics(
+                candidate_field,
+                exact_certified=bool(row["exact_certified"]),
+            )
+            for key, value in candidate_geometry.items():
+                row[f"candidate_{key}"] = value
+            row["candidate_sdlogj_delta"] = candidate_geometry["sdlogj"] - baseline_geometry["sdlogj"]
     if stage == "confirmation":
         final_dice = _dice(final_field, moving_seg, fixed_seg, labels)
         if not _is_finite_number(final_dice):
             raise RuntimeError(f"Non-finite final Dice for {case_id}")
         rows[0]["final_dice"] = final_dice
         rows[0]["accepted_dice_delta"] = final_dice - baseline_dice
+        final_geometry = _deformation_quality_metrics(final_field, exact_certified=True)
+        for key, value in final_geometry.items():
+            rows[0][f"final_{key}"] = value
+        rows[0]["accepted_sdlogj_delta"] = final_geometry["sdlogj"] - baseline_geometry["sdlogj"]
 
     _sync(device)
     elapsed = time.perf_counter() - started
@@ -1435,8 +1541,31 @@ def _required_row_scalars(row: dict[str, Any]) -> dict[str, Any]:
         "baseline_dice",
         "candidate_dice",
         "candidate_dice_delta",
+        "baseline_sdlogj",
+        "candidate_sdlogj",
+        "candidate_sdlogj_delta",
+        "baseline_j_leq0_central_percent",
+        "candidate_j_leq0_central_percent",
+        "baseline_j_leq0_digital10_percent",
+        "candidate_j_leq0_digital10_percent",
     )
     return {name: row.get(name) for name in names}
+
+
+def _valid_deformation_quality(row: dict[str, Any], prefix: str, *, exact_certified: bool) -> bool:
+    numeric = (
+        row.get(f"{prefix}_sdlogj"),
+        row.get(f"{prefix}_j_leq0_central_percent"),
+        row.get(f"{prefix}_j_leq0_digital10_percent"),
+    )
+    if any(not _is_finite_number(value) or float(value) < 0.0 for value in numeric):
+        return False
+    expected_status = "ZERO_BY_EXACT_CERTIFICATE" if exact_certified else "NOT_ESTABLISHED"
+    expected_upper_bound = 0.0 if exact_certified else None
+    return (
+        row.get(f"{prefix}_trilinear_fold_status") == expected_status
+        and row.get(f"{prefix}_trilinear_fold_percent_upper_bound") == expected_upper_bound
+    )
 
 
 def _valid_row_decisions(row: dict[str, Any]) -> bool:
@@ -1515,9 +1644,17 @@ def _validate_case_payload(
         or any(row.get("stage") != stage or row.get("case_id") != case_id for row in rows)
         or any(row.get("labels_used_for_transaction_decision") is not False for row in rows)
         or any(not _is_finite_number(row.get("baseline_dice")) for row in rows)
+        or any(not _valid_deformation_quality(row, "baseline", exact_certified=True) for row in rows)
         or any(
             row.get("operator_status") != "ERROR"
-            and any(not _is_finite_number(value) for value in _required_row_scalars(row).values())
+            and (
+                any(not _is_finite_number(value) for value in _required_row_scalars(row).values())
+                or not _valid_deformation_quality(
+                    row,
+                    "candidate",
+                    exact_certified=row.get("exact_certified") is True,
+                )
+            )
             for row in rows
         )
         or any(not all(isinstance(row.get(f"rule_{rule}"), bool) for rule in UTILITY_RULES) for row in rows)
@@ -1586,6 +1723,8 @@ def _validate_case_payload(
             or row.get("action") not in {"ACCEPT", "ROLLBACK"}
             or not _is_finite_number(row.get("final_dice"))
             or not _is_finite_number(row.get("accepted_dice_delta"))
+            or not _is_finite_number(row.get("accepted_sdlogj_delta"))
+            or not _valid_deformation_quality(row, "final", exact_certified=True)
             or (
                 row.get("action") == "ACCEPT"
                 and (
@@ -1857,22 +1996,78 @@ def _sign_summary(values: np.ndarray) -> dict[str, Any]:
     }
 
 
+def _distribution_summary(values: np.ndarray) -> dict[str, float]:
+    if values.size == 0 or not np.isfinite(values).all():
+        raise RuntimeError("Distribution summary requires a non-empty finite vector")
+    return {
+        "mean": float(values.mean()),
+        "median": float(np.median(values)),
+        "min": float(values.min()),
+        "max": float(values.max()),
+    }
+
+
 def _operator_rule_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     candidate_ids = sorted({row["candidate_id"] for row in rows})
     for candidate_id in candidate_ids:
         selected = [row for row in rows if row["candidate_id"] == candidate_id]
         for rule in UTILITY_RULES:
+            accepted = [bool(row.get(f"rule_{rule}")) for row in selected]
             effective = np.array(
                 [
                     float(row["candidate_dice_delta"])
-                    if bool(row.get(f"rule_{rule}")) and row.get("candidate_dice_delta") is not None
+                    if is_accepted and row.get("candidate_dice_delta") is not None
                     else 0.0
-                    for row in selected
+                    for row, is_accepted in zip(selected, accepted, strict=True)
+                ],
+                dtype=np.float64,
+            )
+            returned_dice = np.array(
+                [
+                    float(row["candidate_dice"]) if is_accepted else float(row["baseline_dice"])
+                    for row, is_accepted in zip(selected, accepted, strict=True)
+                ],
+                dtype=np.float64,
+            )
+            returned_sdlogj = np.array(
+                [
+                    float(row["candidate_sdlogj"]) if is_accepted else float(row["baseline_sdlogj"])
+                    for row, is_accepted in zip(selected, accepted, strict=True)
+                ],
+                dtype=np.float64,
+            )
+            returned_sdlogj_delta = np.array(
+                [
+                    float(row["candidate_sdlogj_delta"])
+                    if is_accepted and row.get("candidate_sdlogj_delta") is not None
+                    else 0.0
+                    for row, is_accepted in zip(selected, accepted, strict=True)
+                ],
+                dtype=np.float64,
+            )
+            returned_central_folds = np.array(
+                [
+                    float(row["candidate_j_leq0_central_percent"])
+                    if is_accepted
+                    else float(row["baseline_j_leq0_central_percent"])
+                    for row, is_accepted in zip(selected, accepted, strict=True)
+                ],
+                dtype=np.float64,
+            )
+            returned_digital_folds = np.array(
+                [
+                    float(row["candidate_j_leq0_digital10_percent"])
+                    if is_accepted
+                    else float(row["baseline_j_leq0_digital10_percent"])
+                    for row, is_accepted in zip(selected, accepted, strict=True)
                 ],
                 dtype=np.float64,
             )
             signs = _sign_summary(effective)
+            dice_absolute = _distribution_summary(returned_dice)
+            sdlogj_absolute = _distribution_summary(returned_sdlogj)
+            sdlogj_delta = _distribution_summary(returned_sdlogj_delta)
             result.append(
                 {
                     "candidate_id": candidate_id,
@@ -1886,11 +2081,27 @@ def _operator_rule_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "rule": rule,
                     "n_cases": len(selected),
                     "n_operator_errors": sum(row["operator_status"] == "ERROR" for row in selected),
-                    "n_accepted": sum(bool(row.get(f"rule_{rule}")) for row in selected),
+                    "n_accepted": sum(accepted),
+                    "returned_dice_mean": dice_absolute["mean"],
+                    "returned_dice_median": dice_absolute["median"],
+                    "returned_dice_min": dice_absolute["min"],
+                    "returned_dice_max": dice_absolute["max"],
                     "accepted_dice_delta_mean": signs["mean"],
                     "accepted_dice_delta_median": signs["median"],
                     "accepted_dice_delta_min": signs["min"],
                     "accepted_dice_delta_max": signs["max"],
+                    "returned_sdlogj_mean": sdlogj_absolute["mean"],
+                    "returned_sdlogj_median": sdlogj_absolute["median"],
+                    "returned_sdlogj_min": sdlogj_absolute["min"],
+                    "returned_sdlogj_max": sdlogj_absolute["max"],
+                    "accepted_sdlogj_delta_mean": sdlogj_delta["mean"],
+                    "accepted_sdlogj_delta_median": sdlogj_delta["median"],
+                    "returned_j_leq0_central_percent_mean": float(returned_central_folds.mean()),
+                    "returned_j_leq0_central_percent_max": float(returned_central_folds.max()),
+                    "returned_j_leq0_digital10_percent_mean": float(returned_digital_folds.mean()),
+                    "returned_j_leq0_digital10_percent_max": float(returned_digital_folds.max()),
+                    "returned_trilinear_fold_percent_upper_bound": 0.0,
+                    "returned_trilinear_fold_status": "ZERO_BY_EXACT_CERTIFICATE",
                     "improved": signs["improved"],
                     "worsened": signs["worsened"],
                     "unchanged": signs["unchanged"],
@@ -1910,6 +2121,17 @@ def _per_case_rows(rows: list[dict[str, Any]], stage: str) -> list[dict[str, Any
         "baseline_dice",
         "candidate_dice",
         "candidate_dice_delta",
+        "baseline_sdlogj",
+        "candidate_sdlogj",
+        "candidate_sdlogj_delta",
+        "baseline_j_leq0_central_percent",
+        "candidate_j_leq0_central_percent",
+        "baseline_j_leq0_digital10_percent",
+        "candidate_j_leq0_digital10_percent",
+        "baseline_trilinear_fold_percent_upper_bound",
+        "candidate_trilinear_fold_percent_upper_bound",
+        "baseline_trilinear_fold_status",
+        "candidate_trilinear_fold_status",
         "rule_topology_only",
         "rule_mind",
         "rule_ncc9",
@@ -1918,6 +2140,12 @@ def _per_case_rows(rows: list[dict[str, Any]], stage: str) -> list[dict[str, Any
         "action",
         "final_dice",
         "accepted_dice_delta",
+        "final_sdlogj",
+        "accepted_sdlogj_delta",
+        "final_j_leq0_central_percent",
+        "final_j_leq0_digital10_percent",
+        "final_trilinear_fold_percent_upper_bound",
+        "final_trilinear_fold_status",
         "rollback_byte_identical",
     )
     return [
@@ -1937,6 +2165,11 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
     )
     exact_inconclusive_gaps = sum(bool(row["exact_attempted"]) and _exact_checker_gap(row) for row in rows)
     rule_rows = _operator_rule_rows(rows)
+    primary = [row for row in rows if row["candidate_id"] == CONFIRMATION_SPEC["candidate_id"]]
+    baseline_dice = _distribution_summary(np.array([float(row["baseline_dice"]) for row in primary], dtype=np.float64))
+    baseline_sdlogj = _distribution_summary(
+        np.array([float(row["baseline_sdlogj"]) for row in primary], dtype=np.float64)
+    )
     if stage == "exploration":
         if not structural_pass:
             integrity_status = "FAIL"
@@ -1958,6 +2191,18 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
             "saved_fp32_exact_predicate_rejections": exact_predicate_rejections,
             "saved_fp32_exact_inconclusive_gaps": exact_inconclusive_gaps,
             "exact_checker_errors": exact_checker_errors,
+            "baseline_dice_mean": baseline_dice["mean"],
+            "baseline_dice_median": baseline_dice["median"],
+            "baseline_sdlogj_mean": baseline_sdlogj["mean"],
+            "baseline_sdlogj_median": baseline_sdlogj["median"],
+            "baseline_j_leq0_central_percent_max": max(
+                float(row["baseline_j_leq0_central_percent"]) for row in primary
+            ),
+            "baseline_j_leq0_digital10_percent_max": max(
+                float(row["baseline_j_leq0_digital10_percent"]) for row in primary
+            ),
+            "baseline_trilinear_fold_percent_upper_bound": 0.0,
+            "baseline_trilinear_fold_status": "ZERO_BY_EXACT_CERTIFICATE",
             "labels_used_for_transaction_decision": False,
             "labels_used_for_exploratory_evaluation": True,
             "test_split_accessed": False,
@@ -1965,7 +2210,6 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
         }
         return summary, rule_rows
 
-    primary = [row for row in rows if row["candidate_id"] == CONFIRMATION_SPEC["candidate_id"]]
     final_exact = all(row["final_exact_status"] == "CERTIFIED" for row in primary)
     rollback_exact = all(row["action"] != "ROLLBACK" or row["rollback_byte_identical"] is True for row in primary)
     integrity = (
@@ -1973,6 +2217,11 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
     )
     deltas = np.array([float(row["accepted_dice_delta"]) for row in primary], dtype=np.float64)
     signs = _sign_summary(deltas)
+    final_dice = _distribution_summary(np.array([float(row["final_dice"]) for row in primary], dtype=np.float64))
+    final_sdlogj = _distribution_summary(np.array([float(row["final_sdlogj"]) for row in primary], dtype=np.float64))
+    sdlogj_deltas = _distribution_summary(
+        np.array([float(row["accepted_sdlogj_delta"]) for row in primary], dtype=np.float64)
+    )
     promising = integrity and signs["mean"] > 0.0 and signs["median"] > 0.0 and signs["improved"] > signs["worsened"]
     summary = {
         "execution_integrity_status": "PASS" if integrity else "FAIL",
@@ -1986,6 +2235,10 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
         "all_rollbacks_byte_identical": rollback_exact,
         "candidate_exact_predicate_rejections": exact_predicate_rejections,
         "candidate_exact_inconclusive_gaps": exact_inconclusive_gaps,
+        "baseline_dice_mean": baseline_dice["mean"],
+        "baseline_dice_median": baseline_dice["median"],
+        "final_dice_mean": final_dice["mean"],
+        "final_dice_median": final_dice["median"],
         "primary_accepted_dice_delta_mean": signs["mean"],
         "primary_accepted_dice_delta_median": signs["median"],
         "primary_accepted_dice_delta_min": signs["min"],
@@ -1994,6 +2247,22 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
         "primary_worsened_cases": signs["worsened"],
         "primary_unchanged_cases": signs["unchanged"],
         "primary_mean_dice_delta_ci95": signs["mean_ci95"],
+        "baseline_sdlogj_mean": baseline_sdlogj["mean"],
+        "baseline_sdlogj_median": baseline_sdlogj["median"],
+        "final_sdlogj_mean": final_sdlogj["mean"],
+        "final_sdlogj_median": final_sdlogj["median"],
+        "accepted_sdlogj_delta_mean": sdlogj_deltas["mean"],
+        "accepted_sdlogj_delta_median": sdlogj_deltas["median"],
+        "final_j_leq0_central_percent_mean": float(
+            np.mean([float(row["final_j_leq0_central_percent"]) for row in primary])
+        ),
+        "final_j_leq0_central_percent_max": max(float(row["final_j_leq0_central_percent"]) for row in primary),
+        "final_j_leq0_digital10_percent_mean": float(
+            np.mean([float(row["final_j_leq0_digital10_percent"]) for row in primary])
+        ),
+        "final_j_leq0_digital10_percent_max": max(float(row["final_j_leq0_digital10_percent"]) for row in primary),
+        "final_trilinear_fold_percent_upper_bound": 0.0,
+        "final_trilinear_fold_status": "ZERO_BY_EXACT_CERTIFICATE",
         "promising_rule": "integrity PASS and mean>0 and median>0 and improved>worsened",
         "nonprimary_metrics_and_rules_are_diagnostic_only": True,
         "labels_used_for_transaction_decision": False,

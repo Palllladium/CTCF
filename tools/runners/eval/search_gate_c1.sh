@@ -53,6 +53,7 @@ GIT_STATUS_AT_START="$(git status --porcelain=v1)"
 if [[ -n "$GIT_STATUS_AT_START" ]]; then
   echo "[FAIL] Refusing to run from a dirty tree (tracked or untracked files):" >&2
   printf '%s\n' "$GIT_STATUS_AT_START" >&2
+  echo "[HINT] Redirect nohup output outside the repository, for example to /tmp/search_gate_c1.log." >&2
   exit 1
 fi
 
