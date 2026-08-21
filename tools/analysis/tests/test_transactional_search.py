@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,15 @@ from tools.analysis.run_search_gate_c1 import (
     _build_local_candidate,
     _deformation_quality_metrics,
     _operator_rule_rows,
+)
+from tools.analysis.run_search_gate_c2 import (
+    CLAIM_EPS as C2_CLAIM_EPS,
+    MARGIN_SCHEDULE,
+    TRAJECTORIES,
+    _row_without_labels,
+    _run_case as _run_c2_case,
+    _summary_rows,
+    _validate_case as _validate_c2_case,
 )
 from tools.analysis.transactional_search import (
     OFFSETS,
@@ -34,11 +44,166 @@ from tools.analysis.transactional_search import (
     psi_to_phi_displacement,
     sample_at_psi,
     save_flow_npz_atomic,
+    smooth_proposal,
     voxel_grid_like,
 )
 
 
 class TransactionalSearchTest(unittest.TestCase):
+    def test_proposal_smoothing_is_reusable_immutable_and_pass_counted(self) -> None:
+        generator = torch.Generator().manual_seed(101)
+        proposal = torch.randn((1, 3, 7, 8, 9), generator=generator)
+        snapshot = proposal.clone()
+        once = smooth_proposal(proposal, passes=1)
+        twice = smooth_proposal(proposal, passes=2)
+        manual_twice = smooth_proposal(once, passes=1)
+        torch.testing.assert_close(proposal, snapshot, atol=0, rtol=0)
+        torch.testing.assert_close(twice, manual_twice, atol=0, rtol=0)
+        self.assertFalse(torch.equal(once, twice))
+        for invalid in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                smooth_proposal(proposal, passes=invalid)  # type: ignore[arg-type]
+
+    def test_c2_policy_has_fixed_val58_trajectories_and_margins(self) -> None:
+        self.assertEqual(len(TRAJECTORIES), 4)
+        self.assertEqual(len({item["trajectory_id"] for item in TRAJECTORIES}), 4)
+        self.assertEqual(MARGIN_SCHEDULE, (0.0011, 0.001075, 0.00105, 0.001025))
+        self.assertTrue(all(value > C2_CLAIM_EPS for value in MARGIN_SCHEDULE))
+        self.assertEqual(sum(item["sdlogj_relative_cap"] is not None for item in TRAJECTORIES), 1)
+
+    def test_c2_decision_snapshot_excludes_only_postdecision_label_metrics(self) -> None:
+        row = {
+            "case_id": "subject_1",
+            "action": "ACCEPT",
+            "candidate_mind": 0.2,
+            "returned_array_sha256": "a" * 64,
+            "baseline_dice": 0.8,
+            "returned_dice": 0.81,
+            "returned_dice_delta": 0.01,
+            "returned_sdlogj": 0.1,
+            "returned_sdlogj_delta": 0.01,
+            "returned_j_leq0_central_percent": 0.0,
+            "returned_j_leq0_digital10_percent": 0.0,
+            "returned_trilinear_fold_percent_upper_bound": 0.0,
+        }
+        frozen = _row_without_labels(row)
+        self.assertEqual(frozen["candidate_mind"], 0.2)
+        self.assertEqual(frozen["returned_array_sha256"], "a" * 64)
+        self.assertNotIn("baseline_dice", frozen)
+        self.assertNotIn("returned_sdlogj", frozen)
+
+    def test_c2_gate_rejects_a_small_gain_even_when_better_than_c1(self) -> None:
+        c1_rows = [
+            {
+                "case_id": f"case_{index}",
+                "dice_delta": "0.0004",
+                "sdlogj_delta": "0.0003",
+                "final_digital10_percent": "0.002",
+            }
+            for index in range(58)
+        ]
+        branch_rows = []
+        for trajectory in TRAJECTORIES:
+            for index in range(58):
+                branch_rows.append(
+                    {
+                        "case_id": f"case_{index}",
+                        "trajectory_id": trajectory["trajectory_id"],
+                        "accepted_steps": 1,
+                        "final_exact_status": "CERTIFIED",
+                        "final_dice": 0.8008,
+                        "dice_delta": 0.0008,
+                        "paired_dice_advantage_vs_c1": 0.0004,
+                        "final_sdlogj": 0.1,
+                        "sdlogj_delta": 0.0002,
+                        "final_j_leq0_digital10_percent": 0.001,
+                    }
+                )
+        summaries, summary = _summary_rows(branch_rows, c1_rows)
+        self.assertTrue(all(not row["eligible_for_test_gate"] for row in summaries))
+        self.assertEqual(summary["scientific_status"], "C2_NOT_PROMISING")
+        self.assertIsNone(summary["selected_trajectory_id"])
+
+    def test_c2_compact_transaction_reconstructs_before_resume(self) -> None:
+        class Dataset:
+            def __getitem__(self, _: int):
+                generator = torch.Generator().manual_seed(4)
+                image = torch.randn((1, 11, 12, 13), generator=generator)
+                segmentation = torch.ones((1, 11, 12, 13), dtype=torch.long)
+                return image, image.clone(), segmentation, segmentation.clone()
+
+        class Adapter:
+            @staticmethod
+            def forward(model, moving, fixed, amp=True):
+                del model, fixed, amp
+                return torch.zeros((1, 3, *moving.shape[-3:]), dtype=moving.dtype)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "run"
+            source = Path(temporary) / "fixture.pkl"
+            source.write_bytes(b"fixture")
+            input_row = {
+                "dataset": "IXI",
+                "split": "val",
+                "case_id": "fixture",
+                "path": str(source),
+                "bytes": str(source.stat().st_size),
+                "sha256": sha256_file(source),
+                "mtime_utc": "fixture",
+            }
+            c1_row = {
+                "case_id": "fixture",
+                "final_dice": "1.0",
+                "sdlogj_delta": "0.0",
+                "final_digital10_percent": "0.0",
+            }
+            execution = {
+                "attempt_id": "fixture",
+                "shard_index": 0,
+                "physical_gpu": "0",
+                "host": "fixture",
+                "python": "fixture",
+                "torch": "fixture",
+                # The tensor computation is CPU-only; the string exercises the production provenance validator.
+                "device": "cuda:0",
+                "gpu_name": "fixture",
+                "seed": 0,
+                "deterministic": True,
+                "checkpoint_sha256": "a" * 64,
+                "checkpoint_load_report": {
+                    "strict": True,
+                    "missing_keys": [],
+                    "allowed_missing_buffers": [],
+                    "unexpected_keys": [],
+                },
+            }
+            rows = _run_c2_case(
+                index=0,
+                input_row=input_row,
+                c1_row=c1_row,
+                dataset=Dataset(),
+                adapter=Adapter(),
+                model=None,
+                device=torch.device("cpu"),
+                labels=(1,),
+                root=root,
+                contract_sha="b" * 64,
+                execution=execution,
+            )
+            marker = root / "cases" / "fixture" / "case_complete.json"
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            reconstructed = _validate_c2_case(
+                payload,
+                marker,
+                "fixture",
+                "b" * 64,
+                input_row,
+                c1_row=c1_row,
+            )
+            self.assertEqual(len(rows), 16)
+            self.assertEqual(reconstructed, rows)
+            self.assertFalse((marker.parent / "work").exists())
+
     def test_offset_order_and_coordinate_sign(self) -> None:
         self.assertEqual(len(OFFSETS), 27)
         self.assertEqual(ZERO_OFFSET_INDEX, 13)

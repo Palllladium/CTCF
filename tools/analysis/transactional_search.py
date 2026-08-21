@@ -504,17 +504,21 @@ def _candidate_cost(
     return cost, valid
 
 
-def _smooth_proposal(proposal: torch.Tensor) -> torch.Tensor:
+def smooth_proposal(proposal: torch.Tensor, *, passes: int = 1) -> torch.Tensor:
+    """Apply the fixed separable proposal kernel without mutating the input."""
     _require_field(proposal, "proposal")
+    if isinstance(passes, bool) or not isinstance(passes, int) or passes < 1:
+        raise ValueError("passes must be a positive integer")
     kernel = proposal.new_tensor([1.0, 2.0, 1.0]) / 4.0
     out = proposal
-    for axis in range(3):
-        shape = [1, 1, 1]
-        shape[axis] = 3
-        weight = kernel.view(1, 1, *shape).expand(3, 1, *shape)
-        padding = [0, 0, 0]
-        padding[axis] = 1
-        out = F.conv3d(out, weight, padding=tuple(padding), groups=3)
+    for _ in range(passes):
+        for axis in range(3):
+            shape = [1, 1, 1]
+            shape[axis] = 3
+            weight = kernel.view(1, 1, *shape).expand(3, 1, *shape)
+            padding = [0, 0, 0]
+            padding[axis] = 1
+            out = F.conv3d(out, weight, padding=tuple(padding), groups=3)
     return out
 
 
@@ -628,8 +632,8 @@ def build_proposal(
             # additive source-coordinate correction required by the ProposalResult contract.
             soft = -soft
             hard = -hard
-        soft = identity_collar(_smooth_proposal(soft), width=collar_width)
-        hard = identity_collar(_smooth_proposal(hard), width=collar_width)
+        soft = identity_collar(smooth_proposal(soft), width=collar_width)
+        hard = identity_collar(smooth_proposal(hard), width=collar_width)
 
     return ProposalResult(
         displacement=soft,
