@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import argparse
 import glob
-import hashlib
 import json
 import os
 import platform
-import subprocess
 import time
 from contextlib import suppress
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +15,7 @@ import numpy as np
 import torch
 
 from experiments.core.inference_metrics import metric_profile_for
-from experiments.core.inference_runtime import build_infer_dataset, load_checkpoint_state
-from experiments.core.model_adapters import get_model_adapter
+from experiments.core.inference_runtime import build_infer_dataset
 from experiments.core.path_profiles import get_dataset_paths
 from tools.analysis.run_artifacts import (
     atomic_write_json,
@@ -28,6 +24,22 @@ from tools.analysis.run_artifacts import (
     rows_to_tsv,
     sha256_file,
 )
+from tools.analysis.search_gate_common import (
+    CLAIM_EPS,
+    COLLAR_WIDTH,
+    IXI_DEVELOPMENT_CASES,
+    TIME_STEPS,
+    WORK_EPS,
+    build_model,
+    case_id_from_path,
+    dice_score,
+    git,
+    prepare_initial_state,
+    proposal_statistics,
+    salted_case_hash,
+    utc_now,
+)
+from tools.analysis.search_gate_runtime import dataset_rows
 from tools.analysis.transactional_search import (
     OFFSETS,
     ZERO_OFFSET_INDEX,
@@ -39,69 +51,16 @@ from tools.analysis.transactional_search import (
     masked_zscore,
     mind_distance_from_features,
     mind_ssc,
-    phi_to_psi_displacement,
-    sample_at_psi,
-    save_flow_npz_atomic,
     screen_candidates,
     utility_loss,
 )
-from utils import dice_per_label, setup_device
-from utils.cert_exact import certify_flow_exact
+from utils import setup_device
 from utils.field import (
-    boundary_nonzero_count,
-    boundary_vertex_mask,
-    digital_project,
-    enforce_identity_boundary,
-    identity_collar,
     trilinear_cert_bound,
-    trilinear_project,
 )
 
 PROTOCOL_ID = "CTCF-SEARCH-GATE-C0-V1"
-PROTOCOL_SALT = "CTCF-GATE-C0-V1|"
-CLAIM_EPS = 0.001
-WORK_EPS = 0.0011
-COLLAR_WIDTH = 4
-TIME_STEPS = 6
-IXI_DEVELOPMENT_CASES = (
-    "subject_344",
-    "subject_136",
-    "subject_165",
-    "subject_475",
-    "subject_131",
-    "subject_389",
-    "subject_485",
-    "subject_153",
-    "subject_252",
-    "subject_509",
-    "subject_126",
-    "subject_459",
-    "subject_222",
-    "subject_474",
-    "subject_144",
-    "subject_85",
-    "subject_248",
-    "subject_151",
-    "subject_295",
-)
 BRANCH_ORDER = ("mind_soft", "mind_hard", "intensity_soft", "mind_reversed")
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], text=True, encoding="utf-8").strip()
-
-
-def _case_id(path: str) -> str:
-    stem = Path(path).stem
-    return stem[2:] if stem.startswith("p_") else stem
-
-
-def _salted_case_hash(case_id: str) -> str:
-    return hashlib.sha256((PROTOCOL_SALT + case_id).encode("utf-8")).hexdigest()
 
 
 def _select_cases(stage: str, paths_profile: int) -> tuple[str, str, list[str], str | None]:
@@ -112,17 +71,17 @@ def _select_cases(stage: str, paths_profile: int) -> tuple[str, str, list[str], 
     all_files = sorted(glob.glob(os.path.join(root, "*.pkl")))
     if not all_files:
         raise FileNotFoundError(f"No {dataset}/{split} .pkl files found under {root}")
-    by_id = {_case_id(path): path for path in all_files}
+    by_id = {case_id_from_path(path): path for path in all_files}
 
     if stage == "smoke":
-        ranked = sorted((_salted_case_hash(case), case) for case in by_id)
+        ranked = sorted((salted_case_hash(case), case) for case in by_id)
         expected = "0456_0457"
         if len(ranked) != 19 or ranked[0][1] != expected:
             raise RuntimeError(f"OASIS smoke selection contract changed: n={len(ranked)}, minimum={ranked[0][1]}")
         selected_ids = [expected]
     else:
         missing = [case for case in IXI_DEVELOPMENT_CASES if case not in by_id]
-        ranked = [case for _, case in sorted((_salted_case_hash(case), case) for case in by_id)[:19]]
+        ranked = [case for _, case in sorted((salted_case_hash(case), case) for case in by_id)[:19]]
         if missing or tuple(ranked) != IXI_DEVELOPMENT_CASES:
             raise RuntimeError(f"IXI development selection contract changed: missing={missing}, ranked={ranked}")
         if len(by_id) != 58:
@@ -140,98 +99,6 @@ def _checkpoint_contract(stage: str, override: str | None) -> tuple[str, str]:
         default = "results/P10_LONGRUN_VXM_UNIFIED_SVF_IXI/ckpt/best.pth"
     checkpoint = str(Path(override or default))
     return checkpoint, "CTCF-CascadeA-VM-Unified"
-
-
-def _build_model(checkpoint: str, config: str, device: torch.device):
-    adapter = get_model_adapter("ctcf")
-    model = adapter.build(time_steps=TIME_STEPS, config_key=config, l3_svf=True).to(device)
-    load_report = load_checkpoint_state(model, checkpoint, strict=True)
-    model.eval()
-    return adapter, model, load_report
-
-
-def _dataset_manifest(files: list[str], dataset: str, split: str, atlas: str | None) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for path_string in files + ([atlas] if atlas else []):
-        assert path_string is not None
-        path = Path(path_string)
-        stat = path.stat()
-        rows.append(
-            {
-                "dataset": dataset,
-                "split": "atlas" if atlas and path_string == atlas else split,
-                "case_id": "atlas" if atlas and path_string == atlas else _case_id(path_string),
-                "path": str(path.resolve()),
-                "bytes": stat.st_size,
-                "sha256": sha256_file(path),
-                "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
-            }
-        )
-    return rows
-
-
-def _prepare_initial_state(flow: torch.Tensor, work_dir: Path) -> tuple[torch.Tensor, Path, dict[str, Any]]:
-    collared = identity_collar(flow.float(), width=COLLAR_WIDTH)
-    fixed_mask = boundary_vertex_mask(collared)
-    fixed_values = torch.zeros_like(collared)
-    digital, residual, digital_iterations = digital_project(
-        collared,
-        eps=0.0,
-        fixed_mask=fixed_mask,
-        fixed_values=fixed_values,
-    )
-    if residual != 0.0:
-        raise RuntimeError(f"Digital preconditioner failed closed: residual={residual}")
-    repaired, repair = trilinear_project(
-        digital,
-        eps=WORK_EPS,
-        fixed_mask=fixed_mask,
-        fixed_values=fixed_values,
-    )
-    phi = enforce_identity_boundary(repaired.float())
-    if not repair.certified or repair.cert_bound < WORK_EPS or boundary_nonzero_count(phi) != 0:
-        raise RuntimeError(f"Initial Phi repair failed closed: status={repair.status}, bound={repair.cert_bound}")
-
-    work_dir.mkdir(parents=True, exist_ok=True)
-    phi_path = work_dir / "initial_phi.npz"
-    save_flow_npz_atomic(phi_path, phi)
-    stored_phi = load_flow_npz(phi_path)
-    phi_exact = certify_flow_exact(stored_phi, eps=str(CLAIM_EPS))
-    if phi_exact["status"] != "CERTIFIED" or phi_exact["boundary_nonzero_count"] != 0:
-        raise RuntimeError(f"Stored initial Phi failed exact certification: {phi_exact['status']}")
-
-    psi = phi_to_psi_displacement(phi).float()
-    psi_path = work_dir / "initial_psi.npz"
-    save_flow_npz_atomic(psi_path, psi)
-    stored_psi = load_flow_npz(psi_path)
-    psi_exact = certify_flow_exact(stored_psi, eps=str(CLAIM_EPS))
-    if psi_exact["status"] != "CERTIFIED":
-        raise RuntimeError(f"Stored initial Psi failed exact certification: {psi_exact['status']}")
-    report = {
-        "digital_residual_percent": residual,
-        "digital_iterations": digital_iterations,
-        "trilinear_repair": asdict(repair),
-        "phi_npz_sha256": sha256_file(phi_path),
-        "phi_exact": phi_exact,
-        "psi_npz_sha256": sha256_file(psi_path),
-        "psi_exact": psi_exact,
-    }
-    return psi, psi_path, report
-
-
-def _dice(psi: torch.Tensor, moving_seg: torch.Tensor, fixed_seg: torch.Tensor, labels: tuple[int, ...]) -> float:
-    warped = sample_at_psi(moving_seg.float(), psi, mode="nearest").long()
-    return float(dice_per_label(warped, fixed_seg.long(), labels=labels).mean())
-
-
-def _proposal_statistics(proposal: ProposalResult, tensor: torch.Tensor, mask: torch.Tensor) -> dict[str, float]:
-    magnitude = tensor.square().sum(dim=1, keepdim=True).sqrt()
-    return {
-        "entropy_mean": float(proposal.entropy.masked_select(mask).double().mean().item()),
-        "confidence_mean": float(proposal.confidence.masked_select(mask).double().mean().item()),
-        "proposal_norm_mean": float(magnitude.masked_select(mask).double().mean().item()),
-        "proposal_norm_max": float(magnitude.masked_select(mask).max().item()),
-    }
 
 
 def _run_branch(
@@ -284,16 +151,16 @@ def _run_branch(
         action = "ACCEPT" if selected.coefficient == 1.0 else "BACKTRACK"
 
     # Labels are deliberately touched only after the utility/topology transaction has committed or rolled back.
-    baseline_dice = _dice(initial_psi, moving_seg, fixed_seg, labels)
-    ungated_dice = _dice(ungated, moving_seg, fixed_seg, labels)
-    final_dice = _dice(final_psi, moving_seg, fixed_seg, labels)
+    baseline_dice = dice_score(initial_psi, moving_seg, fixed_seg, labels)
+    ungated_dice = dice_score(ungated, moving_seg, fixed_seg, labels)
+    final_dice = dice_score(final_psi, moving_seg, fixed_seg, labels)
 
     report = {
         "branch": name,
         "feature": proposal_result.feature,
         "orientation": proposal_result.orientation,
         "decoder": "hard" if name == "mind_hard" else "soft",
-        **_proposal_statistics(proposal_result, proposal_tensor, mask),
+        **proposal_statistics(proposal_result, proposal_tensor, mask),
         "baseline_utility": baseline_utility,
         "baseline_dice": baseline_dice,
         "baseline_mind_distance": baseline_mind,
@@ -329,7 +196,7 @@ def _run_case(
     stage_dir: Path,
     keep_fields: bool,
 ) -> list[dict[str, Any]]:
-    case_id = _case_id(path)
+    case_id = case_id_from_path(path)
     case_dir = stage_dir / "cases" / case_id
     complete_marker = case_dir / "case_complete.json"
     if complete_marker.is_file():
@@ -345,7 +212,7 @@ def _run_case(
     x, y, x_seg, y_seg = [tensor.unsqueeze(0).to(device) for tensor in (x, y, x_seg, y_seg)]
     with torch.inference_mode():
         flow = adapter.forward(model, x, y, amp=True)
-    initial_psi, initial_path, initial_report = _prepare_initial_state(flow, case_dir / "work")
+    initial_psi, initial_path, initial_report = prepare_initial_state(flow, case_dir / "work")
     mask = geometry_mask(tuple(x.shape[-3:]), COLLAR_WIDTH, device)
 
     fixed_norm = masked_zscore(y, mask)
@@ -417,7 +284,7 @@ def _run_case(
         "case_id": case_id,
         "input_path": str(Path(path).resolve()),
         "input_bytes": Path(path).stat().st_size,
-        "selection_sha256": _salted_case_hash(case_id),
+        "selection_sha256": salted_case_hash(case_id),
         "initial": initial_report,
         "elapsed_sec": elapsed,
         "peak_gpu_bytes": peak_bytes,
@@ -475,8 +342,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    started_at = _utc_now()
-    head = _git("rev-parse", "HEAD")
+    started_at = utc_now()
+    head = git("rev-parse", "HEAD")
     stage_dir = args.run_root.resolve() / args.stage
     stage_dir.mkdir(parents=True, exist_ok=True)
     contract_path = stage_dir / "stage_contract.json"
@@ -493,8 +360,8 @@ def main() -> int:
         "git_head": head,
         "dataset": dataset_name,
         "split": split,
-        "case_ids": [_case_id(path) for path in files],
-        "selection_hashes": {_case_id(path): _salted_case_hash(_case_id(path)) for path in files},
+        "case_ids": [case_id_from_path(path) for path in files],
+        "selection_hashes": {case_id_from_path(path): salted_case_hash(case_id_from_path(path)) for path in files},
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "config": config,
@@ -522,23 +389,23 @@ def main() -> int:
     else:
         atomic_write_json(contract_path, contract)
 
-    dataset_rows = _dataset_manifest(files, dataset_name, split, atlas)
+    manifest_rows = dataset_rows(files, dataset_name, split, atlas)
     atomic_write_text(
         stage_dir / "datasets.csv",
-        rows_to_csv(["dataset", "split", "case_id", "path", "bytes", "sha256", "mtime_utc"], dataset_rows),
+        rows_to_csv(["dataset", "split", "case_id", "path", "bytes", "sha256", "mtime_utc"], manifest_rows),
     )
     atomic_write_text(
         stage_dir / "datasets.tsv",
-        rows_to_tsv(["dataset", "split", "case_id", "path", "bytes", "sha256", "mtime_utc"], dataset_rows),
+        rows_to_tsv(["dataset", "split", "case_id", "path", "bytes", "sha256", "mtime_utc"], manifest_rows),
     )
     device = setup_device(args.gpu, seed=args.seed, deterministic=True)
-    adapter, model, load_report = _build_model(str(checkpoint_path), config, device)
+    adapter, model, load_report = build_model(str(checkpoint_path), config, device)
     dataset = build_infer_dataset(dataset_name, files, atlas)
     labels = tuple(metric_profile_for(dataset_name).labels)
     all_rows: list[dict[str, Any]] = []
     try:
         for index, path in enumerate(files):
-            print(f"[{index + 1}/{len(files)}] {dataset_name} {_case_id(path)}", flush=True)
+            print(f"[{index + 1}/{len(files)}] {dataset_name} {case_id_from_path(path)}", flush=True)
             all_rows.extend(
                 _run_case(index, path, dataset, adapter, model, device, labels, stage_dir, args.keep_fields)
             )
@@ -550,7 +417,7 @@ def main() -> int:
                 "status": "FAILED",
                 "error_type": type(exc).__name__,
                 "error": str(exc),
-                "completed_at_utc": _utc_now(),
+                "completed_at_utc": utc_now(),
             },
         )
         raise
@@ -568,11 +435,11 @@ def main() -> int:
         "status": "COMPLETE",
         "stage": args.stage,
         "started_at_utc": started_at,
-        "completed_at_utc": _utc_now(),
+        "completed_at_utc": utc_now(),
         "code": {
             "git_head": head,
-            "branch": _git("branch", "--show-current"),
-            "git_status": _git("status", "--porcelain=v1"),
+            "branch": git("branch", "--show-current"),
+            "git_status": git("status", "--porcelain=v1"),
         },
         "execution": {
             "host": platform.node(),

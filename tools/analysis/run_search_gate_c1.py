@@ -3,19 +3,15 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
-import hashlib
 import json
 import math
 import os
 import platform
 import re
 import shutil
-import subprocess
-import tempfile
 import time
 from contextlib import suppress
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,14 +27,46 @@ from tools.analysis.run_artifacts import (
     rows_to_tsv,
     sha256_file,
 )
-from tools.analysis.run_search_gate_c0 import (
+from tools.analysis.search_gate_common import (
+    CLAIM_EPS,
+    COLLAR_WIDTH,
+    CONFIG_KEY,
+    DEFAULT_CHECKPOINT,
     IXI_DEVELOPMENT_CASES,
-    _build_model,
-    _case_id,
-    _dice,
-    _prepare_initial_state,
-    _proposal_statistics,
-    _salted_case_hash,
+    SHA256_RE,
+    SPLIT_PROTOCOL_ID,
+    TIME_STEPS,
+    UTILITY_RELATIVE_TOLERANCE,
+    WORK_EPS,
+    build_model,
+    candidate_metrics,
+    case_id_from_path,
+    deformation_quality_metrics,
+    dice_score,
+    distribution_summary,
+    git,
+    is_finite_number,
+    payload_sha256,
+    prepare_initial_state,
+    proposal_statistics,
+    relative_improvement,
+    require_finite,
+    salted_case_hash,
+    sign_summary,
+    sync,
+    text_sha256,
+    utc_now,
+)
+from tools.analysis.search_gate_runtime import (
+    atomic_copy,
+    attempt_dir as attempt_directory,
+    dataset_rows,
+    expected_shard_for_case,
+    parse_physical_gpus,
+    round_robin_shards,
+    save_reload_certify,
+    shard_gpu_map,
+    worker_marker_paths,
 )
 from tools.analysis.transactional_search import (
     OFFSETS,
@@ -54,31 +82,18 @@ from tools.analysis.transactional_search import (
     mind_ssc,
     ncc_loss_from_normalized,
     proposal_support_weights,
-    save_flow_npz_atomic,
 )
 from utils import setup_device
 from utils.cert_exact import certify_flow_exact
 from utils.field import (
     boundary_vertex_mask,
-    digital_fold_percent,
-    jacobian_nonpositive_percent,
-    logdet_std_from_flow,
     trilinear_cert_bound,
     trilinear_project,
 )
 
 PROTOCOL_ID = "CTCF-SEARCH-GATE-C1-V1"
-SPLIT_PROTOCOL_ID = "CTCF-GATE-C0-V1-SALTED-IXI-VAL-58"
-CLAIM_EPS = 0.001
-WORK_EPS = 0.0011
-COLLAR_WIDTH = 4
-TIME_STEPS = 6
-UTILITY_RELATIVE_TOLERANCE = 1e-6
 GLOBAL_COEFFICIENTS = tuple(2.0**-index for index in range(17))
 UTILITY_RULES = ("topology_only", "mind", "ncc9", "support_ncc9", "mind_and_ncc9")
-DEFAULT_CHECKPOINT = "results/P10_LONGRUN_VXM_UNIFIED_SVF_IXI/ckpt/best.pth"
-CONFIG_KEY = "CTCF-CascadeA-VM-Unified"
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 LOCAL_OPERATOR_SPECS: tuple[dict[str, Any], ...] = (
     {
@@ -165,65 +180,7 @@ CONFIRMATION_POLICY: dict[str, Any] = {
 }
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], text=True, encoding="utf-8").strip()
-
-
-def _text_sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _payload_sha256(payload: Any) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return _text_sha256(encoded)
-
-
-CONFIRMATION_POLICY_SHA256 = _payload_sha256(CONFIRMATION_POLICY)
-
-
-def _is_finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float, np.integer, np.floating))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
-
-
-def _require_finite(values: dict[str, Any], label: str) -> None:
-    invalid = sorted(key for key, value in values.items() if not _is_finite_number(value))
-    if invalid:
-        raise RuntimeError(f"{label} contains non-finite or non-numeric values: {invalid}")
-
-
-def _sync(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
-def _deformation_quality_metrics(field: torch.Tensor, *, exact_certified: bool) -> dict[str, Any]:
-    """Report paper-facing geometry without conflating a sampled count with the exact certificate."""
-    metrics: dict[str, Any] = {
-        "sdlogj": float(logdet_std_from_flow(field)),
-        "j_leq0_central_percent": float(jacobian_nonpositive_percent(field, crop=1)),
-        "j_leq0_digital10_percent": float(digital_fold_percent(field).item()),
-        "trilinear_fold_percent_upper_bound": 0.0 if exact_certified else None,
-        "trilinear_fold_status": "ZERO_BY_EXACT_CERTIFICATE" if exact_certified else "NOT_ESTABLISHED",
-    }
-    _require_finite(
-        {
-            key: value
-            for key, value in metrics.items()
-            if key not in {"trilinear_fold_percent_upper_bound", "trilinear_fold_status"}
-        },
-        "deformation quality metrics",
-    )
-    if any(float(metrics[key]) < 0.0 for key in ("sdlogj", "j_leq0_central_percent", "j_leq0_digital10_percent")):
-        raise RuntimeError("Deformation quality metrics must be non-negative")
-    return metrics
+CONFIRMATION_POLICY_SHA256 = payload_sha256(CONFIRMATION_POLICY)
 
 
 def _select_cases(stage: str, paths_profile: int) -> tuple[list[str], str, list[str]]:
@@ -235,13 +192,13 @@ def _select_cases(stage: str, paths_profile: int) -> tuple[list[str], str, list[
     files = sorted(glob.glob(os.path.join(root, "*.pkl")))
     if not files:
         raise FileNotFoundError(f"No IXI/val .pkl files found under {root}")
-    by_id = {_case_id(path): path for path in files}
+    by_id = {case_id_from_path(path): path for path in files}
     if len(files) != len(by_id):
         raise RuntimeError("IXI validation contains duplicate case identifiers")
     if len(by_id) != 58:
         raise RuntimeError(f"C1 requires exactly 58 IXI validation cases, found {len(by_id)}")
 
-    ranked_ids = [case_id for _, case_id in sorted((_salted_case_hash(case_id), case_id) for case_id in by_id)]
+    ranked_ids = [case_id for _, case_id in sorted((salted_case_hash(case_id), case_id) for case_id in by_id)]
     if tuple(ranked_ids[:19]) != IXI_DEVELOPMENT_CASES:
         raise RuntimeError("IXI validation split contract changed: the first 19 salted cases no longer match Gate C0")
     selected_ids = ranked_ids[:19] if stage == "exploration" else ranked_ids[19:]
@@ -336,25 +293,6 @@ def _validate_exploration_manifest(path_value: str, expected_sha256: str) -> dic
     }
 
 
-def _dataset_rows(files: list[str], atlas: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for path_value in [*files, atlas]:
-        path = Path(path_value).resolve()
-        stat = path.stat()
-        rows.append(
-            {
-                "dataset": "IXI",
-                "split": "atlas" if path_value == atlas else "val",
-                "case_id": "atlas" if path_value == atlas else _case_id(path_value),
-                "path": str(path),
-                "bytes": stat.st_size,
-                "sha256": sha256_file(path),
-                "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
-            }
-        )
-    return rows
-
-
 def _stage_dir(run_root: Path, stage: str) -> Path:
     return run_root.resolve() / stage
 
@@ -418,20 +356,18 @@ def _verify_observed_file(row: dict[str, str]) -> None:
 def prepare_stage(args: argparse.Namespace) -> int:
     if args.num_shards < 1:
         raise ValueError("--num-shards must be >= 1")
-    physical_gpus = [value.strip() for value in args.physical_gpus.split(",")]
-    if (
-        len(physical_gpus) != args.num_shards
-        or any(not value.isdigit() for value in physical_gpus)
-        or len(set(physical_gpus)) != len(physical_gpus)
-    ):
-        raise ValueError("--physical-gpus must list one unique non-negative integer per shard")
+    physical_gpus = parse_physical_gpus(
+        args.physical_gpus,
+        args.num_shards,
+        "--physical-gpus must list one unique non-negative integer per shard",
+    )
     if args.stage == "exploration" and (args.explore_manifest or args.explore_manifest_sha256):
         raise ValueError("Exploration must not depend on a prior exploration manifest")
     if args.stage == "confirmation" and not (args.explore_manifest and args.explore_manifest_sha256):
         raise ValueError("Confirmation requires --explore-manifest and --explore-manifest-sha256")
 
-    head = _git("rev-parse", "HEAD")
-    git_status = _git("status", "--porcelain=v1")
+    head = git("rev-parse", "HEAD")
+    git_status = git("status", "--porcelain=v1")
     if git_status:
         raise RuntimeError("C1 prepare refuses a dirty Git tree")
     checkpoint = Path(args.checkpoint or DEFAULT_CHECKPOINT).resolve()
@@ -439,13 +375,13 @@ def prepare_stage(args: argparse.Namespace) -> int:
         raise FileNotFoundError(checkpoint)
     checkpoint_sha256 = sha256_file(checkpoint)
     files, atlas, universe_files = _select_cases(args.stage, args.paths_profile)
-    rows = _dataset_rows(files, atlas)
-    universe_rows = _dataset_rows(universe_files, atlas)
+    rows = dataset_rows(files, "IXI", "val", atlas)
+    universe_rows = dataset_rows(universe_files, "IXI", "val", atlas)
     fields = ["dataset", "split", "case_id", "path", "bytes", "sha256", "mtime_utc"]
     csv_text = rows_to_csv(fields, rows)
     tsv_text = rows_to_tsv(fields, rows)
     universe_csv_text = rows_to_csv(fields, universe_rows)
-    universe_sha256 = _text_sha256(universe_csv_text)
+    universe_sha256 = text_sha256(universe_csv_text)
     exploration_freeze = (
         _validate_exploration_manifest(args.explore_manifest, args.explore_manifest_sha256)
         if args.stage == "confirmation"
@@ -468,7 +404,7 @@ def prepare_stage(args: argparse.Namespace) -> int:
             "Confirmation checkpoint, seed, paths profile, time_steps, atlas, or validation-58 universe "
             "differs from exploration"
         )
-    case_ids = [_case_id(path) for path in files]
+    case_ids = [case_id_from_path(path) for path in files]
     if args.num_shards > len(case_ids):
         raise ValueError(f"--num-shards={args.num_shards} exceeds the {len(case_ids)} selected cases")
     local_specs = [dict(spec) for spec in LOCAL_OPERATOR_SPECS]
@@ -489,7 +425,7 @@ def prepare_stage(args: argparse.Namespace) -> int:
         "atlas_input": {
             key: next(row for row in rows if row["split"] == "atlas")[key] for key in ("path", "bytes", "sha256")
         },
-        "selection_hashes": {case_id: _salted_case_hash(case_id) for case_id in case_ids},
+        "selection_hashes": {case_id: salted_case_hash(case_id) for case_id in case_ids},
         "selection_rule": (
             "first 19 by C0 salted SHA-256 rank"
             if args.stage == "exploration"
@@ -497,10 +433,10 @@ def prepare_stage(args: argparse.Namespace) -> int:
         ),
         "ixi_test_split_accessed": False,
         "atlas_path": str(Path(atlas).resolve()),
-        "datasets_csv_sha256": _text_sha256(csv_text),
-        "datasets_tsv_sha256": _text_sha256(tsv_text),
+        "datasets_csv_sha256": text_sha256(csv_text),
+        "datasets_tsv_sha256": text_sha256(tsv_text),
         "validation_universe_sha256": universe_sha256,
-        "validation_universe_case_ids": [_case_id(path) for path in universe_files],
+        "validation_universe_case_ids": [case_id_from_path(path) for path in universe_files],
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
         "config": CONFIG_KEY,
@@ -532,11 +468,8 @@ def prepare_stage(args: argparse.Namespace) -> int:
         "labels_used_for_final_gate_assessment": args.stage == "confirmation",
         "num_shards": args.num_shards,
         "physical_gpus": physical_gpus,
-        "shard_to_physical_gpu": {str(index): value for index, value in enumerate(physical_gpus)},
-        "shards": {
-            str(index): [case_id for position, case_id in enumerate(case_ids) if position % args.num_shards == index]
-            for index in range(args.num_shards)
-        },
+        "shard_to_physical_gpu": shard_gpu_map(physical_gpus),
+        "shards": round_robin_shards(case_ids, args.num_shards),
         "paths_profile": args.paths_profile,
         "seed": args.seed,
         "keep_fields": args.keep_fields,
@@ -585,20 +518,12 @@ def prepare_stage(args: argparse.Namespace) -> int:
                 "schema": "ctcf-search-c1-stage-prepare-v1",
                 "status": "PREPARED",
                 "stage": args.stage,
-                "prepared_at_utc": _utc_now(),
+                "prepared_at_utc": utc_now(),
                 "contract_sha256": contract_sha,
             },
         )
     print(json.dumps({"stage": args.stage, "contract_sha256": contract_sha, "n_cases": len(case_ids)}))
     return 0
-
-
-def _relative_improvement(baseline: float, candidate: float) -> tuple[float | None, float, bool]:
-    tolerance = UTILITY_RELATIVE_TOLERANCE * max(abs(baseline), np.finfo(np.float64).tiny)
-    if not (math.isfinite(baseline) and math.isfinite(candidate)):
-        return None, tolerance, False
-    improvement = baseline - candidate
-    return improvement, tolerance, improvement >= tolerance
 
 
 def _compact_exact_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -627,9 +552,7 @@ def _materialize_for_exact_check(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     report: dict[str, Any]
     try:
-        save_flow_npz_atomic(path, candidate.float())
-        stored = load_flow_npz(path)
-        exact = certify_flow_exact(stored, eps=str(CLAIM_EPS))
+        stored, exact = save_reload_certify(candidate, path, CLAIM_EPS)
         report = {
             "exact_attempted": True,
             "exact_status": exact.get("status"),
@@ -657,32 +580,6 @@ def _materialize_for_exact_check(
         with suppress(FileNotFoundError):
             path.unlink()
     return materialized, report
-
-
-def _candidate_metrics(
-    candidate: torch.Tensor,
-    fixed_norm: torch.Tensor,
-    moving_norm: torch.Tensor,
-    fixed_mind: torch.Tensor,
-    moving_mind: torch.Tensor,
-    mask: torch.Tensor,
-    support_weights: torch.Tensor,
-) -> dict[str, float]:
-    metrics = {
-        "ncc9": ncc_loss_from_normalized(fixed_norm, moving_norm, candidate, mask, win=9),
-        "ncc7": ncc_loss_from_normalized(fixed_norm, moving_norm, candidate, mask, win=7),
-        "support_ncc9": ncc_loss_from_normalized(
-            fixed_norm,
-            moving_norm,
-            candidate,
-            mask,
-            win=9,
-            weights=support_weights,
-        ),
-        "mind": mind_distance_from_features(fixed_mind, moving_mind, candidate, mask),
-    }
-    _require_finite(metrics, "candidate utility metrics")
-    return metrics
 
 
 def _evaluate_candidate(
@@ -714,7 +611,7 @@ def _evaluate_candidate(
     device: torch.device,
     retain_materialized: bool,
 ) -> tuple[dict[str, Any], torch.Tensor, Path | None]:
-    _sync(device)
+    sync(device)
     started = time.perf_counter()
     fast_bound = trilinear_cert_bound(candidate, eps=CLAIM_EPS)
     if not math.isfinite(fast_bound):
@@ -736,7 +633,7 @@ def _evaluate_candidate(
             "exact_error_type": None,
             "exact_error": None,
         }
-    candidate_metrics = _candidate_metrics(
+    utility = candidate_metrics(
         evaluated,
         fixed_norm,
         moving_norm,
@@ -746,14 +643,14 @@ def _evaluate_candidate(
         support_weights,
     )
     metric_baselines = {**baseline_metrics, "support_ncc9": baseline_support_ncc9}
-    _require_finite(metric_baselines, "baseline utility metrics")
+    require_finite(metric_baselines, "baseline utility metrics")
     decisions: dict[str, Any] = {}
     for metric in ("mind", "ncc9", "ncc7", "support_ncc9"):
-        improvement, tolerance, passed = _relative_improvement(metric_baselines[metric], candidate_metrics[metric])
+        improvement, tolerance, passed = relative_improvement(metric_baselines[metric], utility[metric])
         decisions[f"{metric}_improvement"] = improvement
         decisions[f"{metric}_tolerance"] = tolerance
         decisions[f"{metric}_improved"] = passed
-    _require_finite(
+    require_finite(
         {key: value for key, value in decisions.items() if key.endswith(("_improvement", "_tolerance"))},
         "utility decision scalars",
     )
@@ -767,8 +664,8 @@ def _evaluate_candidate(
         "mind_and_ncc9": topology_safe and decisions["mind_improved"] and decisions["ncc9_improved"],
     }
     field_stats = field_change_statistics(initial_psi, requested_delta, evaluated, mask)
-    _require_finite(field_stats, "field-change statistics")
-    _require_finite(
+    require_finite(field_stats, "field-change statistics")
+    require_finite(
         {
             key: value
             for key, value in operator_report.items()
@@ -776,7 +673,7 @@ def _evaluate_candidate(
         },
         "operator report scalars",
     )
-    _sync(device)
+    sync(device)
     elapsed = time.perf_counter() - started
     row: dict[str, Any] = {
         "stage": stage,
@@ -801,7 +698,7 @@ def _evaluate_candidate(
         **{f"field_{key}": value for key, value in field_stats.items()},
         **{f"operator_{key}": value for key, value in operator_report.items() if key != "status"},
         **{f"baseline_{key}": value for key, value in metric_baselines.items()},
-        **{f"candidate_{key}": value for key, value in candidate_metrics.items()},
+        **{f"candidate_{key}": value for key, value in utility.items()},
         **decisions,
         **{f"rule_{key}": value for key, value in rules.items()},
         **{key: value for key, value in exact.items() if key != "exact_report"},
@@ -987,18 +884,6 @@ def _proposal_for_spec(
     return mind_target
 
 
-def _atomic_copy(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.rollback.", dir=destination.parent)
-    os.close(fd)
-    try:
-        shutil.copyfile(source, temporary)
-        os.replace(temporary, destination)
-    finally:
-        with suppress(FileNotFoundError):
-            os.unlink(temporary)
-
-
 POST_DECISION_EVALUATION_FIELDS = {
     "baseline_dice",
     "candidate_dice",
@@ -1114,7 +999,7 @@ def _run_case(
     execution: dict[str, Any],
     input_sha256: str,
 ) -> list[dict[str, Any]]:
-    case_id = _case_id(path)
+    case_id = case_id_from_path(path)
     case_dir = stage_dir / "cases" / case_id
     complete_marker = case_dir / "case_complete.json"
     if complete_marker.is_file():
@@ -1126,7 +1011,7 @@ def _run_case(
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    _sync(device)
+    sync(device)
     started = time.perf_counter()
     x_cpu, y_cpu, x_seg_cpu, y_seg_cpu = dataset[index]
     x = x_cpu.unsqueeze(0).to(device)
@@ -1134,7 +1019,7 @@ def _run_case(
     with torch.inference_mode():
         flow = adapter.forward(model, x, y, amp=True)
     work_dir = case_dir / "work"
-    initial_psi, initial_path, initial_report = _prepare_initial_state(flow, work_dir)
+    initial_psi, initial_path, initial_report = prepare_initial_state(flow, work_dir)
     mask = geometry_mask(tuple(x.shape[-3:]), COLLAR_WIDTH, device)
     fixed_norm = masked_zscore(y, mask)
     moving_norm = masked_zscore(x, mask)
@@ -1177,10 +1062,10 @@ def _run_case(
         proposal_results["intensity_target"] = intensity_target
         proposal_results["mind_reversed"] = mind_reversed
     proposal_stats = {
-        key: _proposal_statistics(value, value.displacement, mask) for key, value in proposal_results.items()
+        key: proposal_statistics(value, value.displacement, mask) for key, value in proposal_results.items()
     }
     for name, statistics in proposal_stats.items():
-        _require_finite(statistics, f"{case_id} proposal statistics {name}")
+        require_finite(statistics, f"{case_id} proposal statistics {name}")
     baseline_metrics = {
         "ncc9": ncc_loss_from_normalized(fixed_norm, moving_norm, initial_psi, mask, win=9),
         "ncc7": ncc_loss_from_normalized(fixed_norm, moving_norm, initial_psi, mask, win=7),
@@ -1198,8 +1083,8 @@ def _run_case(
         )
         for key, weights in supports.items()
     }
-    _require_finite(baseline_metrics, f"{case_id} baseline utility metrics")
-    _require_finite(baseline_support, f"{case_id} support-weighted baseline metrics")
+    require_finite(baseline_metrics, f"{case_id} baseline utility metrics")
+    require_finite(baseline_support, f"{case_id} support-weighted baseline metrics")
 
     rows: list[dict[str, Any]] = []
     evaluated_fields: list[torch.Tensor | None] = []
@@ -1372,7 +1257,7 @@ def _run_case(
             row["action"] = "ACCEPT"
             row["rollback_byte_identical"] = False
         else:
-            _atomic_copy(initial_path, final_path)
+            atomic_copy(initial_path, final_path)
             if confirmation_exact_path is not None:
                 with suppress(FileNotFoundError):
                     confirmation_exact_path.unlink()
@@ -1401,21 +1286,21 @@ def _run_case(
     )
     moving_seg = x_seg_cpu.unsqueeze(0).to(device)
     fixed_seg = y_seg_cpu.unsqueeze(0).to(device)
-    baseline_dice = _dice(initial_psi, moving_seg, fixed_seg, labels)
-    if not _is_finite_number(baseline_dice):
+    baseline_dice = dice_score(initial_psi, moving_seg, fixed_seg, labels)
+    if not is_finite_number(baseline_dice):
         raise RuntimeError(f"Non-finite baseline Dice for {case_id}")
-    baseline_geometry = _deformation_quality_metrics(initial_psi, exact_certified=True)
+    baseline_geometry = deformation_quality_metrics(initial_psi, exact_certified=True)
     for row, candidate_field in zip(rows, evaluated_fields, strict=True):
         row["baseline_dice"] = baseline_dice
         for key, value in baseline_geometry.items():
             row[f"baseline_{key}"] = value
         if candidate_field is not None:
-            candidate_dice = _dice(candidate_field, moving_seg, fixed_seg, labels)
-            if not _is_finite_number(candidate_dice):
+            candidate_dice = dice_score(candidate_field, moving_seg, fixed_seg, labels)
+            if not is_finite_number(candidate_dice):
                 raise RuntimeError(f"Non-finite candidate Dice for {case_id}/{row['candidate_id']}")
             row["candidate_dice"] = candidate_dice
             row["candidate_dice_delta"] = candidate_dice - baseline_dice
-            candidate_geometry = _deformation_quality_metrics(
+            candidate_geometry = deformation_quality_metrics(
                 candidate_field,
                 exact_certified=bool(row["exact_certified"]),
             )
@@ -1423,17 +1308,17 @@ def _run_case(
                 row[f"candidate_{key}"] = value
             row["candidate_sdlogj_delta"] = candidate_geometry["sdlogj"] - baseline_geometry["sdlogj"]
     if stage == "confirmation":
-        final_dice = _dice(final_field, moving_seg, fixed_seg, labels)
-        if not _is_finite_number(final_dice):
+        final_dice = dice_score(final_field, moving_seg, fixed_seg, labels)
+        if not is_finite_number(final_dice):
             raise RuntimeError(f"Non-finite final Dice for {case_id}")
         rows[0]["final_dice"] = final_dice
         rows[0]["accepted_dice_delta"] = final_dice - baseline_dice
-        final_geometry = _deformation_quality_metrics(final_field, exact_certified=True)
+        final_geometry = deformation_quality_metrics(final_field, exact_certified=True)
         for key, value in final_geometry.items():
             rows[0][f"final_{key}"] = value
         rows[0]["accepted_sdlogj_delta"] = final_geometry["sdlogj"] - baseline_geometry["sdlogj"]
 
-    _sync(device)
+    sync(device)
     elapsed = time.perf_counter() - started
     peak_bytes = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
     case_report = {
@@ -1446,7 +1331,7 @@ def _run_case(
         "input_path": str(Path(path).resolve()),
         "input_bytes": Path(path).stat().st_size,
         "input_sha256": input_sha256,
-        "selection_sha256": _salted_case_hash(case_id),
+        "selection_sha256": salted_case_hash(case_id),
         "initial": initial_report,
         "proposal_statistics": proposal_stats,
         "decision_snapshot": decision_snapshot,
@@ -1558,7 +1443,7 @@ def _valid_deformation_quality(row: dict[str, Any], prefix: str, *, exact_certif
         row.get(f"{prefix}_j_leq0_central_percent"),
         row.get(f"{prefix}_j_leq0_digital10_percent"),
     )
-    if any(not _is_finite_number(value) or float(value) < 0.0 for value in numeric):
+    if any(not is_finite_number(value) or float(value) < 0.0 for value in numeric):
         return False
     expected_status = "ZERO_BY_EXACT_CERTIFICATE" if exact_certified else "NOT_ESTABLISHED"
     expected_upper_bound = 0.0 if exact_certified else None
@@ -1572,7 +1457,7 @@ def _valid_row_decisions(row: dict[str, Any]) -> bool:
     if row.get("operator_status") == "ERROR":
         return all(row.get(f"rule_{rule}") is False for rule in UTILITY_RULES)
     fast_bound = row.get("fast_cert_bound")
-    if not _is_finite_number(fast_bound):
+    if not is_finite_number(fast_bound):
         return False
     fast_passed = float(fast_bound) >= CLAIM_EPS
     if row.get("fast_certificate_passed") is not fast_passed or row.get("exact_attempted") is not fast_passed:
@@ -1600,7 +1485,7 @@ def _valid_row_decisions(row: dict[str, Any]) -> bool:
 
     improved: dict[str, bool] = {}
     for metric in ("mind", "ncc9", "ncc7", "support_ncc9"):
-        expected_improvement, expected_tolerance, expected_passed = _relative_improvement(
+        expected_improvement, expected_tolerance, expected_passed = relative_improvement(
             float(row[f"baseline_{metric}"]),
             float(row[f"candidate_{metric}"]),
         )
@@ -1643,12 +1528,12 @@ def _validate_case_payload(
         or [row.get("candidate_id") for row in rows] != expected_ids
         or any(row.get("stage") != stage or row.get("case_id") != case_id for row in rows)
         or any(row.get("labels_used_for_transaction_decision") is not False for row in rows)
-        or any(not _is_finite_number(row.get("baseline_dice")) for row in rows)
+        or any(not is_finite_number(row.get("baseline_dice")) for row in rows)
         or any(not _valid_deformation_quality(row, "baseline", exact_certified=True) for row in rows)
         or any(
             row.get("operator_status") != "ERROR"
             and (
-                any(not _is_finite_number(value) for value in _required_row_scalars(row).values())
+                any(not is_finite_number(value) for value in _required_row_scalars(row).values())
                 or not _valid_deformation_quality(
                     row,
                     "candidate",
@@ -1668,14 +1553,14 @@ def _validate_case_payload(
         or not SHA256_RE.fullmatch(str(initial.get("psi_npz_sha256", "")))
         or not SHA256_RE.fullmatch(str(phi_exact.get("sha256", "")))
         or not SHA256_RE.fullmatch(str(psi_exact.get("sha256", "")))
-        or not _is_finite_number(payload.get("elapsed_sec"))
-        or not _is_finite_number(payload.get("peak_gpu_bytes"))
+        or not is_finite_number(payload.get("elapsed_sec"))
+        or not is_finite_number(payload.get("peak_gpu_bytes"))
     ):
         raise RuntimeError(f"Invalid C1 case marker: {marker_path}")
     for name, statistics in (payload.get("proposal_statistics") or {}).items():
         if not isinstance(statistics, dict):
             raise RuntimeError(f"Invalid proposal statistics for {name}: {marker_path}")
-        _require_finite(statistics, f"proposal statistics {name}")
+        require_finite(statistics, f"proposal statistics {name}")
     execution = payload.get("execution") or {}
     case_load = execution.get("checkpoint_load_report") or {}
     if (
@@ -1701,9 +1586,7 @@ def _validate_case_payload(
         execution["attempt_id"],
     )
     if contract is not None:
-        expected_shard = next(
-            index for index in range(contract["num_shards"]) if case_id in contract["shards"][str(index)]
-        )
+        expected_shard = expected_shard_for_case(contract, case_id)
         if (
             execution.get("shard_index") != expected_shard
             or execution.get("physical_gpu") != contract["shard_to_physical_gpu"][str(expected_shard)]
@@ -1721,9 +1604,9 @@ def _validate_case_payload(
         if (
             row.get("final_exact_status") != "CERTIFIED"
             or row.get("action") not in {"ACCEPT", "ROLLBACK"}
-            or not _is_finite_number(row.get("final_dice"))
-            or not _is_finite_number(row.get("accepted_dice_delta"))
-            or not _is_finite_number(row.get("accepted_sdlogj_delta"))
+            or not is_finite_number(row.get("final_dice"))
+            or not is_finite_number(row.get("accepted_dice_delta"))
+            or not is_finite_number(row.get("accepted_sdlogj_delta"))
             or not _valid_deformation_quality(row, "final", exact_certified=True)
             or (
                 row.get("action") == "ACCEPT"
@@ -1809,7 +1692,7 @@ def worker_stage(args: argparse.Namespace) -> int:
         raise ValueError("--attempt-id contains unsupported characters")
     if args.physical_gpu != contract["shard_to_physical_gpu"][str(args.shard_index)]:
         raise RuntimeError("Worker physical GPU differs from the frozen shard mapping")
-    if _git("rev-parse", "HEAD") != contract["git_head"] or _git("status", "--porcelain=v1"):
+    if git("rev-parse", "HEAD") != contract["git_head"] or git("status", "--porcelain=v1"):
         raise RuntimeError("Worker code provenance differs from the clean prepared contract")
 
     rows = _read_dataset_rows(stage_dir, contract)
@@ -1823,10 +1706,9 @@ def worker_stage(args: argparse.Namespace) -> int:
     if sha256_file(checkpoint) != contract["checkpoint_sha256"]:
         raise RuntimeError("Checkpoint SHA-256 differs from the frozen C1 contract")
 
-    started_at = _utc_now()
-    attempt_dir = stage_dir / "workers" / "attempts" / args.attempt_id
-    worker_marker = attempt_dir / f"worker_{args.shard_index:02d}.json"
-    failure_marker = attempt_dir / f"worker_{args.shard_index:02d}_failure.json"
+    started_at = utc_now()
+    attempt_dir = attempt_directory(stage_dir, args.attempt_id)
+    worker_marker, failure_marker = worker_marker_paths(stage_dir, args.attempt_id, args.shard_index)
     if worker_marker.exists() or failure_marker.exists():
         raise RuntimeError(f"Attempt output already exists; use a new --attempt-id: {attempt_dir}")
 
@@ -1858,7 +1740,7 @@ def worker_stage(args: argparse.Namespace) -> int:
             device = setup_device(args.gpu, seed=contract["seed"], deterministic=True)
             if device.type != "cuda":
                 raise RuntimeError("C1 worker requires an explicitly assigned CUDA device")
-            adapter, model, load_report = _build_model(str(checkpoint), contract["config"], device)
+            adapter, model, load_report = build_model(str(checkpoint), contract["config"], device)
             files = [row["path"] for row in pending_rows]
             dataset = build_infer_dataset("IXI", files, atlas_row["path"])
             labels = tuple(metric_profile_for("IXI").labels)
@@ -1914,7 +1796,7 @@ def worker_stage(args: argparse.Namespace) -> int:
             "reused_case_ids": reused_ids,
             "contract_sha256": contract_sha,
             "started_at_utc": started_at,
-            "completed_at_utc": _utc_now(),
+            "completed_at_utc": utc_now(),
             "execution": {
                 "host": platform.node(),
                 "python": platform.python_version(),
@@ -1950,7 +1832,7 @@ def worker_stage(args: argparse.Namespace) -> int:
                 "started_at_utc": started_at,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
-                "completed_at_utc": _utc_now(),
+                "completed_at_utc": utc_now(),
                 "execution": {
                     "host": platform.node(),
                     "python": platform.python_version(),
@@ -1964,47 +1846,6 @@ def worker_stage(args: argparse.Namespace) -> int:
         )
         raise
     return 0
-
-
-def _bootstrap_ci(values: np.ndarray) -> dict[str, Any]:
-    if values.size == 0:
-        return {"method": "not_available", "low": None, "high": None, "replicates": 0, "seed": 0}
-    generator = np.random.default_rng(0)
-    samples = generator.choice(values, size=(10_000, values.size), replace=True).mean(axis=1)
-    low, high = np.quantile(samples, (0.025, 0.975))
-    return {
-        "method": "case-bootstrap percentile CI for the mean; diagnostic only",
-        "low": float(low),
-        "high": float(high),
-        "replicates": 10_000,
-        "seed": 0,
-    }
-
-
-def _sign_summary(values: np.ndarray) -> dict[str, Any]:
-    if values.size == 0 or not np.isfinite(values).all():
-        raise RuntimeError("Sign summary requires a non-empty finite vector")
-    return {
-        "mean": float(values.mean()),
-        "median": float(np.median(values)),
-        "min": float(values.min()),
-        "max": float(values.max()),
-        "improved": int((values > 0.0).sum()),
-        "worsened": int((values < 0.0).sum()),
-        "unchanged": int((values == 0.0).sum()),
-        "mean_ci95": _bootstrap_ci(values),
-    }
-
-
-def _distribution_summary(values: np.ndarray) -> dict[str, float]:
-    if values.size == 0 or not np.isfinite(values).all():
-        raise RuntimeError("Distribution summary requires a non-empty finite vector")
-    return {
-        "mean": float(values.mean()),
-        "median": float(np.median(values)),
-        "min": float(values.min()),
-        "max": float(values.max()),
-    }
 
 
 def _operator_rule_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2064,10 +1905,10 @@ def _operator_rule_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 ],
                 dtype=np.float64,
             )
-            signs = _sign_summary(effective)
-            dice_absolute = _distribution_summary(returned_dice)
-            sdlogj_absolute = _distribution_summary(returned_sdlogj)
-            sdlogj_delta = _distribution_summary(returned_sdlogj_delta)
+            signs = sign_summary(effective)
+            dice_absolute = distribution_summary(returned_dice)
+            sdlogj_absolute = distribution_summary(returned_sdlogj)
+            sdlogj_delta = distribution_summary(returned_sdlogj_delta)
             result.append(
                 {
                     "candidate_id": candidate_id,
@@ -2166,8 +2007,8 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
     exact_inconclusive_gaps = sum(bool(row["exact_attempted"]) and _exact_checker_gap(row) for row in rows)
     rule_rows = _operator_rule_rows(rows)
     primary = [row for row in rows if row["candidate_id"] == CONFIRMATION_SPEC["candidate_id"]]
-    baseline_dice = _distribution_summary(np.array([float(row["baseline_dice"]) for row in primary], dtype=np.float64))
-    baseline_sdlogj = _distribution_summary(
+    baseline_dice = distribution_summary(np.array([float(row["baseline_dice"]) for row in primary], dtype=np.float64))
+    baseline_sdlogj = distribution_summary(
         np.array([float(row["baseline_sdlogj"]) for row in primary], dtype=np.float64)
     )
     if stage == "exploration":
@@ -2216,10 +2057,10 @@ def _summarise(rows: list[dict[str, Any]], stage: str, n_cases: int) -> tuple[di
         structural_pass and auxiliary_errors == 0 and exact_inconclusive_gaps == 0 and final_exact and rollback_exact
     )
     deltas = np.array([float(row["accepted_dice_delta"]) for row in primary], dtype=np.float64)
-    signs = _sign_summary(deltas)
-    final_dice = _distribution_summary(np.array([float(row["final_dice"]) for row in primary], dtype=np.float64))
-    final_sdlogj = _distribution_summary(np.array([float(row["final_sdlogj"]) for row in primary], dtype=np.float64))
-    sdlogj_deltas = _distribution_summary(
+    signs = sign_summary(deltas)
+    final_dice = distribution_summary(np.array([float(row["final_dice"]) for row in primary], dtype=np.float64))
+    final_sdlogj = distribution_summary(np.array([float(row["final_sdlogj"]) for row in primary], dtype=np.float64))
+    sdlogj_deltas = distribution_summary(
         np.array([float(row["accepted_sdlogj_delta"]) for row in primary], dtype=np.float64)
     )
     promising = integrity and signs["mean"] > 0.0 and signs["median"] > 0.0 and signs["improved"] > signs["worsened"]
@@ -2284,9 +2125,9 @@ def selfcheck_stage(args: argparse.Namespace) -> int:
         "global_panel_is_k_0_through_16": tuple(2.0**-index for index in range(17)) == GLOBAL_COEFFICIENTS,
         "exploration_has_24_unique_candidates": len(candidate_ids) == len(set(candidate_ids)) == 24,
         "confirmation_candidate_is_in_exploration": CONFIRMATION_SPEC["candidate_id"] in candidate_ids,
-        "confirmation_policy_hash_is_canonical": (_payload_sha256(CONFIRMATION_POLICY) == CONFIRMATION_POLICY_SHA256),
-        "relative_tolerance_accepts_clear_improvement": _relative_improvement(2.0, 2.0 - 4e-6)[2],
-        "relative_tolerance_rejects_no_change": not _relative_improvement(2.0, 2.0)[2],
+        "confirmation_policy_hash_is_canonical": (payload_sha256(CONFIRMATION_POLICY) == CONFIRMATION_POLICY_SHA256),
+        "relative_tolerance_accepts_clear_improvement": relative_improvement(2.0, 2.0 - 4e-6)[2],
+        "relative_tolerance_rejects_no_change": not relative_improvement(2.0, 2.0)[2],
         "predicate_rejection_is_not_checker_gap": not _exact_checker_gap(
             {"exact_status": "NOT_CERTIFIED_BY_PREDICATE"}
         ),
@@ -2315,7 +2156,7 @@ def finalize_stage(args: argparse.Namespace) -> int:
         raise RuntimeError("Finalize stage does not match the frozen C1 contract")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.attempt_id):
         raise ValueError("--attempt-id contains unsupported characters")
-    if _git("rev-parse", "HEAD") != contract["git_head"] or _git("status", "--porcelain=v1"):
+    if git("rev-parse", "HEAD") != contract["git_head"] or git("status", "--porcelain=v1"):
         raise RuntimeError("Finalize code provenance differs from the clean prepared contract")
     manifest_path = stage_dir / "run_manifest.json"
     existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else None
@@ -2325,8 +2166,8 @@ def finalize_stage(args: argparse.Namespace) -> int:
     ):
         raise RuntimeError("Resume refused: existing C1 stage manifest does not match the frozen contract")
 
-    dataset_rows = _read_dataset_rows(stage_dir, contract)
-    for row in dataset_rows:
+    observed_dataset_rows = _read_dataset_rows(stage_dir, contract)
+    for row in observed_dataset_rows:
         _verify_observed_file(row)
     universe_rows = _read_validation_universe(stage_dir, contract)
     if [row["case_id"] for row in universe_rows if row["split"] == "val"] != contract["validation_universe_case_ids"]:
@@ -2402,7 +2243,7 @@ def finalize_stage(args: argparse.Namespace) -> int:
     completed_at = (
         existing_manifest["completed_at_utc"]
         if existing_manifest and existing_manifest.get("finalize_attempt_id") == args.attempt_id
-        else _utc_now()
+        else utc_now()
     )
     manifest = {
         "schema": "ctcf-search-c1-stage-manifest-v1",
@@ -2419,9 +2260,9 @@ def finalize_stage(args: argparse.Namespace) -> int:
         "confirmation_policy": CONFIRMATION_POLICY,
         "confirmation_policy_sha256": CONFIRMATION_POLICY_SHA256,
         "code": {
-            "git_head": _git("rev-parse", "HEAD"),
-            "branch": _git("branch", "--show-current"),
-            "git_status": _git("status", "--porcelain=v1"),
+            "git_head": git("rev-parse", "HEAD"),
+            "branch": git("branch", "--show-current"),
+            "git_status": git("status", "--porcelain=v1"),
         },
         "execution": {
             "host": platform.node(),

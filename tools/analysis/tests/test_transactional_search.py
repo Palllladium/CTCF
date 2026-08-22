@@ -11,21 +11,19 @@ import torch.nn.functional as F
 
 from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.run_search_gate_c0 import _run_case, _summarise
-from tools.analysis.run_search_gate_c1 import (
-    CLAIM_EPS,
-    WORK_EPS,
-    _build_local_candidate,
-    _deformation_quality_metrics,
-    _operator_rule_rows,
-)
+from tools.analysis.run_search_gate_c1 import _build_local_candidate, _operator_rule_rows
 from tools.analysis.run_search_gate_c2 import (
-    CLAIM_EPS as C2_CLAIM_EPS,
     MARGIN_SCHEDULE,
     TRAJECTORIES,
     _row_without_labels,
     _run_case as _run_c2_case,
     _summary_rows,
     _validate_case as _validate_c2_case,
+)
+from tools.analysis.search_gate_common import (
+    CLAIM_EPS,
+    WORK_EPS,
+    deformation_quality_metrics as _deformation_quality_metrics,
 )
 from tools.analysis.transactional_search import (
     OFFSETS,
@@ -68,7 +66,7 @@ class TransactionalSearchTest(unittest.TestCase):
         self.assertEqual(len(TRAJECTORIES), 4)
         self.assertEqual(len({item["trajectory_id"] for item in TRAJECTORIES}), 4)
         self.assertEqual(MARGIN_SCHEDULE, (0.0011, 0.001075, 0.00105, 0.001025))
-        self.assertTrue(all(value > C2_CLAIM_EPS for value in MARGIN_SCHEDULE))
+        self.assertTrue(all(value > CLAIM_EPS for value in MARGIN_SCHEDULE))
         self.assertEqual(sum(item["sdlogj_relative_cap"] is not None for item in TRAJECTORIES), 1)
 
     def test_c2_decision_snapshot_excludes_only_postdecision_label_metrics(self) -> None:

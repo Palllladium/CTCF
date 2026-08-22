@@ -2,6 +2,9 @@
 # Gate C1: multi-GPU exploration-19 now; confirmation-39 only after an explicit frozen-manifest handoff.
 set -euo pipefail
 
+# shellcheck source=tools/runners/eval/_search_gate_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_search_gate_common.sh"
+
 MODE="${MODE:-exploration}"
 GPU_LIST="${GPU_LIST:-2,3,4,5,6}"
 PYBIN="${PYBIN:-python}"
@@ -29,16 +32,7 @@ if [[ "$MODE" == "confirmation" ]]; then
   fi
 fi
 
-IFS=',' read -r -a RAW_GPUS <<< "$GPU_LIST"
-GPUS=()
-for value in "${RAW_GPUS[@]}"; do
-  gpu="${value//[[:space:]]/}"
-  if [[ ! "$gpu" =~ ^[0-9]+$ ]]; then
-    echo "[FAIL] GPU_LIST must be a comma-separated list of non-negative integers" >&2
-    exit 2
-  fi
-  GPUS+=("$gpu")
-done
+sg_parse_gpu_list "$GPU_LIST"
 if [[ "${#GPUS[@]}" -lt 1 ]]; then
   echo "[FAIL] GPU_LIST is empty" >&2
   exit 2
@@ -48,7 +42,7 @@ if [[ "$(printf '%s\n' "${GPUS[@]}" | sort -u | wc -l)" -ne "${#GPUS[@]}" ]]; th
   exit 2
 fi
 
-export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+sg_export_pythonpath
 GIT_STATUS_AT_START="$(git status --porcelain=v1)"
 if [[ -n "$GIT_STATUS_AT_START" ]]; then
   echo "[FAIL] Refusing to run from a dirty tree (tracked or untracked files):" >&2
@@ -59,22 +53,22 @@ fi
 
 HEAD="$(git rev-parse HEAD)"
 BRANCH="$(git branch --show-current)"
-STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STARTED_AT="$(sg_utc_started_at)"
 MODE_UPPER="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
-RUN_ID="${RUN_ID:-C1_${MODE_UPPER}_$(date -u +%Y%m%dT%H%M%SZ)_$(git rev-parse --short=12 HEAD)}"
+RUN_ID="${RUN_ID:-C1_${MODE_UPPER}_$(sg_utc_run_stamp)_$(sg_git_short_head)}"
 RUN_ROOT="${OUT_ROOT}/${RUN_ID}"
-if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+if ! sg_is_safe_identifier "$RUN_ID"; then
   echo "[FAIL] RUN_ID contains unsupported characters" >&2
   exit 2
 fi
-ATTEMPT_ID="${ATTEMPT_ID:-A_$(date -u +%Y%m%dT%H%M%SZ)_$$}"
-if [[ ! "$ATTEMPT_ID" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+ATTEMPT_ID="${ATTEMPT_ID:-A_$(sg_utc_run_stamp)_$$}"
+if ! sg_is_safe_identifier "$ATTEMPT_ID"; then
   echo "[FAIL] ATTEMPT_ID contains unsupported characters" >&2
   exit 2
 fi
 PACKAGE_ABS="$(pwd)/results/exports/${RUN_ID}.tar.gz"
 if [[ -z "$REMOTE_LOCATOR" ]]; then
-  REMOTE_LOCATOR="H100_LOCAL_ARCHIVE=${PACKAGE_ABS};H100_LOCAL_SIDECAR=${PACKAGE_ABS}.sha256"
+  REMOTE_LOCATOR="$(sg_default_remote_locator "$PACKAGE_ABS")"
 fi
 mkdir -p "$RUN_ROOT/preflight" "$RUN_ROOT/attempts"
 exec 9>"$RUN_ROOT/.run.lock"

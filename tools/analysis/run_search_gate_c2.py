@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import glob
 import json
 import math
@@ -10,7 +9,6 @@ import platform
 import re
 import shutil
 import time
-from datetime import datetime, timezone
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -21,45 +19,59 @@ import torch
 from experiments.core.inference_metrics import metric_profile_for
 from experiments.core.inference_runtime import build_infer_dataset
 from tools.analysis.run_artifacts import atomic_write_json, atomic_write_text, rows_to_csv, rows_to_tsv, sha256_file
-from tools.analysis.run_search_gate_c0 import _build_model, _case_id, _dice, _prepare_initial_state, _salted_case_hash
-from tools.analysis.run_search_gate_c1 import (
+from tools.analysis.search_gate_common import (
     CLAIM_EPS,
     COLLAR_WIDTH,
     CONFIG_KEY,
     DEFAULT_CHECKPOINT,
-    PROTOCOL_ID as C1_PROTOCOL_ID,
     SPLIT_PROTOCOL_ID,
     TIME_STEPS,
-    _bootstrap_ci,
-    _candidate_metrics,
-    _deformation_quality_metrics,
-    _distribution_summary,
-    _git,
-    _is_finite_number,
-    _payload_sha256,
-    _proposal_statistics,
-    _relative_improvement,
-    _sign_summary,
-    _sync,
-    _text_sha256,
+    bootstrap_ci,
+    build_model,
+    candidate_metrics,
+    case_id_from_path,
+    deformation_quality_metrics,
+    dice_score,
+    distribution_summary,
+    git,
+    is_finite_number,
+    payload_sha256,
+    prepare_initial_state,
+    proposal_statistics,
+    relative_improvement,
+    salted_case_hash,
+    sign_summary,
+    sync,
+    text_sha256,
+    utc_now,
+)
+from tools.analysis.search_gate_runtime import (
+    dataset_rows,
+    expected_shard_for_case,
+    parse_physical_gpus,
+    read_csv,
+    round_robin_shards,
+    save_reload_certify,
+    shard_gpu_map,
+    validate_shard_partition,
+    worker_marker_paths,
 )
 from tools.analysis.transactional_search import (
     build_proposal,
     certified_local_clip_candidate,
     geometry_mask,
     identity_collar,
-    load_flow_npz,
     masked_zscore,
     mind_ssc,
     proposal_support_weights,
-    save_flow_npz_atomic,
     smooth_proposal,
 )
 from utils import setup_device
-from utils.cert_exact import certify_flow_exact
 from utils.field import trilinear_cert_bound
 
 PROTOCOL_ID = "CTCF-SEARCH-GATE-C2-V1"
+# Declared, not imported, so C2 never depends on the C1 entrypoint module.
+C1_PROTOCOL_ID = "CTCF-SEARCH-GATE-C1-V1"
 SCHEMA_VERSION = "v1"
 MAX_STEPS = 4
 MARGIN_SCHEDULE = (0.0011, 0.001075, 0.00105, 0.001025)
@@ -117,16 +129,7 @@ C2_POLICY: dict[str, Any] = {
         "mean_digital10_percent": "<= pooled C1 reference",
     },
 }
-C2_POLICY_SHA256 = _payload_sha256(C2_POLICY)
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _read_csv(path: Path) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8", newline="") as stream:
-        return list(csv.DictReader(stream))
+C2_POLICY_SHA256 = payload_sha256(C2_POLICY)
 
 
 def _float(row: dict[str, str], key: str) -> float:
@@ -180,7 +183,7 @@ def _validate_c1_stage(path_value: str, expected_sha256: str, stage: str) -> dic
         or len(contract.get("case_ids") or []) != expected_cases
     ):
         raise RuntimeError(f"C1 {stage} contract is inconsistent with its manifest")
-    rows = _read_csv(path.parent / "per_case.csv")
+    rows = read_csv(path.parent / "per_case.csv")
     if len(rows) != expected_cases or len({row["case_id"] for row in rows}) != expected_cases:
         raise RuntimeError(f"C1 {stage} per_case.csv has invalid case coverage")
     return {
@@ -214,7 +217,7 @@ def _build_c1_reference(exploration: dict[str, Any], confirmation: dict[str, Any
         raise RuntimeError("C1 exploration and confirmation do not share one checkpoint/data/protocol contract")
     result: list[dict[str, Any]] = []
     for source in (exploration, confirmation):
-        for row in _read_csv(Path(source["per_case_path"])):
+        for row in read_csv(Path(source["per_case_path"])):
             if row.get("primary_candidate_id") != "mind_clip_s1_w1" or row.get("exact_certified") != "True":
                 raise RuntimeError(f"Unexpected C1 primary row for {row.get('case_id')}")
             final_dice_key = "candidate_dice" if source["stage"] == "exploration" else "final_dice"
@@ -249,30 +252,11 @@ def _select_all_validation(paths_profile: int) -> tuple[list[str], str]:
 
     paths = get_dataset_paths(paths_profile, "IXI")
     files = sorted(glob.glob(os.path.join(paths["val_dir"], "*.pkl")))
-    by_id = {_case_id(path): path for path in files}
+    by_id = {case_id_from_path(path): path for path in files}
     if len(files) != 58 or len(by_id) != 58:
         raise RuntimeError(f"C2 requires exactly 58 unique IXI validation cases, found {len(by_id)}")
-    order = [case_id for _, case_id in sorted((_salted_case_hash(case_id), case_id) for case_id in by_id)]
+    order = [case_id for _, case_id in sorted((salted_case_hash(case_id), case_id) for case_id in by_id)]
     return [by_id[case_id] for case_id in order], str(paths["atlas_path"])
-
-
-def _dataset_rows(files: list[str], atlas: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for value in [*files, atlas]:
-        path = Path(value).resolve()
-        stat = path.stat()
-        rows.append(
-            {
-                "dataset": "IXI",
-                "split": "atlas" if value == atlas else "val",
-                "case_id": "atlas" if value == atlas else _case_id(value),
-                "path": str(path),
-                "bytes": stat.st_size,
-                "sha256": sha256_file(path),
-                "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
-            }
-        )
-    return rows
 
 
 def _verify_file(row: dict[str, Any]) -> None:
@@ -284,16 +268,14 @@ def _verify_file(row: dict[str, Any]) -> None:
 def prepare_stage(args: argparse.Namespace) -> int:
     if args.num_shards < 1:
         raise ValueError("--num-shards must be positive")
-    physical = [value.strip() for value in args.physical_gpus.split(",")]
-    if (
-        len(physical) != args.num_shards
-        or len(set(physical)) != len(physical)
-        or any(not x.isdigit() for x in physical)
-    ):
-        raise ValueError("--physical-gpus must contain one unique non-negative index per shard")
-    if _git("status", "--porcelain=v1"):
+    physical = parse_physical_gpus(
+        args.physical_gpus,
+        args.num_shards,
+        "--physical-gpus must contain one unique non-negative index per shard",
+    )
+    if git("status", "--porcelain=v1"):
         raise RuntimeError("C2 prepare refuses a dirty Git tree")
-    head = _git("rev-parse", "HEAD")
+    head = git("rev-parse", "HEAD")
     checkpoint = Path(args.checkpoint).resolve()
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
@@ -306,21 +288,21 @@ def prepare_stage(args: argparse.Namespace) -> int:
         raise RuntimeError("C2 paths profile or seed differs from C1")
 
     files, atlas = _select_all_validation(args.paths_profile)
-    rows = _dataset_rows(files, atlas)
+    rows = dataset_rows(files, "IXI", "val", atlas)
     fields = ["dataset", "split", "case_id", "path", "bytes", "sha256", "mtime_utc"]
     datasets_csv_text = rows_to_csv(fields, rows)
     datasets_tsv_text = rows_to_tsv(fields, rows)
     c1_fields = list(reference[0].keys())
     c1_csv_text = rows_to_csv(c1_fields, reference)
-    if [row["case_id"] for row in reference] != [_case_id(path) for path in files]:
+    if [row["case_id"] for row in reference] != [case_id_from_path(path) for path in files]:
         # C1 rows are stage-grouped; coverage must match, while C2 uses the canonical salted order.
         by_case = {row["case_id"]: row for row in reference}
-        if set(by_case) != {_case_id(path) for path in files}:
+        if set(by_case) != {case_id_from_path(path) for path in files}:
             raise RuntimeError("C1 reference does not cover the C2 validation universe")
-        reference = [by_case[_case_id(path)] for path in files]
+        reference = [by_case[case_id_from_path(path)] for path in files]
         c1_csv_text = rows_to_csv(c1_fields, reference)
 
-    case_ids = [_case_id(path) for path in files]
+    case_ids = [case_id_from_path(path) for path in files]
     contract = {
         "schema": f"ctcf-search-c2-contract-{SCHEMA_VERSION}",
         "protocol_id": PROTOCOL_ID,
@@ -332,9 +314,9 @@ def prepare_stage(args: argparse.Namespace) -> int:
         "ixi_test_split_accessed": False,
         "case_inputs": {row["case_id"]: row for row in rows if row["split"] == "val"},
         "atlas_input": next(row for row in rows if row["split"] == "atlas"),
-        "datasets_csv_sha256": _text_sha256(datasets_csv_text),
-        "datasets_tsv_sha256": _text_sha256(datasets_tsv_text),
-        "c1_reference_sha256": _text_sha256(c1_csv_text),
+        "datasets_csv_sha256": text_sha256(datasets_csv_text),
+        "datasets_tsv_sha256": text_sha256(datasets_tsv_text),
+        "c1_reference_sha256": text_sha256(c1_csv_text),
         "c1_sources": {"exploration": exploration, "confirmation": confirmation},
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": sha256_file(checkpoint),
@@ -347,11 +329,8 @@ def prepare_stage(args: argparse.Namespace) -> int:
         "policy_sha256": C2_POLICY_SHA256,
         "num_shards": args.num_shards,
         "physical_gpus": physical,
-        "shard_to_physical_gpu": {str(i): value for i, value in enumerate(physical)},
-        "shards": {
-            str(i): [case_id for position, case_id in enumerate(case_ids) if position % args.num_shards == i]
-            for i in range(args.num_shards)
-        },
+        "shard_to_physical_gpu": shard_gpu_map(physical),
+        "shards": round_robin_shards(case_ids, args.num_shards),
         "keep_fields": False,
     }
     root = args.run_root.resolve()
@@ -386,7 +365,7 @@ def prepare_stage(args: argparse.Namespace) -> int:
             {
                 "schema": f"ctcf-search-c2-prepare-{SCHEMA_VERSION}",
                 "status": "PREPARED",
-                "prepared_at_utc": _utc_now(),
+                "prepared_at_utc": utc_now(),
                 "contract_sha256": contract_sha,
             },
         )
@@ -418,8 +397,8 @@ def _read_frozen_rows(root: Path, contract: dict[str, Any]) -> tuple[list[dict[s
         raise RuntimeError("datasets.csv differs from C2 contract")
     if sha256_file(reference_path) != contract["c1_reference_sha256"]:
         raise RuntimeError("c1_reference.csv differs from C2 contract")
-    rows = _read_csv(dataset_path)
-    refs = {row["case_id"]: row for row in _read_csv(reference_path)}
+    rows = read_csv(dataset_path)
+    refs = {row["case_id"]: row for row in read_csv(reference_path)}
     if len(rows) != 59 or len(refs) != 58:
         raise RuntimeError("C2 frozen inputs have invalid cardinality")
     return rows, refs
@@ -428,9 +407,7 @@ def _read_frozen_rows(root: Path, contract: dict[str, Any]) -> tuple[list[dict[s
 def _exact_materialize(
     candidate: torch.Tensor, path: Path, device: torch.device
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    save_flow_npz_atomic(path, candidate.float())
-    stored = load_flow_npz(path)
-    exact = certify_flow_exact(stored, eps=str(CLAIM_EPS))
+    stored, exact = save_reload_certify(candidate, path, CLAIM_EPS)
     status = exact.get("status")
     if status in {"ERROR", "INVALID_INPUT", "INCONCLUSIVE_RESOURCE_LIMIT"}:
         raise RuntimeError(f"Exact checker integrity failure: {status}")
@@ -527,7 +504,7 @@ def _run_case(
     with torch.inference_mode():
         flow = adapter.forward(model, x, y, amp=True)
     work = case_dir / "work"
-    initial, _, initial_report = _prepare_initial_state(flow, work / "initial")
+    initial, _, initial_report = prepare_initial_state(flow, work / "initial")
     initial_exact = initial_report["psi_exact"]
     if initial_exact.get("status") != "CERTIFIED":
         raise RuntimeError(f"Initial Psi not exactly certified for {case_id}")
@@ -536,8 +513,8 @@ def _run_case(
     moving_norm = masked_zscore(x, mask)
     fixed_mind = mind_ssc(fixed_norm, radius=1, dilation=2)
     moving_mind = mind_ssc(moving_norm, radius=1, dilation=2)
-    baseline_geometry = _deformation_quality_metrics(initial, exact_certified=True)
-    baseline_mind = _candidate_metrics(
+    baseline_geometry = deformation_quality_metrics(initial, exact_certified=True)
+    baseline_mind = candidate_metrics(
         initial,
         fixed_norm,
         moving_norm,
@@ -560,7 +537,7 @@ def _run_case(
         stopped_reason: str | None = None
         for step_index, work_eps in enumerate(MARGIN_SCHEDULE, start=1):
             current_fast = float(trilinear_cert_bound(current, eps=work_eps))
-            current_metrics = _candidate_metrics(
+            current_metrics = candidate_metrics(
                 current,
                 fixed_norm,
                 moving_norm,
@@ -569,7 +546,7 @@ def _run_case(
                 mask,
                 torch.ones_like(mask, dtype=current.dtype),
             )
-            current_geometry = _deformation_quality_metrics(current, exact_certified=True)
+            current_geometry = deformation_quality_metrics(current, exact_certified=True)
             base = {
                 "case_id": case_id,
                 "trajectory_id": trajectory_id,
@@ -641,23 +618,23 @@ def _run_case(
                 )
             requested = float(spec["scale"]) * displacement
             support = proposal_support_weights(requested, mask)
-            current_metrics = _candidate_metrics(
+            current_metrics = candidate_metrics(
                 current, fixed_norm, moving_norm, fixed_mind, moving_mind, mask, support
             )
-            proposal_stats = _proposal_statistics(proposal, requested, mask)
+            proposal_stats = proposal_statistics(proposal, requested, mask)
             candidate, operator_report = certified_local_clip_candidate(
                 current, requested, mask, work_eps=work_eps, sweeps=1
             )
             candidate_fast = float(trilinear_cert_bound(candidate, eps=CLAIM_EPS))
             candidate_path = work / trajectory_id / f"step_{step_index:02d}.npz"
             evaluated, exact = _exact_materialize(candidate, candidate_path, device)
-            candidate_metrics = _candidate_metrics(
+            candidate_utility = candidate_metrics(
                 evaluated, fixed_norm, moving_norm, fixed_mind, moving_mind, mask, support
             )
-            candidate_geometry = _deformation_quality_metrics(evaluated, exact_certified=bool(exact["certified"]))
+            candidate_geometry = deformation_quality_metrics(evaluated, exact_certified=bool(exact["certified"]))
             candidate_snapshot = evaluated.detach().cpu()
-            mind_improvement, mind_tolerance, mind_improved = _relative_improvement(
-                current_metrics["mind"], candidate_metrics["mind"]
+            mind_improvement, mind_tolerance, mind_improved = relative_improvement(
+                current_metrics["mind"], candidate_utility["mind"]
             )
             cap = spec["sdlogj_relative_cap"]
             cap_limit = baseline_geometry["sdlogj"] * (1.0 + float(cap)) if cap is not None else None
@@ -692,10 +669,10 @@ def _run_case(
                 "candidate_exact_certified": exact["certified"],
                 "candidate_npz_sha256": exact["npz_sha256"],
                 "candidate_array_sha256": exact["array_sha256"],
-                "candidate_mind": candidate_metrics["mind"],
-                "candidate_ncc9": candidate_metrics["ncc9"],
-                "candidate_ncc7": candidate_metrics["ncc7"],
-                "candidate_support_ncc9": candidate_metrics["support_ncc9"],
+                "candidate_mind": candidate_utility["mind"],
+                "candidate_ncc9": candidate_utility["ncc9"],
+                "candidate_ncc7": candidate_utility["ncc7"],
+                "candidate_support_ncc9": candidate_utility["support_ncc9"],
                 "mind_improvement": mind_improvement,
                 "mind_tolerance": mind_tolerance,
                 "mind_improved": mind_improved,
@@ -709,7 +686,7 @@ def _run_case(
                 "sdlogj_cap_limit": cap_limit,
                 "sdlogj_cap_passed": cap_passed,
                 "cumulative_mind_improvement": baseline_mind
-                - (candidate_metrics["mind"] if accepted else current_metrics["mind"]),
+                - (candidate_utility["mind"] if accepted else current_metrics["mind"]),
                 "returned_npz_sha256": current_npz_sha,
                 "returned_array_sha256": current_array_sha,
                 "returned_exact_status": "CERTIFIED",
@@ -743,18 +720,18 @@ def _run_case(
 
     moving_seg = moving_seg_cpu.unsqueeze(0).to(device)
     fixed_seg = fixed_seg_cpu.unsqueeze(0).to(device)
-    baseline_dice = _dice(initial, moving_seg, fixed_seg, labels)
+    baseline_dice = dice_score(initial, moving_seg, fixed_seg, labels)
     for row, candidate, returned in zip(rows, candidate_cpu, returned_cpu, strict=True):
         if candidate is not None:
-            candidate_dice = _dice(candidate.to(device), moving_seg, fixed_seg, labels)
+            candidate_dice = dice_score(candidate.to(device), moving_seg, fixed_seg, labels)
             row["candidate_dice"] = candidate_dice
             row["candidate_dice_delta"] = candidate_dice - baseline_dice
         else:
             row["candidate_dice"] = None
             row["candidate_dice_delta"] = None
         returned_gpu = returned.to(device)
-        returned_dice = _dice(returned_gpu, moving_seg, fixed_seg, labels)
-        returned_geometry = _deformation_quality_metrics(returned_gpu, exact_certified=True)
+        returned_dice = dice_score(returned_gpu, moving_seg, fixed_seg, labels)
+        returned_geometry = deformation_quality_metrics(returned_gpu, exact_certified=True)
         row["baseline_dice"] = baseline_dice
         row["returned_dice"] = returned_dice
         row["returned_dice_delta"] = returned_dice - baseline_dice
@@ -765,7 +742,7 @@ def _run_case(
         row["returned_trilinear_fold_percent_upper_bound"] = returned_geometry["trilinear_fold_percent_upper_bound"]
 
     branch_rows = _build_branch_rows(rows, c1_row)
-    _sync(device)
+    sync(device)
     payload = {
         "schema": f"ctcf-search-c2-case-{SCHEMA_VERSION}",
         "status": "COMPLETE",
@@ -813,10 +790,10 @@ def _validate_case(
         or [row.get("trajectory_id") for row in branch_rows] != [spec["trajectory_id"] for spec in TRAJECTORIES]
         or any(row.get("labels_used_for_decision") is not False for row in rows)
         or any(row.get("returned_exact_status") != "CERTIFIED" for row in rows)
-        or any(not _is_finite_number(row.get("baseline_dice")) for row in rows)
-        or any(not _is_finite_number(row.get("returned_dice")) for row in rows)
-        or any(not _is_finite_number(row.get("returned_sdlogj")) for row in rows)
-        or any(not _is_finite_number(row.get("returned_j_leq0_digital10_percent")) for row in rows)
+        or any(not is_finite_number(row.get("baseline_dice")) for row in rows)
+        or any(not is_finite_number(row.get("returned_dice")) for row in rows)
+        or any(not is_finite_number(row.get("returned_sdlogj")) for row in rows)
+        or any(not is_finite_number(row.get("returned_j_leq0_digital10_percent")) for row in rows)
         or any(row.get("returned_trilinear_fold_percent_upper_bound") != 0.0 for row in rows)
         or any(not SHA256_RE.fullmatch(str(row.get("returned_array_sha256", ""))) for row in rows)
     ):
@@ -837,7 +814,7 @@ def _validate_case(
         action = row.get("action")
         previous_npz, previous_array = previous_by_trajectory[trajectory_id]
         if row.get("proposal_built") is True:
-            improvement, tolerance, improved = _relative_improvement(
+            improvement, tolerance, improved = relative_improvement(
                 float(row["current_mind"]), float(row["candidate_mind"])
             )
             cap = specs[trajectory_id]["sdlogj_relative_cap"]
@@ -845,7 +822,7 @@ def _validate_case(
             cap_passed = float(row["candidate_sdlogj"]) <= cap_limit if cap_limit is not None else True
             if (
                 not all(
-                    _is_finite_number(row.get(key))
+                    is_finite_number(row.get(key))
                     for key in (
                         "current_fast_cert_bound",
                         "candidate_fast_cert_bound",
@@ -904,7 +881,7 @@ def _validate_case(
             else:
                 valid = valid and row.get("proposal_built") is False
             if action == "MARGIN_EXHAUSTED" and not (
-                _is_finite_number(row.get("current_fast_cert_bound"))
+                is_finite_number(row.get("current_fast_cert_bound"))
                 and float(row["current_fast_cert_bound"]) < float(row["work_eps"])
             ):
                 valid = False
@@ -948,9 +925,7 @@ def _validate_case(
     ):
         raise RuntimeError(f"Invalid C2 case execution provenance: {marker}")
     if contract is not None:
-        expected_shard = next(
-            index for index in range(contract["num_shards"]) if case_id in contract["shards"][str(index)]
-        )
+        expected_shard = expected_shard_for_case(contract, case_id)
         if (
             execution.get("shard_index") != expected_shard
             or execution.get("physical_gpu") != contract["shard_to_physical_gpu"][str(expected_shard)]
@@ -968,7 +943,7 @@ def _validate_case(
 def worker_stage(args: argparse.Namespace) -> int:
     root = args.run_root.resolve()
     contract, contract_sha = _load_contract(root, args.contract_sha256)
-    if _git("rev-parse", "HEAD") != contract["git_head"] or _git("status", "--porcelain=v1"):
+    if git("rev-parse", "HEAD") != contract["git_head"] or git("status", "--porcelain=v1"):
         raise RuntimeError("C2 worker code differs from the clean prepared contract")
     if args.num_shards != contract["num_shards"] or not 0 <= args.shard_index < args.num_shards:
         raise RuntimeError("Worker shard parameters differ from C2 contract")
@@ -982,9 +957,7 @@ def worker_stage(args: argparse.Namespace) -> int:
     checkpoint = Path(contract["checkpoint"])
     if sha256_file(checkpoint) != contract["checkpoint_sha256"]:
         raise RuntimeError("Checkpoint changed after C2 prepare")
-    attempt_dir = root / "workers" / "attempts" / args.attempt_id
-    marker = attempt_dir / f"worker_{args.shard_index:02d}.json"
-    failure = attempt_dir / f"worker_{args.shard_index:02d}_failure.json"
+    marker, failure = worker_marker_paths(root, args.attempt_id, args.shard_index)
     if marker.exists() or failure.exists():
         raise RuntimeError("Worker attempt output already exists")
     pending: list[dict[str, str]] = []
@@ -1004,7 +977,7 @@ def worker_stage(args: argparse.Namespace) -> int:
             reused.append(case_id)
         else:
             pending.append(by_id[case_id])
-    started = _utc_now()
+    started = utc_now()
     computed: list[str] = []
     try:
         load_report: dict[str, Any] = {"strict": None, "missing_keys": [], "unexpected_keys": []}
@@ -1012,7 +985,7 @@ def worker_stage(args: argparse.Namespace) -> int:
             device = setup_device(args.gpu, seed=contract["seed"], deterministic=True)
             if device.type != "cuda":
                 raise RuntimeError("C2 worker requires CUDA")
-            adapter, model, load_report = _build_model(str(checkpoint), contract["config"], device)
+            adapter, model, load_report = build_model(str(checkpoint), contract["config"], device)
             dataset = build_infer_dataset("IXI", [row["path"] for row in pending], by_id["atlas"]["path"])
             labels = tuple(metric_profile_for("IXI").labels)
             execution = {
@@ -1060,7 +1033,7 @@ def worker_stage(args: argparse.Namespace) -> int:
             "reused_case_ids": reused,
             "checkpoint_load_report": load_report,
             "started_at_utc": started,
-            "completed_at_utc": _utc_now(),
+            "completed_at_utc": utc_now(),
         }
         atomic_write_json(marker, report)
     except Exception as exc:
@@ -1075,7 +1048,7 @@ def worker_stage(args: argparse.Namespace) -> int:
                 "computed_case_ids": computed,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
-                "completed_at_utc": _utc_now(),
+                "completed_at_utc": utc_now(),
             },
         )
         raise
@@ -1100,7 +1073,7 @@ def _summary_rows(
         final_sdlogj = np.array([float(row["final_sdlogj"]) for row in selected], dtype=np.float64)
         sdlogj_delta = np.array([float(row["sdlogj_delta"]) for row in selected], dtype=np.float64)
         digital = np.array([float(row["final_j_leq0_digital10_percent"]) for row in selected], dtype=np.float64)
-        ci = _bootstrap_ci(paired)
+        ci = bootstrap_ci(paired)
         eligible = bool(
             all(row["final_exact_status"] == "CERTIFIED" for row in selected)
             and float(dice_delta.mean()) >= MIN_MEAN_DICE_DELTA
@@ -1148,9 +1121,9 @@ def _summary_rows(
         "selected_trajectory_id": selected["trajectory_id"] if selected else None,
         "selection_rule": C2_POLICY["selection_gate"],
         "c1_reference": {
-            "dice_delta": _sign_summary(c1_dice_delta),
-            "sdlogj_delta": _distribution_summary(c1_sdlogj_delta),
-            "final_digital10_percent": _distribution_summary(c1_digital),
+            "dice_delta": sign_summary(c1_dice_delta),
+            "sdlogj_delta": distribution_summary(c1_sdlogj_delta),
+            "final_digital10_percent": distribution_summary(c1_digital),
         },
         "test_split_accessed": False,
         "test_115_authorized": False,
@@ -1167,7 +1140,7 @@ def _csv_fields(rows: list[dict[str, Any]], preferred: list[str]) -> list[str]:
 def finalize_stage(args: argparse.Namespace) -> int:
     root = args.run_root.resolve()
     contract, contract_sha = _load_contract(root, args.contract_sha256)
-    if _git("rev-parse", "HEAD") != contract["git_head"] or _git("status", "--porcelain=v1"):
+    if git("rev-parse", "HEAD") != contract["git_head"] or git("status", "--porcelain=v1"):
         raise RuntimeError("C2 finalize code differs from clean prepared contract")
     dataset_rows, refs = _read_frozen_rows(root, contract)
     for row in dataset_rows:
@@ -1206,8 +1179,7 @@ def finalize_stage(args: argparse.Namespace) -> int:
             raise RuntimeError(f"Invalid C2 worker report: {path}")
         seen.extend(assigned)
         worker_files.append({"path": path.relative_to(root).as_posix(), "sha256": sha256_file(path)})
-    if set(seen) != set(contract["case_ids"]) or len(seen) != 58 or len(set(seen)) != 58:
-        raise RuntimeError("C2 worker partition has missing, duplicate, or reordered cases")
+    validate_shard_partition(contract, seen, 58, "C2 worker partition has missing, duplicate, or reordered cases")
 
     step_rows: list[dict[str, Any]] = []
     branch_rows: list[dict[str, Any]] = []
@@ -1246,11 +1218,11 @@ def finalize_stage(args: argparse.Namespace) -> int:
         "run_id": root.name,
         "status": "COMPLETE",
         "started_at_utc": prepare["prepared_at_utc"],
-        "completed_at_utc": _utc_now(),
+        "completed_at_utc": utc_now(),
         "contract_sha256": contract_sha,
         "policy_sha256": C2_POLICY_SHA256,
         "finalize_attempt_id": args.attempt_id,
-        "code": {"git_head": _git("rev-parse", "HEAD"), "branch": _git("branch", "--show-current"), "git_status": ""},
+        "code": {"git_head": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "git_status": ""},
         "checkpoint": {"path": contract["checkpoint"], "sha256": contract["checkpoint_sha256"], "strict": True},
         "execution": {
             "num_shards": contract["num_shards"],
@@ -1285,7 +1257,7 @@ def selfcheck_stage(args: argparse.Namespace) -> int:
         "four_strictly_decreasing_work_margins": len(MARGIN_SCHEDULE) == 4
         and all(left > right > CLAIM_EPS for left, right in pairwise(MARGIN_SCHEDULE)),
         "test_split_is_unreachable": C2_POLICY["scope"].startswith("all 58 already-open IXI validation"),
-        "policy_hash_is_canonical": _payload_sha256(C2_POLICY) == C2_POLICY_SHA256,
+        "policy_hash_is_canonical": payload_sha256(C2_POLICY) == C2_POLICY_SHA256,
         "regularized_branch_is_unique": sum(x["sdlogj_relative_cap"] is not None for x in TRAJECTORIES) == 1,
         "minimum_effect_is_preregistered": MIN_MEAN_DICE_DELTA == 0.001,
     }

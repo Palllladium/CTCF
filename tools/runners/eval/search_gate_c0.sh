@@ -2,13 +2,16 @@
 # Preregistered C0 search gate: self-check -> one OASIS smoke case -> fixed IXI validation-19.
 set -euo pipefail
 
+# shellcheck source=tools/runners/eval/_search_gate_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_search_gate_common.sh"
+
 MODE="${MODE:-all}"
 GPU="${GPU:-0}"
 PYBIN="${PYBIN:-python}"
 PATHS_PROFILE="${PATHS_PROFILE:-3}"
 SEED="${SEED:-0}"
 OUT_ROOT="${OUT_ROOT:-results/search_gate_c0}"
-RUN_ID="${RUN_ID:-C0_$(date -u +%Y%m%dT%H%M%SZ)_$(git rev-parse --short=12 HEAD)}"
+RUN_ID="${RUN_ID:-C0_$(sg_utc_run_stamp)_$(sg_git_short_head)}"
 RUN_ROOT="${OUT_ROOT}/${RUN_ID}"
 OAS_CKPT="${OAS_CKPT:-results/P16_W1_VXM_OASIS_LBL_DIG_J15/ckpt/best.pth}"
 IXI_CKPT="${IXI_CKPT:-results/P10_LONGRUN_VXM_UNIFIED_SVF_IXI/ckpt/best.pth}"
@@ -19,7 +22,7 @@ case "$MODE" in
   *) echo "[FAIL] MODE must be selfcheck, smoke, development, or all" >&2; exit 2 ;;
 esac
 
-export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+sg_export_pythonpath
 export CUDA_VISIBLE_DEVICES="$GPU"
 
 GIT_STATUS_AT_START="$(git status --porcelain=v1)"
@@ -31,7 +34,7 @@ fi
 
 HEAD="$(git rev-parse HEAD)"
 BRANCH="$(git branch --show-current)"
-STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STARTED_AT="$(sg_utc_started_at)"
 mkdir -p "$RUN_ROOT/preflight"
 
 {
