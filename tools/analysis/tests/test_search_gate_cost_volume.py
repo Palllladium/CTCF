@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tools.analysis.search_gate_cost_volume import (
     POSTERIOR_DIAGNOSTICS_ID,
     RMS_FIRST_DIFFERENCE_ROUGHNESS_ID,
+    _standardize_candidate_costs,
     apply_message_passing,
     build_standardized_mind_cost_volume,
     decode_posterior,
@@ -32,6 +33,43 @@ def candidate_tensors(shape: tuple[int, int, int] = (7, 8, 9)) -> tuple[torch.Te
 
 
 class CostVolumeConstructionTest(unittest.TestCase):
+    def test_standardization_preserves_legacy_order_under_float32_cancellation(self) -> None:
+        generator = torch.Generator().manual_seed(7)
+        costs = 0.1 + 1e-5 * torch.randn((1, len(OFFSETS), 4, 5, 6), generator=generator)
+        valid = torch.ones_like(costs, dtype=torch.bool)
+
+        standardized, count, mean, std = _standardize_candidate_costs(
+            costs,
+            valid,
+            standardization_floor=1e-6,
+        )
+        expected_sum = torch.zeros_like(mean)
+        expected_square = torch.zeros_like(mean)
+        for index in range(len(OFFSETS)):
+            candidate = costs[:, index : index + 1]
+            expected_sum += candidate
+            expected_square += candidate.square()
+        expected_mean = expected_sum / float(len(OFFSETS))
+        expected_std = (
+            (expected_square / float(len(OFFSETS)) - expected_mean.square()).clamp_min(0.0).sqrt().clamp_min(1e-6)
+        )
+        expected_standardized = (costs - expected_mean) / expected_std
+
+        torch.testing.assert_close(mean, expected_mean, atol=0, rtol=0)
+        torch.testing.assert_close(std, expected_std, atol=0, rtol=0)
+        torch.testing.assert_close(standardized, expected_standardized, atol=0, rtol=0)
+        self.assertTrue(bool((count == len(OFFSETS)).all()))
+
+        vector_mean = costs.sum(dim=1, keepdim=True) / float(len(OFFSETS))
+        vector_std = (
+            (costs.square().sum(dim=1, keepdim=True) / float(len(OFFSETS)) - vector_mean.square())
+            .clamp_min(0.0)
+            .sqrt()
+            .clamp_min(1e-6)
+        )
+        vector_standardized = (costs - vector_mean) / vector_std
+        self.assertGreater(float((vector_standardized - standardized).abs().max()), 0.01)
+
     def test_known_shift_preserves_offset_order_and_additive_sign(self) -> None:
         shape = (9, 10, 11)
         generator = torch.Generator().manual_seed(77)
@@ -90,6 +128,54 @@ class CostVolumeConstructionTest(unittest.TestCase):
 
 
 class PosteriorAndDecoderTest(unittest.TestCase):
+    def test_posterior_and_decoder_preserve_legacy_candidate_reduction_order(self) -> None:
+        generator = torch.Generator().manual_seed(123)
+        logits = torch.randn((1, len(OFFSETS), 3, 4, 5), generator=generator)
+        valid = torch.rand((1, len(OFFSETS), 3, 4, 5), generator=generator) > 0.1
+        valid[:, :2] = True
+        valid[:, ZERO_OFFSET_INDEX] = True
+
+        maximum = torch.full((1, 1, 3, 4, 5), -torch.inf)
+        for index in range(len(OFFSETS)):
+            candidate = logits[:, index : index + 1]
+            candidate_valid = valid[:, index : index + 1]
+            maximum = torch.where(candidate_valid & (candidate > maximum), candidate, maximum)
+        weights = torch.zeros_like(logits)
+        normalizer = torch.zeros_like(maximum)
+        weighted_shift_sum = torch.zeros_like(maximum)
+        for index in range(len(OFFSETS)):
+            candidate_valid = valid[:, index : index + 1]
+            shifted = logits[:, index : index + 1] - maximum
+            safe_shifted = torch.where(candidate_valid, shifted, torch.zeros_like(shifted))
+            weight = torch.exp(safe_shifted) * candidate_valid
+            weights[:, index : index + 1] = weight
+            normalizer += weight
+            weighted_shift_sum += weight * safe_shifted
+        expected_probabilities = weights / normalizer
+        expected_entropy = torch.log(normalizer) - weighted_shift_sum / normalizer
+        count = valid.sum(dim=1, keepdim=True)
+        expected_h = expected_entropy / torch.log(count.to(logits.dtype))
+        expected_confidence = (1.0 - expected_h).clamp(0.0, 1.0)
+        expected_mean = torch.zeros((1, 3, 3, 4, 5))
+        for index, offset in enumerate(OFFSETS):
+            expected_mean += expected_probabilities[:, index : index + 1] * logits.new_tensor(offset).view(
+                1, 3, 1, 1, 1
+            )
+
+        posterior = posterior_from_logits(logits, valid)
+        decoded = decode_posterior(posterior, mode="confidence")
+
+        torch.testing.assert_close(posterior.probabilities, expected_probabilities, atol=0, rtol=0)
+        torch.testing.assert_close(posterior.entropy, expected_entropy, atol=0, rtol=0)
+        torch.testing.assert_close(posterior.confidence, expected_confidence, atol=0, rtol=0)
+        torch.testing.assert_close(decoded.posterior_mean, expected_mean, atol=0, rtol=0)
+        torch.testing.assert_close(
+            decoded.displacement,
+            expected_mean * expected_confidence,
+            atol=0,
+            rtol=0,
+        )
+
     def test_flat_posterior_has_logk_entropy_and_zero_expectation(self) -> None:
         logits, valid = candidate_tensors()
         posterior = posterior_from_logits(logits, valid)

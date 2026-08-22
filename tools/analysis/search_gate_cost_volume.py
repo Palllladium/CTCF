@@ -131,6 +131,51 @@ def _require_candidate_tensor(tensor: torch.Tensor, name: str) -> None:
         raise ValueError(f"{name} must have shape [1,{len(OFFSETS)},D,H,W], got {tuple(tensor.shape)}")
 
 
+def _standardize_candidate_costs(
+    costs: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    standardization_floor: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Standardize candidates with the frozen legacy accumulation order.
+
+    C1/C2 accumulated the 27 first and second moments one offset at a time.
+    A vectorized reduction is mathematically equivalent but not numerically
+    equivalent in float32 when the candidate costs are nearly flat; cancellation
+    can then change the posterior materially on CUDA.  Keep the historical order
+    so the raw C3 controls remain genuine C1/C2 controls.
+    """
+
+    _require_candidate_tensor(costs, "candidate costs")
+    _require_candidate_tensor(valid, "candidate validity mask")
+    if valid.dtype != torch.bool or valid.shape != costs.shape or valid.device != costs.device:
+        raise ValueError("valid must be a boolean tensor sharing candidate-cost shape and device")
+    if not costs.is_floating_point():
+        raise TypeError("candidate costs must use a floating-point dtype")
+    if not math.isfinite(standardization_floor) or standardization_floor <= 0.0:
+        raise ValueError("standardization_floor must be finite and positive")
+    if not bool(torch.isfinite(costs.masked_select(valid)).all()):
+        raise ValueError("valid candidate costs must be finite")
+
+    map_shape = (1, 1, *costs.shape[-3:])
+    sum_cost = costs.new_zeros(map_shape)
+    sum_square = costs.new_zeros(map_shape)
+    for index in range(len(OFFSETS)):
+        candidate = costs[:, index : index + 1]
+        candidate_valid = valid[:, index : index + 1]
+        safe = torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
+        sum_cost += safe
+        sum_square += safe.square()
+
+    valid_count = valid.sum(dim=1, keepdim=True)
+    count = valid_count.to(costs.dtype).clamp_min(1.0)
+    mean = sum_cost / count
+    variance = (sum_square / count - mean.square()).clamp_min(0.0)
+    std = variance.sqrt().clamp_min(float(standardization_floor))
+    standardized = torch.where(valid, (costs - mean) / std, torch.zeros_like(costs))
+    return standardized, valid_count, mean, std
+
+
 def build_standardized_mind_cost_volume(
     fixed_mind: torch.Tensor,
     moving_mind: torch.Tensor,
@@ -167,15 +212,13 @@ def build_standardized_mind_cost_volume(
             costs[:, index].copy_(cost)
             valid[:, index].copy_(candidate_valid)
 
-        valid_count = valid.sum(dim=1, keepdim=True)
+        standardized, valid_count, mean, std = _standardize_candidate_costs(
+            costs,
+            valid,
+            standardization_floor=standardization_floor,
+        )
         if bool((geometry_mask & (valid_count == 0)).any()):
             raise RuntimeError("MIND cost volume has an active voxel without a valid candidate")
-        count = valid_count.to(costs.dtype).clamp_min(1.0)
-        safe_costs = torch.where(valid, costs, torch.zeros_like(costs))
-        mean = safe_costs.sum(dim=1, keepdim=True) / count
-        variance = (safe_costs.square().sum(dim=1, keepdim=True) / count - mean.square()).clamp_min(0.0)
-        std = variance.sqrt().clamp_min(float(standardization_floor))
-        standardized = torch.where(valid, (costs - mean) / std, torch.zeros_like(costs))
 
     return StandardizedCostVolume(
         standardized_costs=standardized,
@@ -210,19 +253,40 @@ def posterior_from_logits(
     with torch.inference_mode():
         valid_count = valid.sum(dim=1, keepdim=True)
         active = valid_count > 0
-        negative_inf = torch.full_like(logits, -torch.inf)
         scaled_logits = logits / float(temperature)
-        scaled_maximum = torch.where(valid, scaled_logits, negative_inf).amax(dim=1, keepdim=True)
-        scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
-        weights = torch.where(valid, torch.exp(scaled_logits - scaled_maximum), torch.zeros_like(logits))
-        normalizer = weights.sum(dim=1, keepdim=True)
-        probabilities = torch.where(active, weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny), 0.0)
-        log_probabilities = torch.where(
-            probabilities > 0.0,
-            torch.log(probabilities.clamp_min(torch.finfo(logits.dtype).tiny)),
-            torch.zeros_like(probabilities),
+        scaled_maximum = torch.full(
+            (1, 1, *logits.shape[-3:]),
+            -torch.inf,
+            dtype=logits.dtype,
+            device=logits.device,
         )
-        entropy = -(probabilities * log_probabilities).sum(dim=1, keepdim=True)
+        for index in range(len(OFFSETS)):
+            candidate = scaled_logits[:, index : index + 1]
+            candidate_valid = valid[:, index : index + 1]
+            scaled_maximum = torch.where(
+                candidate_valid & (candidate > scaled_maximum),
+                candidate,
+                scaled_maximum,
+            )
+        scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
+        weights = torch.zeros_like(logits)
+        normalizer = torch.zeros_like(scaled_maximum)
+        weighted_shift_sum = torch.zeros_like(scaled_maximum)
+        for index in range(len(OFFSETS)):
+            candidate_valid = valid[:, index : index + 1]
+            shifted = scaled_logits[:, index : index + 1] - scaled_maximum
+            safe_shifted = torch.where(candidate_valid, shifted, torch.zeros_like(shifted))
+            weight = torch.exp(safe_shifted) * candidate_valid.to(logits.dtype)
+            weights[:, index : index + 1].copy_(weight)
+            normalizer += weight
+            weighted_shift_sum += weight * safe_shifted
+        probabilities = torch.where(active, weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny), 0.0)
+        entropy = torch.where(
+            active,
+            torch.log(normalizer.clamp_min(torch.finfo(logits.dtype).tiny))
+            - weighted_shift_sum / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
+            torch.zeros_like(normalizer),
+        )
         log_k = torch.log(valid_count.to(logits.dtype).clamp_min(1.0))
         normalized_entropy = torch.where(valid_count > 1, entropy / log_k, torch.zeros_like(entropy))
         normalized_entropy = normalized_entropy.clamp(0.0, 1.0)
@@ -345,8 +409,9 @@ def decode_posterior(posterior: PosteriorResult, *, mode: DecoderMode) -> Decode
         raise ValueError(f"unsupported decoder mode: {mode!r}")
     if not bool(torch.isfinite(probabilities).all()):
         raise ValueError("posterior probabilities must be finite")
-    offsets = probabilities.new_tensor(OFFSETS)
-    posterior_mean = torch.einsum("bkdwh,kc->bcdwh", probabilities, offsets)
+    posterior_mean = probabilities.new_zeros((1, 3, *probabilities.shape[-3:]))
+    for index, offset in enumerate(OFFSETS):
+        posterior_mean += probabilities[:, index : index + 1] * probabilities.new_tensor(offset).view(1, 3, 1, 1, 1)
     displacement = posterior_mean * posterior.confidence if mode == "confidence" else posterior_mean.clone()
     return DecoderResult(
         displacement=displacement,
@@ -457,8 +522,7 @@ def posterior_diagnostics(
     gap = top_two[:, :1] - top_two[:, 1:2]
     peak = probabilities.amax(dim=1, keepdim=True)
 
-    offsets = probabilities.new_tensor(OFFSETS)
-    posterior_mean = torch.einsum("bkzyx,kc->bczyx", probabilities, offsets)
+    posterior_mean = decode_posterior(posterior, mode="posterior_mean").posterior_mean
     confidence_weighted = posterior_mean * posterior.confidence
     posterior_mean_norm = posterior_mean.double().square().sum(dim=1, keepdim=True).sqrt()
     confidence_norm = confidence_weighted.double().square().sum(dim=1, keepdim=True).sqrt()
@@ -483,7 +547,7 @@ def posterior_diagnostics(
         candidate_count=len(OFFSETS),
         top1_top2_valid_logit_gap_mean=float(gap.masked_select(geometry_mask).double().mean().item()),
         posterior_peak_probability_mean=float(peak.masked_select(geometry_mask).double().mean().item()),
-        entropy_nats_mean=float(expected_entropy.masked_select(geometry_mask).double().mean().item()),
+        entropy_nats_mean=float(posterior.entropy.masked_select(geometry_mask).double().mean().item()),
         invalid_offset_fraction=invalid_offsets / candidate_denominator,
         posterior_mean_l2_norm_mean=mean_norm,
         confidence_weighted_mean_l2_norm_mean=weighted_mean_norm,
