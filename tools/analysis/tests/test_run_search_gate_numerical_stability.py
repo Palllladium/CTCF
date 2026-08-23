@@ -36,6 +36,52 @@ class DatasetProjectionContractTest(unittest.TestCase):
         self.assertNotEqual(csv_projection, tsv_projection)
 
 
+class DecisionContractRoundTripTest(unittest.TestCase):
+    @staticmethod
+    def payload() -> dict[str, object]:
+        return {
+            "schema": f"ctcf-search-gate-numstab-decision-contract-{runner.SCHEMA_VERSION}",
+            "protocol_id": runner.PROTOCOL_ID,
+            "policy_sha256": runner.NUMERICAL_STABILITY_POLICY_SHA256,
+            "policy": policy.NUMERICAL_STABILITY_POLICY.to_dict(),
+            "source_c3_manifest_sha256": runner.SOURCE_C3_MANIFEST_SHA256,
+            "source_c3_run_manifest_sha256": runner.SOURCE_C3_RUN_MANIFEST_SHA256,
+            "decision_contract_contains_label_data": False,
+            "decision_worker_uses_raw_containers": False,
+            "labels_available_to_decision_workers": False,
+            "ixi_test_split_accessed": False,
+            "test_115_authorized": False,
+        }
+
+    def test_written_contract_survives_json_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / runner.DECISION_CONTRACT_NAME
+            runner.atomic_write_json(path, self.payload())
+            expected_sha = runner.sha256_file(path)
+
+            loaded, actual_sha = runner._load_decision(root, expected_sha)
+
+            self.assertEqual(actual_sha, expected_sha)
+            self.assertTrue(
+                runner._json_equivalent(
+                    loaded["policy"],
+                    policy.NUMERICAL_STABILITY_POLICY.to_dict(),
+                )
+            )
+
+    def test_semantically_changed_policy_is_rejected_after_json_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / runner.DECISION_CONTRACT_NAME
+            payload = self.payload()
+            payload["policy"]["source_c3_git_head"] = "0" * 40
+            runner.atomic_write_json(path, payload)
+
+            with self.assertRaisesRegex(RuntimeError, "Invalid NUMSTAB decision contract"):
+                runner._load_decision(root, runner.sha256_file(path))
+
+
 class BarrierResumeContractTest(unittest.TestCase):
     def test_existing_barrier_is_reused_by_a_new_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

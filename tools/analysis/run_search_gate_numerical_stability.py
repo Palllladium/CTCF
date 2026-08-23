@@ -108,6 +108,13 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _json_equivalent(left: Any, right: Any) -> bool:
+    """Compare values after the tuple-to-list normalization performed by JSON."""
+
+    options = {"ensure_ascii": False, "sort_keys": True, "separators": (",", ":")}
+    return json.dumps(left, **options) == json.dumps(right, **options)
+
+
 def _table_rows(text: str, *, delimiter: str, label: str) -> tuple[tuple[str, ...], list[dict[str, str]]]:
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     fieldnames = tuple(reader.fieldnames or ())
@@ -527,7 +534,7 @@ def prepare_stage(args: argparse.Namespace) -> int:
         if not path.exists():
             atomic_write_text(path, text)
     source_path = root / SOURCE_CONTRACT_NAME
-    if source_path.exists() and _load_json(source_path) != source_contract:
+    if source_path.exists() and not _json_equivalent(_load_json(source_path), source_contract):
         raise RuntimeError("Resume refused: NUMSTAB source contract changed")
     if not source_path.exists():
         atomic_write_json(source_path, source_contract)
@@ -537,7 +544,7 @@ def prepare_stage(args: argparse.Namespace) -> int:
     if '"dice' in serialized or ".pkl" in serialized or "segmentation" in serialized:
         raise RuntimeError("NUMSTAB decision contract leaked label-derived or raw-container data")
     decision_path = root / DECISION_CONTRACT_NAME
-    if decision_path.exists() and _load_json(decision_path) != decision_contract:
+    if decision_path.exists() and not _json_equivalent(_load_json(decision_path), decision_contract):
         raise RuntimeError("Resume refused: NUMSTAB decision contract changed")
     if not decision_path.exists():
         atomic_write_json(decision_path, decision_contract)
@@ -591,7 +598,7 @@ def _load_decision(root: Path, expected_sha: str) -> tuple[dict[str, Any], str]:
         payload.get("schema") != f"ctcf-search-gate-numstab-decision-contract-{SCHEMA_VERSION}"
         or payload.get("protocol_id") != PROTOCOL_ID
         or payload.get("policy_sha256") != NUMERICAL_STABILITY_POLICY_SHA256
-        or payload.get("policy") != NUMERICAL_STABILITY_POLICY.to_dict()
+        or not _json_equivalent(payload.get("policy"), NUMERICAL_STABILITY_POLICY.to_dict())
         or payload.get("source_c3_manifest_sha256") != SOURCE_C3_MANIFEST_SHA256
         or payload.get("source_c3_run_manifest_sha256") != SOURCE_C3_RUN_MANIFEST_SHA256
         or payload.get("decision_contract_contains_label_data") is not False
