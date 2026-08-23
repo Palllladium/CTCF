@@ -227,6 +227,9 @@ def write_output_index(run_root: Path, output: Path, excluded_paths: set[str]) -
 
 def finalize_run(args: argparse.Namespace) -> Path:
     run_root = args.run_root.resolve()
+    strict_checkpoint_load = getattr(args, "strict_checkpoint_load", True)
+    if not isinstance(strict_checkpoint_load, bool):
+        raise TypeError("strict_checkpoint_load must be boolean")
     required = {
         "commands": run_root / "commands.sh",
         "datasets": run_root / "datasets.tsv",
@@ -261,6 +264,11 @@ def finalize_run(args: argparse.Namespace) -> Path:
     if args.status == "COMPLETE":
         if len(preflights) != args.expected_preflights:
             raise ValueError(f"Expected {args.expected_preflights} preflight reports, found {len(preflights)}")
+        expected_strict_checkpoint_load = bool(preflights)
+        if strict_checkpoint_load is not expected_strict_checkpoint_load:
+            raise ValueError(
+                "A COMPLETE run must report strict_checkpoint_load=true exactly when checkpoint preflights are present"
+            )
         for item in preflights:
             load = item.get("load") or {}
             missing = set(load.get("missing_keys") or [])
@@ -295,7 +303,7 @@ def finalize_run(args: argparse.Namespace) -> Path:
             "paths_profile": args.paths_profile,
             "seed": args.seed,
             "deterministic": True,
-            "strict_checkpoint_load": True,
+            "strict_checkpoint_load": strict_checkpoint_load,
             "time_steps": args.time_steps,
         },
         "checkpoints": preflights,
@@ -352,6 +360,12 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--seed", type=int, default=0)
     finalize.add_argument("--time-steps", type=int, required=True)
     finalize.add_argument("--expected-preflights", type=int, required=True)
+    finalize.add_argument(
+        "--strict-checkpoint-load",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether this run loaded a checkpoint under the strict preflight contract.",
+    )
     finalize.add_argument("--remote-locator", default="PENDING_UPLOAD")
     return parser
 

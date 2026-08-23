@@ -190,6 +190,107 @@ class RunArtifactsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "strict checkpoint preflights"):
                 finalize_run(args)
 
+    def test_manifest_can_truthfully_record_a_checkpoint_free_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "preflight").mkdir()
+            for name in ("commands.sh", "datasets.tsv", "environment.txt", "git_status.txt"):
+                (root / name).write_text("fixture\n", encoding="utf-8")
+            args = argparse.Namespace(
+                run_root=root,
+                run_id="checkpoint-free",
+                status="COMPLETE",
+                exit_code=0,
+                started_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-01T00:01:00Z",
+                git_head="a" * 40,
+                branch="test",
+                gpu_index=0,
+                mode="numerical-stability",
+                paths_profile=3,
+                seed=0,
+                time_steps=6,
+                expected_preflights=0,
+                strict_checkpoint_load=False,
+                remote_locator="PENDING_UPLOAD",
+            )
+
+            manifest = finalize_run(args)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["checkpoints"], [])
+            self.assertIs(payload["execution"]["strict_checkpoint_load"], False)
+
+    def test_complete_checkpoint_free_run_rejects_strict_load_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "preflight").mkdir()
+            for name in ("commands.sh", "datasets.tsv", "environment.txt", "git_status.txt"):
+                (root / name).write_text("fixture\n", encoding="utf-8")
+            args = argparse.Namespace(
+                run_root=root,
+                run_id="checkpoint-free-contradiction",
+                status="COMPLETE",
+                exit_code=0,
+                started_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-01T00:01:00Z",
+                git_head="a" * 40,
+                branch="test",
+                gpu_index=0,
+                mode="numerical-stability",
+                paths_profile=3,
+                seed=0,
+                time_steps=6,
+                expected_preflights=0,
+                strict_checkpoint_load=True,
+                remote_locator="PENDING_UPLOAD",
+            )
+
+            with self.assertRaisesRegex(ValueError, "exactly when checkpoint preflights are present"):
+                finalize_run(args)
+
+    def test_complete_checkpoint_run_rejects_non_strict_load_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "preflight").mkdir()
+            for name in ("commands.sh", "datasets.tsv", "environment.txt", "git_status.txt"):
+                (root / name).write_text("fixture\n", encoding="utf-8")
+            (root / "preflight" / "checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "checkpoint": "best.pth",
+                        "sha256": "0" * 64,
+                        "ctcf_config": "CTCF-CascadeA",
+                        "time_steps": 6,
+                        "ctcf_l3_svf": None,
+                        "load": {"strict": True, "missing_keys": [], "unexpected_keys": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                run_root=root,
+                run_id="checkpoint-contradiction",
+                status="COMPLETE",
+                exit_code=0,
+                started_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-01T00:01:00Z",
+                git_head="a" * 40,
+                branch="test",
+                gpu_index=0,
+                mode="test",
+                paths_profile=3,
+                seed=0,
+                time_steps=6,
+                expected_preflights=1,
+                strict_checkpoint_load=False,
+                remote_locator="PENDING_UPLOAD",
+            )
+
+            with self.assertRaisesRegex(ValueError, "exactly when checkpoint preflights are present"):
+                finalize_run(args)
+
 
 if __name__ == "__main__":
     unittest.main()

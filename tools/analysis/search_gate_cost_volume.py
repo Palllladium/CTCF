@@ -12,12 +12,29 @@ from utils.field import identity_collar
 
 MessagePassingMode = Literal["none", "isotropic", "adaptive"]
 DecoderMode = Literal["confidence", "posterior_mean"]
+MomentReductionMode = Literal[
+    "legacy_sequential_fp32",
+    "vectorized_second_moment_fp32",
+    "centered_two_pass_fp32",
+    "centered_two_pass_fp64",
+]
+PosteriorReductionMode = Literal["legacy_sequential", "vectorized_e54"]
+DecoderReductionMode = Literal["legacy_sequential", "einsum_e54"]
 
 MIND_CHANNELS = 12
 STANDARDIZATION_FLOOR = 1e-6
 LOGIT_MESSAGE_AXIS_KERNEL = (0.25, 0.5, 0.25)
 POSTERIOR_DIAGNOSTICS_ID = "MASKED_27_OFFSET_LOGIT_POSTERIOR_GEOMETRY_V1"
 RMS_FIRST_DIFFERENCE_ROUGHNESS_ID = "RMS_VECTOR_FIRST_DIFFERENCE_GEOMETRY_PAIRS_V1"
+
+
+@dataclass(frozen=True)
+class RawMindCostVolume:
+    """The shared scalar MIND costs before any candidate normalization."""
+
+    costs: torch.Tensor
+    valid: torch.Tensor
+    valid_count: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -29,6 +46,10 @@ class StandardizedCostVolume:
     valid_count: torch.Tensor
     cost_mean: torch.Tensor
     cost_std: torch.Tensor
+    cost_variance_unclamped: torch.Tensor
+    variance_negative: torch.Tensor
+    floor_hit: torch.Tensor
+    standardization_mode: MomentReductionMode
 
 
 @dataclass(frozen=True)
@@ -38,6 +59,7 @@ class PosteriorResult:
     normalized_entropy: torch.Tensor
     confidence: torch.Tensor
     valid_count: torch.Tensor
+    reduction_mode: PosteriorReductionMode
 
 
 @dataclass(frozen=True)
@@ -56,6 +78,7 @@ class DecoderResult:
     normalized_entropy: torch.Tensor
     confidence: torch.Tensor
     mode: DecoderMode
+    reduction_mode: DecoderReductionMode
 
 
 @dataclass(frozen=True)
@@ -131,20 +154,14 @@ def _require_candidate_tensor(tensor: torch.Tensor, name: str) -> None:
         raise ValueError(f"{name} must have shape [1,{len(OFFSETS)},D,H,W], got {tuple(tensor.shape)}")
 
 
-def _standardize_candidate_costs(
+def standardize_candidate_costs(
     costs: torch.Tensor,
     valid: torch.Tensor,
     *,
+    mode: MomentReductionMode,
     standardization_floor: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Standardize candidates with the frozen legacy accumulation order.
-
-    C1/C2 accumulated the 27 first and second moments one offset at a time.
-    A vectorized reduction is mathematically equivalent but not numerically
-    equivalent in float32 when the candidate costs are nearly flat; cancellation
-    can then change the posterior materially on CUDA.  Keep the historical order
-    so the raw C3 controls remain genuine C1/C2 controls.
-    """
+) -> StandardizedCostVolume:
+    """Normalize one raw cost tensor with an explicitly named reduction."""
 
     _require_candidate_tensor(costs, "candidate costs")
     _require_candidate_tensor(valid, "candidate validity mask")
@@ -156,24 +173,133 @@ def _standardize_candidate_costs(
         raise ValueError("standardization_floor must be finite and positive")
     if not bool(torch.isfinite(costs.masked_select(valid)).all()):
         raise ValueError("valid candidate costs must be finite")
+    supported = (
+        "legacy_sequential_fp32",
+        "vectorized_second_moment_fp32",
+        "centered_two_pass_fp32",
+        "centered_two_pass_fp64",
+    )
+    if mode not in supported:
+        raise ValueError(f"unsupported candidate-moment reduction: {mode!r}")
 
     map_shape = (1, 1, *costs.shape[-3:])
-    sum_cost = costs.new_zeros(map_shape)
-    sum_square = costs.new_zeros(map_shape)
-    for index in range(len(OFFSETS)):
-        candidate = costs[:, index : index + 1]
-        candidate_valid = valid[:, index : index + 1]
-        safe = torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
-        sum_cost += safe
-        sum_square += safe.square()
-
     valid_count = valid.sum(dim=1, keepdim=True)
-    count = valid_count.to(costs.dtype).clamp_min(1.0)
-    mean = sum_cost / count
-    variance = (sum_square / count - mean.square()).clamp_min(0.0)
-    std = variance.sqrt().clamp_min(float(standardization_floor))
-    standardized = torch.where(valid, (costs - mean) / std, torch.zeros_like(costs))
-    return standardized, valid_count, mean, std
+    accumulator_dtype = torch.float64 if mode == "centered_two_pass_fp64" else costs.dtype
+    count = valid_count.to(accumulator_dtype).clamp_min(1.0)
+
+    if mode == "vectorized_second_moment_fp32":
+        safe_costs = torch.where(valid, costs, torch.zeros_like(costs))
+        mean = safe_costs.sum(dim=1, keepdim=True) / count
+        variance_unclamped = safe_costs.square().sum(dim=1, keepdim=True) / count - mean.square()
+    else:
+        sum_cost = torch.zeros(map_shape, dtype=accumulator_dtype, device=costs.device)
+        for index in range(len(OFFSETS)):
+            candidate = costs[:, index : index + 1].to(accumulator_dtype)
+            candidate_valid = valid[:, index : index + 1]
+            sum_cost += torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
+        mean = sum_cost / count
+
+        if mode == "legacy_sequential_fp32":
+            sum_square = costs.new_zeros(map_shape)
+            for index in range(len(OFFSETS)):
+                candidate = costs[:, index : index + 1]
+                candidate_valid = valid[:, index : index + 1]
+                safe = torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
+                sum_square += safe.square()
+            variance_unclamped = sum_square / count - mean.square()
+        else:
+            centered_square_sum = torch.zeros(map_shape, dtype=accumulator_dtype, device=costs.device)
+            for index in range(len(OFFSETS)):
+                candidate = costs[:, index : index + 1].to(accumulator_dtype)
+                candidate_valid = valid[:, index : index + 1]
+                centered = candidate - mean
+                centered_square_sum += torch.where(
+                    candidate_valid,
+                    centered.square(),
+                    torch.zeros_like(centered),
+                )
+            variance_unclamped = centered_square_sum / count
+
+    variance_negative = variance_unclamped < 0.0
+    variance = variance_unclamped.clamp_min(0.0)
+    floor = float(standardization_floor)
+    floor_hit = variance.sqrt() < floor
+    std = variance.sqrt().clamp_min(floor)
+    if mode == "centered_two_pass_fp64":
+        standardized = torch.zeros_like(costs)
+        for index in range(len(OFFSETS)):
+            candidate = costs[:, index : index + 1].double()
+            z = ((candidate - mean) / std).to(costs.dtype)
+            standardized[:, index : index + 1].copy_(torch.where(valid[:, index : index + 1], z, torch.zeros_like(z)))
+    else:
+        standardized = torch.where(valid, (costs - mean) / std, torch.zeros_like(costs))
+    for name, tensor in (
+        ("candidate mean", mean),
+        ("candidate variance", variance_unclamped),
+        ("candidate standard deviation", std),
+        ("standardized candidate costs", standardized),
+    ):
+        if not bool(torch.isfinite(tensor).all()):
+            raise FloatingPointError(f"{name} became non-finite under {mode}")
+    return StandardizedCostVolume(
+        standardized_costs=standardized,
+        valid=valid,
+        valid_count=valid_count,
+        cost_mean=mean,
+        cost_std=std,
+        cost_variance_unclamped=variance_unclamped,
+        variance_negative=variance_negative,
+        floor_hit=floor_hit,
+        standardization_mode=mode,
+    )
+
+
+def _standardize_candidate_costs(
+    costs: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    standardization_floor: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compatibility wrapper for the frozen C1/C2/C3 accumulation order."""
+
+    result = standardize_candidate_costs(
+        costs,
+        valid,
+        mode="legacy_sequential_fp32",
+        standardization_floor=standardization_floor,
+    )
+    return result.standardized_costs, result.valid_count, result.cost_mean, result.cost_std
+
+
+def build_raw_mind_cost_volume(
+    fixed_mind: torch.Tensor,
+    moving_mind: torch.Tensor,
+    psi_displacement: torch.Tensor,
+    geometry_mask: torch.Tensor,
+) -> RawMindCostVolume:
+    """Build the shared 27-way scalar cost tensor without normalizing it."""
+
+    _require_feature_pair(fixed_mind, moving_mind)
+    spatial = tuple(fixed_mind.shape[-3:])
+    _require_field(psi_displacement, spatial)
+    _require_geometry_mask(geometry_mask, spatial, fixed_mind.device)
+    if psi_displacement.device != fixed_mind.device or psi_displacement.dtype != fixed_mind.dtype:
+        raise ValueError("Psi and MIND features must share device and dtype")
+
+    shape = (1, len(OFFSETS), *spatial)
+    costs = torch.empty(shape, dtype=fixed_mind.dtype, device=fixed_mind.device)
+    valid = torch.empty(shape, dtype=torch.bool, device=fixed_mind.device)
+    with torch.inference_mode():
+        for index, offset in enumerate(OFFSETS):
+            sampled = sample_at_psi(moving_mind, psi_displacement, offset)
+            cost = (fixed_mind - sampled).square().mean(dim=1)
+            candidate_valid = valid_sample_mask(psi_displacement, offset)[:, 0] & geometry_mask[:, 0]
+            costs[:, index].copy_(cost)
+            valid[:, index].copy_(candidate_valid)
+    valid_count = valid.sum(dim=1, keepdim=True)
+    if bool((geometry_mask & (valid_count == 0)).any()):
+        raise RuntimeError("MIND cost volume has an active voxel without a valid candidate")
+    return RawMindCostVolume(costs=costs, valid=valid, valid_count=valid_count)
 
 
 def build_standardized_mind_cost_volume(
@@ -191,41 +317,14 @@ def build_standardized_mind_cost_volume(
     standardized cost of zero and are excluded by the accompanying boolean mask.
     """
 
-    _require_feature_pair(fixed_mind, moving_mind)
-    spatial = tuple(fixed_mind.shape[-3:])
-    _require_field(psi_displacement, spatial)
-    _require_geometry_mask(geometry_mask, spatial, fixed_mind.device)
-    if psi_displacement.device != fixed_mind.device or psi_displacement.dtype != fixed_mind.dtype:
-        raise ValueError("Psi and MIND features must share device and dtype")
     if not math.isfinite(standardization_floor) or standardization_floor <= 0.0:
         raise ValueError("standardization_floor must be finite and positive")
-
-    shape = (1, len(OFFSETS), *spatial)
-    costs = torch.empty(shape, dtype=fixed_mind.dtype, device=fixed_mind.device)
-    valid = torch.empty(shape, dtype=torch.bool, device=fixed_mind.device)
-
-    with torch.inference_mode():
-        for index, offset in enumerate(OFFSETS):
-            sampled = sample_at_psi(moving_mind, psi_displacement, offset)
-            cost = (fixed_mind - sampled).square().mean(dim=1)
-            candidate_valid = valid_sample_mask(psi_displacement, offset)[:, 0] & geometry_mask[:, 0]
-            costs[:, index].copy_(cost)
-            valid[:, index].copy_(candidate_valid)
-
-        standardized, valid_count, mean, std = _standardize_candidate_costs(
-            costs,
-            valid,
-            standardization_floor=standardization_floor,
-        )
-        if bool((geometry_mask & (valid_count == 0)).any()):
-            raise RuntimeError("MIND cost volume has an active voxel without a valid candidate")
-
-    return StandardizedCostVolume(
-        standardized_costs=standardized,
-        valid=valid,
-        valid_count=valid_count,
-        cost_mean=mean,
-        cost_std=std,
+    raw = build_raw_mind_cost_volume(fixed_mind, moving_mind, psi_displacement, geometry_mask)
+    return standardize_candidate_costs(
+        raw.costs,
+        raw.valid,
+        mode="legacy_sequential_fp32",
+        standardization_floor=standardization_floor,
     )
 
 
@@ -234,6 +333,7 @@ def posterior_from_logits(
     valid: torch.Tensor,
     *,
     temperature: float = 1.0,
+    reduction_mode: PosteriorReductionMode = "legacy_sequential",
 ) -> PosteriorResult:
     """Masked 27-way posterior with explicit entropy and normalized entropy ``h``."""
 
@@ -249,44 +349,68 @@ def posterior_from_logits(
         raise ValueError("posterior temperature must be finite and positive")
     if not bool(torch.isfinite(logits.masked_select(valid)).all()):
         raise ValueError("valid candidate logits must be finite")
+    if reduction_mode not in ("legacy_sequential", "vectorized_e54"):
+        raise ValueError(f"unsupported posterior reduction: {reduction_mode!r}")
 
     with torch.inference_mode():
         valid_count = valid.sum(dim=1, keepdim=True)
         active = valid_count > 0
         scaled_logits = logits / float(temperature)
-        scaled_maximum = torch.full(
-            (1, 1, *logits.shape[-3:]),
-            -torch.inf,
-            dtype=logits.dtype,
-            device=logits.device,
-        )
-        for index in range(len(OFFSETS)):
-            candidate = scaled_logits[:, index : index + 1]
-            candidate_valid = valid[:, index : index + 1]
-            scaled_maximum = torch.where(
-                candidate_valid & (candidate > scaled_maximum),
-                candidate,
-                scaled_maximum,
+        if reduction_mode == "vectorized_e54":
+            negative_inf = torch.full_like(logits, -torch.inf)
+            scaled_maximum = torch.where(valid, scaled_logits, negative_inf).amax(dim=1, keepdim=True)
+            scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
+            weights = torch.where(valid, torch.exp(scaled_logits - scaled_maximum), torch.zeros_like(logits))
+            normalizer = weights.sum(dim=1, keepdim=True)
+            probabilities = torch.where(
+                active,
+                weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
+                0.0,
             )
-        scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
-        weights = torch.zeros_like(logits)
-        normalizer = torch.zeros_like(scaled_maximum)
-        weighted_shift_sum = torch.zeros_like(scaled_maximum)
-        for index in range(len(OFFSETS)):
-            candidate_valid = valid[:, index : index + 1]
-            shifted = scaled_logits[:, index : index + 1] - scaled_maximum
-            safe_shifted = torch.where(candidate_valid, shifted, torch.zeros_like(shifted))
-            weight = torch.exp(safe_shifted) * candidate_valid.to(logits.dtype)
-            weights[:, index : index + 1].copy_(weight)
-            normalizer += weight
-            weighted_shift_sum += weight * safe_shifted
-        probabilities = torch.where(active, weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny), 0.0)
-        entropy = torch.where(
-            active,
-            torch.log(normalizer.clamp_min(torch.finfo(logits.dtype).tiny))
-            - weighted_shift_sum / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
-            torch.zeros_like(normalizer),
-        )
+            log_probabilities = torch.where(
+                probabilities > 0.0,
+                torch.log(probabilities.clamp_min(torch.finfo(logits.dtype).tiny)),
+                torch.zeros_like(probabilities),
+            )
+            entropy = -(probabilities * log_probabilities).sum(dim=1, keepdim=True)
+        else:
+            scaled_maximum = torch.full(
+                (1, 1, *logits.shape[-3:]),
+                -torch.inf,
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            for index in range(len(OFFSETS)):
+                candidate = scaled_logits[:, index : index + 1]
+                candidate_valid = valid[:, index : index + 1]
+                scaled_maximum = torch.where(
+                    candidate_valid & (candidate > scaled_maximum),
+                    candidate,
+                    scaled_maximum,
+                )
+            scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
+            weights = torch.zeros_like(logits)
+            normalizer = torch.zeros_like(scaled_maximum)
+            weighted_shift_sum = torch.zeros_like(scaled_maximum)
+            for index in range(len(OFFSETS)):
+                candidate_valid = valid[:, index : index + 1]
+                shifted = scaled_logits[:, index : index + 1] - scaled_maximum
+                safe_shifted = torch.where(candidate_valid, shifted, torch.zeros_like(shifted))
+                weight = torch.exp(safe_shifted) * candidate_valid.to(logits.dtype)
+                weights[:, index : index + 1].copy_(weight)
+                normalizer += weight
+                weighted_shift_sum += weight * safe_shifted
+            probabilities = torch.where(
+                active,
+                weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
+                0.0,
+            )
+            entropy = torch.where(
+                active,
+                torch.log(normalizer.clamp_min(torch.finfo(logits.dtype).tiny))
+                - weighted_shift_sum / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
+                torch.zeros_like(normalizer),
+            )
         log_k = torch.log(valid_count.to(logits.dtype).clamp_min(1.0))
         normalized_entropy = torch.where(valid_count > 1, entropy / log_k, torch.zeros_like(entropy))
         normalized_entropy = normalized_entropy.clamp(0.0, 1.0)
@@ -302,13 +426,24 @@ def posterior_from_logits(
         normalized_entropy=normalized_entropy,
         confidence=confidence,
         valid_count=valid_count,
+        reduction_mode=reduction_mode,
     )
 
 
-def raw_posterior(cost_volume: StandardizedCostVolume, *, temperature: float = 1.0) -> PosteriorResult:
+def raw_posterior(
+    cost_volume: StandardizedCostVolume,
+    *,
+    temperature: float = 1.0,
+    reduction_mode: PosteriorReductionMode = "legacy_sequential",
+) -> PosteriorResult:
     """Posterior of the unregularized standardized costs: ``softmax(-z)``."""
 
-    return posterior_from_logits(-cost_volume.standardized_costs, cost_volume.valid, temperature=temperature)
+    return posterior_from_logits(
+        -cost_volume.standardized_costs,
+        cost_volume.valid,
+        temperature=temperature,
+        reduction_mode=reduction_mode,
+    )
 
 
 def masked_separable_smooth_logits(logits: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -400,18 +535,29 @@ def apply_message_passing(
     )
 
 
-def decode_posterior(posterior: PosteriorResult, *, mode: DecoderMode) -> DecoderResult:
+def decode_posterior(
+    posterior: PosteriorResult,
+    *,
+    mode: DecoderMode,
+    reduction_mode: DecoderReductionMode = "legacy_sequential",
+) -> DecoderResult:
     """Decode an offset posterior as its mean, optionally attenuated by confidence."""
 
     probabilities = posterior.probabilities
     _require_candidate_tensor(probabilities, "posterior probabilities")
     if mode not in ("confidence", "posterior_mean"):
         raise ValueError(f"unsupported decoder mode: {mode!r}")
+    if reduction_mode not in ("legacy_sequential", "einsum_e54"):
+        raise ValueError(f"unsupported decoder reduction: {reduction_mode!r}")
     if not bool(torch.isfinite(probabilities).all()):
         raise ValueError("posterior probabilities must be finite")
-    posterior_mean = probabilities.new_zeros((1, 3, *probabilities.shape[-3:]))
-    for index, offset in enumerate(OFFSETS):
-        posterior_mean += probabilities[:, index : index + 1] * probabilities.new_tensor(offset).view(1, 3, 1, 1, 1)
+    if reduction_mode == "einsum_e54":
+        offsets = probabilities.new_tensor(OFFSETS)
+        posterior_mean = torch.einsum("bkdwh,kc->bcdwh", probabilities, offsets)
+    else:
+        posterior_mean = probabilities.new_zeros((1, 3, *probabilities.shape[-3:]))
+        for index, offset in enumerate(OFFSETS):
+            posterior_mean += probabilities[:, index : index + 1] * probabilities.new_tensor(offset).view(1, 3, 1, 1, 1)
     displacement = posterior_mean * posterior.confidence if mode == "confidence" else posterior_mean.clone()
     return DecoderResult(
         displacement=displacement,
@@ -420,6 +566,7 @@ def decode_posterior(posterior: PosteriorResult, *, mode: DecoderMode) -> Decode
         normalized_entropy=posterior.normalized_entropy,
         confidence=posterior.confidence,
         mode=mode,
+        reduction_mode=reduction_mode,
     )
 
 
@@ -488,7 +635,12 @@ def posterior_diagnostics(
     expected_sum = active.to(logits.dtype)
     if not torch.allclose(probability_sum, expected_sum, atol=tolerance, rtol=tolerance):
         raise ValueError("posterior probabilities do not have the required masked normalization")
-    reference = posterior_from_logits(logits, valid, temperature=temperature)
+    reference = posterior_from_logits(
+        logits,
+        valid,
+        temperature=temperature,
+        reduction_mode=posterior.reduction_mode,
+    )
     if not torch.allclose(probabilities, reference.probabilities, atol=tolerance, rtol=tolerance):
         raise ValueError("posterior probabilities are inconsistent with logits, mask, and temperature")
     tiny = torch.finfo(logits.dtype).tiny
