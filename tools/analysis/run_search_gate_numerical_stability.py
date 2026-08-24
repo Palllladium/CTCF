@@ -41,6 +41,7 @@ from tools.analysis.search_gate_numerical_stability import (
     EXACT_CLAIM_EPS,
     FACTORIAL_EDGES,
     FACTORIAL_SPECS,
+    FAILED_VECTORIZED_SENTINEL_ATOL,
     GEOMETRY_NONINFERIOR_TOLERANCE,
     LEGACY_PARITY_ATOL,
     LOCAL_CLIP_SWEEPS,
@@ -99,6 +100,72 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_STD_FLOOR = 1e-6
 NCC_EPS = 1e-5
 SOURCE_BASELINE_DICE_ATOL = 1e-8
+
+
+def _e54_sentinel_record(case_id: str, observed: float | None) -> dict[str, float | str | bool | None]:
+    expected = SENTINEL_ALL_VECTORIZED_GAPS.get(case_id)
+    if expected is None:
+        if observed is not None:
+            raise ValueError(f"Unexpected E54 sentinel observation for {case_id}")
+        return {
+            "expected_max_abs": None,
+            "observed_max_abs": None,
+            "absolute_error": None,
+            "absolute_tolerance": None,
+            "expected_max_abs_9g": None,
+            "observed_max_abs_9g": None,
+            "pass": None,
+        }
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isfinite(float(observed)):
+        raise ValueError(f"Invalid E54 sentinel observation for {case_id}: {observed!r}")
+    expected_value = float(expected)
+    observed_value = float(observed)
+    absolute_error = abs(observed_value - expected_value)
+    return {
+        "expected_max_abs": expected_value,
+        "observed_max_abs": observed_value,
+        "absolute_error": absolute_error,
+        "absolute_tolerance": FAILED_VECTORIZED_SENTINEL_ATOL,
+        "expected_max_abs_9g": format(expected_value, ".9g"),
+        "observed_max_abs_9g": format(observed_value, ".9g"),
+        "pass": absolute_error <= FAILED_VECTORIZED_SENTINEL_ATOL,
+    }
+
+
+def _validate_e54_sentinel(payload: Any, case_id: str) -> None:
+    expected = SENTINEL_ALL_VECTORIZED_GAPS.get(case_id)
+    if expected is None:
+        if payload != _e54_sentinel_record(case_id, None):
+            raise RuntimeError(f"Unexpected NUMSTAB e54 sentinel record: {case_id}")
+        return
+    if not isinstance(payload, dict) or set(payload) != set(_e54_sentinel_record(case_id, float(expected))):
+        raise RuntimeError(f"Invalid NUMSTAB e54 sentinel schema: {case_id}")
+    expected_value = payload.get("expected_max_abs")
+    observed_value = payload.get("observed_max_abs")
+    absolute_error = payload.get("absolute_error")
+    tolerance = payload.get("absolute_tolerance")
+    numeric_values = (expected_value, observed_value, absolute_error, tolerance)
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
+        for value in numeric_values
+    ):
+        raise RuntimeError(f"Invalid NUMSTAB e54 sentinel values: {case_id}")
+    expected_value = float(expected_value)
+    observed_value = float(observed_value)
+    absolute_error = float(absolute_error)
+    tolerance = float(tolerance)
+    recomputed_error = abs(observed_value - expected_value)
+    expected_pass = recomputed_error <= FAILED_VECTORIZED_SENTINEL_ATOL
+    if (
+        expected_value != float(expected)
+        or absolute_error != recomputed_error
+        or tolerance != FAILED_VECTORIZED_SENTINEL_ATOL
+        or payload.get("expected_max_abs_9g") != format(expected_value, ".9g")
+        or payload.get("observed_max_abs_9g") != format(observed_value, ".9g")
+        or payload.get("pass") is not expected_pass
+        or not expected_pass
+    ):
+        raise RuntimeError(f"NUMSTAB e54 sentinel is not reproduced: {case_id}")
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -832,18 +899,15 @@ def _run_decision_case(
 
     sentinel_expected = SENTINEL_ALL_VECTORIZED_GAPS.get(case_id)
     sentinel_observed: float | None = None
-    sentinel_pass: bool | None = None
-    sentinel_expected_text: str | None = None
-    sentinel_observed_text: str | None = None
     if sentinel_expected is not None:
         sentinel_observed = float(field_difference(study.factorial_residuals["F111"], direct_residual, mask)["max_abs"])
-        sentinel_expected_text = format(float(sentinel_expected), ".9g")
-        sentinel_observed_text = format(sentinel_observed, ".9g")
-        sentinel_pass = sentinel_observed_text == sentinel_expected_text
-        if not sentinel_pass:
-            raise RuntimeError(
-                f"E54_SENTINEL_GAP_CHANGED: {case_id}: observed={sentinel_observed}, expected={sentinel_expected}"
-            )
+    sentinel = _e54_sentinel_record(case_id, sentinel_observed)
+    if sentinel["pass"] is False:
+        raise RuntimeError(
+            "E54_SENTINEL_GAP_CHANGED: "
+            f"{case_id}: observed={sentinel['observed_max_abs']}, expected={sentinel['expected_max_abs']}, "
+            f"absolute_error={sentinel['absolute_error']}, tolerance={sentinel['absolute_tolerance']}"
+        )
 
     baseline_valid = valid_sample_mask(initial)
     baseline_geometry = _geometry_bundle(initial, mask)
@@ -942,13 +1006,7 @@ def _run_decision_case(
             "historical_conf_array_sha256_equal": historical_hash_equal,
             "historical_mean_common_rms_array_sha256_equal": historical_mean_hash_equal,
         },
-        "e54_sentinel": {
-            "expected_max_abs": sentinel_expected,
-            "observed_max_abs": sentinel_observed,
-            "expected_max_abs_9g": sentinel_expected_text,
-            "observed_max_abs_9g": sentinel_observed_text,
-            "pass": sentinel_pass,
-        },
+        "e54_sentinel": sentinel,
         "reduction_oracle_faithful": study.oracle_faithful,
         "postclip_oracle_pairs": postclip_oracle_pairs,
         "postclip_oracle_faithful": all(row["faithful"] for row in postclip_oracle_pairs),
@@ -1046,14 +1104,7 @@ def _validate_decision_case(
         or parity.get("historical_mean_common_rms_array_sha256_equal") is not True
     ):
         raise RuntimeError(f"NUMSTAB legacy parity is not established: {case_id}")
-    sentinel = payload.get("e54_sentinel") or {}
-    expected = SENTINEL_ALL_VECTORIZED_GAPS.get(case_id)
-    if expected is not None and (
-        sentinel.get("pass") is not True
-        or sentinel.get("expected_max_abs_9g") != format(float(expected), ".9g")
-        or sentinel.get("observed_max_abs_9g") != format(float(expected), ".9g")
-    ):
-        raise RuntimeError(f"NUMSTAB e54 sentinel is not reproduced: {case_id}")
+    _validate_e54_sentinel(payload.get("e54_sentinel"), case_id)
     source_heavy = Path(contract["source_c3_heavy_root"])
     target_heavy = Path(contract["heavy_root"])
     if verify_heavy:
@@ -1657,6 +1708,13 @@ def _metric_value(bundle: dict[str, Any], metric_id: str) -> float | None:
     return float(value) if row.get("status") == "OK" and isinstance(value, (int, float)) else None
 
 
+def _metric_status(bundle: dict[str, Any], metric_id: str) -> str:
+    status = (bundle.get(metric_id) or {}).get("status")
+    if not isinstance(status, str) or not status:
+        raise RuntimeError(f"Missing metric status for {metric_id}")
+    return status
+
+
 def _paired(candidate: list[float], baseline: list[float]) -> Any:
     return paired_summary(
         candidate,
@@ -1665,6 +1723,69 @@ def _paired(candidate: list[float], baseline: list[float]) -> Any:
         bootstrap_seed=BOOTSTRAP_SEED,
         confidence=BOOTSTRAP_CONFIDENCE,
     )
+
+
+def _geometry_contrast_summary(
+    rows: list[dict[str, Any]],
+    candidate_key: str,
+    comparator_key: str,
+    *,
+    expected_cases: int,
+    required: bool,
+    label: str,
+) -> dict[str, Any]:
+    if len(rows) != expected_cases:
+        raise RuntimeError(f"NUMSTAB {label} geometry contrast has {len(rows)} cases, expected {expected_cases}")
+    candidate_status_key = f"{candidate_key}_status"
+    comparator_status_key = f"{comparator_key}_status"
+    for row in rows:
+        for value_key, status_key in (
+            (candidate_key, candidate_status_key),
+            (comparator_key, comparator_status_key),
+        ):
+            if not isinstance(row.get(status_key), str) or (row[value_key] is not None) is not (
+                row[status_key] == "OK"
+            ):
+                raise RuntimeError(f"NUMSTAB {label} has inconsistent geometry value/status evidence")
+    candidate_defined = sum(row[candidate_key] is not None for row in rows)
+    comparator_defined = sum(row[comparator_key] is not None for row in rows)
+    paired_rows = [row for row in rows if row[candidate_key] is not None and row[comparator_key] is not None]
+    candidate_statuses = {row[candidate_status_key] for row in rows}
+    comparator_statuses = {row[comparator_status_key] for row in rows}
+    if required and len(paired_rows) != expected_cases:
+        raise RuntimeError(f"NUMSTAB {label} lacks a paired geometry contrast")
+    metadata = {
+        "status": "OK" if len(paired_rows) == expected_cases else "UNDEFINED_INCOMPLETE_SUPPORT",
+        "n_cases": expected_cases,
+        "candidate_defined_cases": candidate_defined,
+        "comparator_defined_cases": comparator_defined,
+        "paired_defined_cases": len(paired_rows),
+        "undefined_pair_cases": expected_cases - len(paired_rows),
+        "candidate_metric_status": next(iter(candidate_statuses)) if len(candidate_statuses) == 1 else "MIXED",
+        "comparator_metric_status": next(iter(comparator_statuses)) if len(comparator_statuses) == 1 else "MIXED",
+    }
+    if len(paired_rows) == expected_cases:
+        return {
+            **metadata,
+            **_paired(
+                [float(row[candidate_key]) for row in paired_rows],
+                [float(row[comparator_key]) for row in paired_rows],
+            ).to_dict(),
+        }
+    return {
+        **metadata,
+        "n": len(paired_rows),
+        "mean": None,
+        "median": None,
+        "ci_low": None,
+        "ci_high": None,
+        "improved": None,
+        "worsened": None,
+        "tied": None,
+        "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
+        "bootstrap_seed": BOOTSTRAP_SEED,
+        "bootstrap_confidence": BOOTSTRAP_CONFIDENCE,
+    }
 
 
 def finalize_stage(args: argparse.Namespace) -> int:
@@ -1790,12 +1911,25 @@ def finalize_stage(args: argparse.Namespace) -> int:
                 "candidate_dice_delta_vs_comparator": evaluation_row["capacity_candidate_dice"] - comparator_candidate,
                 "returned_dice_delta_vs_comparator": evaluation_row["primary_returned_dice"] - comparator_returned,
                 "baseline_primary_geometry": _metric_value(baseline_geometry, metric_id),
+                "baseline_primary_geometry_status": _metric_status(baseline_geometry, metric_id),
                 "requested_primary_geometry": requested_primary_geometry,
+                "requested_primary_geometry_status": _metric_status(requested_geometry, metric_id),
                 "candidate_primary_geometry": candidate_primary_geometry,
+                "candidate_primary_geometry_status": _metric_status(candidate_geometry, metric_id),
                 "returned_primary_geometry": returned_primary_geometry,
+                "returned_primary_geometry_status": _metric_status(returned_geometry, metric_id),
                 "comparator_requested_primary_geometry": comparator_requested_geometry,
+                "comparator_requested_primary_geometry_status": _metric_status(
+                    {metric_id: comparator["requested_primary_geometry"]}, metric_id
+                ),
                 "comparator_candidate_primary_geometry": comparator_candidate_geometry,
+                "comparator_candidate_primary_geometry_status": _metric_status(
+                    {metric_id: comparator["candidate_primary_geometry"]}, metric_id
+                ),
                 "comparator_returned_primary_geometry": comparator_returned_geometry,
+                "comparator_returned_primary_geometry_status": _metric_status(
+                    {metric_id: comparator["returned_primary_geometry"]}, metric_id
+                ),
                 "requested_primary_geometry_delta_vs_comparator": (
                     requested_primary_geometry - comparator_requested_geometry
                     if requested_primary_geometry is not None and comparator_requested_geometry is not None
@@ -1814,7 +1948,13 @@ def finalize_stage(args: argparse.Namespace) -> int:
                 "capacity_geometry_reference": _metric_value(
                     {metric_id: geometry_reference["candidate_primary_geometry"]}, metric_id
                 ),
+                "capacity_geometry_reference_status": _metric_status(
+                    {metric_id: geometry_reference["candidate_primary_geometry"]}, metric_id
+                ),
                 "primary_geometry_reference": _metric_value(
+                    {metric_id: geometry_reference["returned_primary_geometry"]}, metric_id
+                ),
+                "primary_geometry_reference_status": _metric_status(
                     {metric_id: geometry_reference["returned_primary_geometry"]}, metric_id
                 ),
                 **evaluation_row,
@@ -1842,19 +1982,32 @@ def finalize_stage(args: argparse.Namespace) -> int:
         returned_vs_comparator = _paired(
             [row["primary_returned_dice"] for row in rows], [row["comparator_returned_dice"] for row in rows]
         )
-        geometry_pairs = (
-            ("requested", "requested_primary_geometry", "comparator_requested_primary_geometry"),
-            ("capacity", "candidate_primary_geometry", "comparator_candidate_primary_geometry"),
-            ("primary_policy", "returned_primary_geometry", "comparator_returned_primary_geometry"),
-        )
-        geometry_vs_comparator: dict[str, Any] = {}
-        for stage, candidate_key, comparator_key in geometry_pairs:
-            if any(row[candidate_key] is None or row[comparator_key] is None for row in rows):
-                raise RuntimeError(f"NUMSTAB {spec.arm_id} lacks a paired {stage} geometry contrast")
-            geometry_vs_comparator[stage] = _paired(
-                [float(row[candidate_key]) for row in rows],
-                [float(row[comparator_key]) for row in rows],
-            )
+        geometry_vs_comparator = {
+            "requested": _geometry_contrast_summary(
+                rows,
+                "requested_primary_geometry",
+                "comparator_requested_primary_geometry",
+                expected_cases=EXPECTED_CASES,
+                required=False,
+                label=f"{spec.arm_id}/requested",
+            ),
+            "capacity": _geometry_contrast_summary(
+                rows,
+                "candidate_primary_geometry",
+                "comparator_candidate_primary_geometry",
+                expected_cases=EXPECTED_CASES,
+                required=True,
+                label=f"{spec.arm_id}/capacity",
+            ),
+            "primary_policy": _geometry_contrast_summary(
+                rows,
+                "returned_primary_geometry",
+                "comparator_returned_primary_geometry",
+                expected_cases=EXPECTED_CASES,
+                required=True,
+                label=f"{spec.arm_id}/primary_policy",
+            ),
+        }
         capacity_geometry_deltas = [
             float(row["candidate_primary_geometry"]) - float(row["capacity_geometry_reference"])
             for row in rows
@@ -1917,9 +2070,9 @@ def finalize_stage(args: argparse.Namespace) -> int:
             "requested_vs_comparator": requested_vs_comparator.to_dict(),
             "capacity_vs_comparator": capacity_vs_comparator.to_dict(),
             "primary_policy_vs_comparator": returned_vs_comparator.to_dict(),
-            "requested_geometry_vs_comparator": geometry_vs_comparator["requested"].to_dict(),
-            "capacity_geometry_vs_comparator": geometry_vs_comparator["capacity"].to_dict(),
-            "primary_policy_geometry_vs_comparator": geometry_vs_comparator["primary_policy"].to_dict(),
+            "requested_geometry_vs_comparator": geometry_vs_comparator["requested"],
+            "capacity_geometry_vs_comparator": geometry_vs_comparator["capacity"],
+            "primary_policy_geometry_vs_comparator": geometry_vs_comparator["primary_policy"],
         }
         summaries.append(summary_row)
         hypotheses[spec.arm_id] = summary_row

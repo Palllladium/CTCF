@@ -15,6 +15,7 @@ from tools.analysis.search_gate_numerical_stability import (
     DECODER_VECTORIZED,
     FACTORIAL_EDGES,
     FACTORIAL_SPECS,
+    FAILED_VECTORIZED_SENTINEL_ATOL,
     MOMENT_CENTERED_FP32,
     MOMENT_CENTERED_FP64,
     MOMENT_LEGACY,
@@ -23,6 +24,7 @@ from tools.analysis.search_gate_numerical_stability import (
     NUMERICAL_STABILITY_POLICY_SHA256,
     POSTERIOR_LEGACY,
     POSTERIOR_VECTORIZED,
+    SCHEMA_VERSION,
     SCIENTIFIC_ARMS,
     SENTINEL_ALL_VECTORIZED_GAPS,
     build_reduction_study,
@@ -297,6 +299,10 @@ class FrozenNumericalStabilityProtocolTest(unittest.TestCase):
         fixed = dict(NUMERICAL_STABILITY_POLICY.fixed_parameters)
         self.assertEqual(fixed["failed_vectorized_source_git_head"], "e54d6bf4c026")
         self.assertEqual(fixed["failed_vectorized_sentinel_gaps"], tuple(expected.items()))
+        self.assertEqual(fixed["failed_vectorized_sentinel_abs_tolerance"], FAILED_VECTORIZED_SENTINEL_ATOL)
+        self.assertEqual(fixed["requested_geometry_role"], "diagnostic_only_allow_undefined_nonpositive")
+        self.assertEqual(fixed["branch_geometry_stages"], ("capacity_candidate", "primary_returned"))
+        self.assertEqual(SCHEMA_VERSION, "v2")
 
     def test_policy_hash_and_selfcheck_are_frozen(self) -> None:
         self.assertEqual(policy_sha256(), NUMERICAL_STABILITY_POLICY_SHA256)

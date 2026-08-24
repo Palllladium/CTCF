@@ -16,6 +16,147 @@ from tools.analysis import (
 from tools.analysis.transactional_search import geometry_mask, save_flow_npz_atomic
 
 
+class E54SentinelContractTest(unittest.TestCase):
+    def test_logged_reference_is_reproduced_within_frozen_numeric_tolerance(self) -> None:
+        observations = {
+            "subject_344": 0.4730397015810013,
+            "subject_136": 0.46061253547668457,
+            "subject_165": 0.5004119575023651,
+            "subject_475": 0.5308038592338562,
+            "subject_131": 0.43862234801054,
+        }
+        for case_id, observed in observations.items():
+            with self.subTest(case_id=case_id):
+                record = runner._e54_sentinel_record(case_id, observed)
+                self.assertTrue(record["pass"])
+                self.assertLessEqual(record["absolute_error"], policy.FAILED_VECTORIZED_SENTINEL_ATOL)
+                runner._validate_e54_sentinel(record, case_id)
+        self.assertTrue(
+            any(
+                runner._e54_sentinel_record(case_id, observed)["observed_max_abs_9g"]
+                != runner._e54_sentinel_record(case_id, observed)["expected_max_abs_9g"]
+                for case_id, observed in observations.items()
+            )
+        )
+
+    def test_material_sentinel_drift_is_rejected(self) -> None:
+        case_id = "subject_344"
+        observed = policy.SENTINEL_ALL_VECTORIZED_GAPS[case_id] + 2.0 * policy.FAILED_VECTORIZED_SENTINEL_ATOL
+        record = runner._e54_sentinel_record(case_id, observed)
+
+        self.assertFalse(record["pass"])
+        with self.assertRaisesRegex(RuntimeError, "sentinel is not reproduced"):
+            runner._validate_e54_sentinel(record, case_id)
+
+    def test_sentinel_diagnostics_are_fail_closed_against_tampering(self) -> None:
+        case_id = "subject_344"
+        base = runner._e54_sentinel_record(case_id, 0.4730397015810013)
+        mutations = {
+            "absolute_error": {**base, "absolute_error": float(base["absolute_error"]) + 1e-12},
+            "absolute_tolerance": {**base, "absolute_tolerance": 1e-3},
+            "observed_text": {**base, "observed_max_abs_9g": base["expected_max_abs_9g"]},
+            "pass": {**base, "pass": False},
+            "extra_field": {**base, "unexpected": True},
+        }
+        for label, record in mutations.items():
+            with self.subTest(label=label), self.assertRaisesRegex(RuntimeError, "sentinel"):
+                runner._validate_e54_sentinel(record, case_id)
+
+    def test_non_sentinel_case_requires_an_explicit_empty_record(self) -> None:
+        case_id = "subject_1"
+        record = runner._e54_sentinel_record(case_id, None)
+        runner._validate_e54_sentinel(record, case_id)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected NUMSTAB e54 sentinel"):
+            runner._validate_e54_sentinel({**record, "pass": True}, case_id)
+
+
+class GeometryContrastSummaryTest(unittest.TestCase):
+    def test_requested_geometry_may_be_explicitly_undefined_without_blocking_finalize(self) -> None:
+        rows = [
+            {
+                "requested": None,
+                "requested_status": "UNDEFINED_NONPOSITIVE",
+                "comparator": None,
+                "comparator_status": "UNDEFINED_NONPOSITIVE",
+            },
+            {
+                "requested": None,
+                "requested_status": "UNDEFINED_NONPOSITIVE",
+                "comparator": None,
+                "comparator_status": "UNDEFINED_NONPOSITIVE",
+            },
+        ]
+
+        summary = runner._geometry_contrast_summary(
+            rows,
+            "requested",
+            "comparator",
+            expected_cases=2,
+            required=False,
+            label="fixture/requested",
+        )
+
+        self.assertEqual(summary["status"], "UNDEFINED_INCOMPLETE_SUPPORT")
+        self.assertEqual(summary["paired_defined_cases"], 0)
+        self.assertEqual(summary["undefined_pair_cases"], 2)
+        self.assertEqual(summary["candidate_metric_status"], "UNDEFINED_NONPOSITIVE")
+        self.assertEqual(summary["comparator_metric_status"], "UNDEFINED_NONPOSITIVE")
+        self.assertIsNone(summary["mean"])
+
+    def test_branch_relevant_geometry_remains_fail_closed(self) -> None:
+        rows = [
+            {"candidate": 0.1, "candidate_status": "OK", "comparator": 0.2, "comparator_status": "OK"},
+            {
+                "candidate": None,
+                "candidate_status": "UNDEFINED_NONPOSITIVE",
+                "comparator": 0.3,
+                "comparator_status": "OK",
+            },
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "lacks a paired geometry contrast"):
+            runner._geometry_contrast_summary(
+                rows,
+                "candidate",
+                "comparator",
+                expected_cases=2,
+                required=True,
+                label="fixture/capacity",
+            )
+
+    def test_complete_geometry_contrast_keeps_paired_statistics(self) -> None:
+        rows = [
+            {"candidate": 0.1, "candidate_status": "OK", "comparator": 0.2, "comparator_status": "OK"},
+            {"candidate": 0.3, "candidate_status": "OK", "comparator": 0.4, "comparator_status": "OK"},
+        ]
+
+        summary = runner._geometry_contrast_summary(
+            rows,
+            "candidate",
+            "comparator",
+            expected_cases=2,
+            required=True,
+            label="fixture/capacity",
+        )
+
+        self.assertEqual(summary["status"], "OK")
+        self.assertEqual(summary["n"], 2)
+        self.assertAlmostEqual(summary["mean"], -0.1)
+
+    def test_geometry_value_and_metric_status_must_agree(self) -> None:
+        rows = [{"candidate": None, "candidate_status": "OK", "comparator": 0.2, "comparator_status": "OK"}]
+
+        with self.assertRaisesRegex(RuntimeError, "inconsistent geometry value/status"):
+            runner._geometry_contrast_summary(
+                rows,
+                "candidate",
+                "comparator",
+                expected_cases=1,
+                required=False,
+                label="fixture/inconsistent",
+            )
+
+
 class DatasetProjectionContractTest(unittest.TestCase):
     def test_csv_and_tsv_with_the_same_rows_are_semantically_equal(self) -> None:
         csv_text = "dataset,split,case_id,path\nIXI,val,subject_1,/data/subject_1.pkl\n"

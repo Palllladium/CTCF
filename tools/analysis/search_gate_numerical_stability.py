@@ -25,7 +25,7 @@ from tools.analysis.search_gate_cost_volume import (
 from tools.analysis.search_gate_metrics import MATHEMATICAL_SDLOGJ_CROP2, METRIC_SPECS
 
 PROTOCOL_ID = "CTCF-SEARCH-GATE-NUMSTAB-V1"
-SCHEMA_VERSION = "v1"
+SCHEMA_VERSION = "v2"
 SOURCE_C3_RUN_ID = "C3_DEVELOPMENT_20260822T212632Z_5d6c762a8a6f"
 SOURCE_C3_MANIFEST_SHA256 = "d5c35ba4a27dab2d6d0dcd9f8017c39364aece31471286fe844a1e34b2337094"
 SOURCE_C3_RUN_MANIFEST_SHA256 = "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5"
@@ -40,6 +40,7 @@ WORK_EPS = 0.0011
 EXACT_CLAIM_EPS = 0.001
 LOCAL_CLIP_SWEEPS = 1
 LEGACY_PARITY_ATOL = 2e-6
+FAILED_VECTORIZED_SENTINEL_ATOL = LEGACY_PARITY_ATOL
 ORACLE_FAITHFUL_ATOL = 2e-6
 CAPACITY_MEAN_DICE_DELTA_MIN = 0.002
 CAPACITY_CI_LOW_DICE_DELTA_MIN = 0.001
@@ -242,10 +243,13 @@ NUMERICAL_STABILITY_POLICY = NumericalStabilityPolicy(
         ("failed_vectorized_source_git_head", "e54d6bf4c026"),
         ("failed_vectorized_sentinel_reference", "F111 versus direct historical build_proposal at scale 2"),
         ("failed_vectorized_sentinel_gaps", tuple(SENTINEL_ALL_VECTORIZED_GAPS.items())),
+        ("failed_vectorized_sentinel_abs_tolerance", FAILED_VECTORIZED_SENTINEL_ATOL),
         ("factorial_edges", FACTORIAL_EDGES),
         ("factorial_baseline", "independent F000 reduction path"),
         ("metric_ids", tuple(METRIC_SPECS)),
         ("primary_geometry_metric_id", MATHEMATICAL_SDLOGJ_CROP2),
+        ("requested_geometry_role", "diagnostic_only_allow_undefined_nonpositive"),
+        ("branch_geometry_stages", ("capacity_candidate", "primary_returned")),
         ("common_support_utility", "NCC7"),
         ("common_support_window", NCC7_WINDOW),
     ),
@@ -439,7 +443,7 @@ def policy_sha256(policy: NumericalStabilityPolicy = NUMERICAL_STABILITY_POLICY)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-NUMERICAL_STABILITY_POLICY_SHA256 = "ddf625a3c0c07806ce83fdf454cacfc82705615e06160bdc4438f16fbc67e159"
+NUMERICAL_STABILITY_POLICY_SHA256 = "9d9bf723780ac279b3a9c68a8b6b94503019f81b3f8348fc468986fe26b60273"
 
 
 def assert_frozen_policy() -> None:
