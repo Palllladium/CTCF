@@ -9,6 +9,8 @@ from tools.analysis.search_gate_multiscale import (
     C4_COMMON_COLLAR_WIDTH,
     OFFSETS_STRIDE1,
     OFFSETS_STRIDE2,
+    OFFSETS_STRIDE3,
+    OFFSETS_STRIDE4,
     DecodedProposal,
     PosteriorVolume,
     RawCostVolume,
@@ -25,7 +27,9 @@ from tools.analysis.search_gate_multiscale import (
     fuse_standardized_costs,
     offsets_for_stride,
     posterior_from_standardized_costs,
+    posterior_from_standardized_costs_with_prior,
     postprocess_and_match_rms,
+    quadratic_center_log_prior,
     scale_agreement_diagnostics,
 )
 
@@ -52,13 +56,39 @@ class OffsetAndSupportTest(unittest.TestCase):
         self.assertEqual(len(OFFSETS_STRIDE2), 27)
         self.assertEqual(OFFSETS_STRIDE1, tuple(sorted(OFFSETS_STRIDE1)))
         self.assertEqual(OFFSETS_STRIDE2, tuple(sorted(OFFSETS_STRIDE2)))
+        self.assertEqual(OFFSETS_STRIDE3, tuple(sorted(OFFSETS_STRIDE3)))
+        self.assertEqual(OFFSETS_STRIDE4, tuple(sorted(OFFSETS_STRIDE4)))
         self.assertEqual(OFFSETS_STRIDE1[13], (0, 0, 0))
         self.assertEqual(OFFSETS_STRIDE2[13], (0, 0, 0))
         self.assertEqual(OFFSETS_STRIDE2, tuple(tuple(2 * value for value in offset) for offset in OFFSETS_STRIDE1))
+        self.assertEqual(OFFSETS_STRIDE3, tuple(tuple(3 * value for value in offset) for offset in OFFSETS_STRIDE1))
+        self.assertEqual(OFFSETS_STRIDE4, tuple(tuple(4 * value for value in offset) for offset in OFFSETS_STRIDE1))
         self.assertIs(offsets_for_stride(1), OFFSETS_STRIDE1)
         self.assertIs(offsets_for_stride(2), OFFSETS_STRIDE2)
-        with self.assertRaisesRegex(ValueError, "only candidate strides"):
-            offsets_for_stride(3)
+        self.assertIs(offsets_for_stride(3), OFFSETS_STRIDE3)
+        self.assertIs(offsets_for_stride(4), OFFSETS_STRIDE4)
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            offsets_for_stride(5)
+
+    def test_quadratic_center_prior_is_dimensionless_across_strides(self) -> None:
+        beta = 0.75
+        expected = tuple(-beta * sum(value * value for value in offset) for offset in OFFSETS_STRIDE1)
+
+        for stride in (1, 2, 3, 4):
+            self.assertEqual(quadratic_center_log_prior(offsets_for_stride(stride), beta=beta), expected)
+
+        prior = quadratic_center_log_prior(OFFSETS_STRIDE4, beta=beta)
+        self.assertEqual(prior[OFFSETS_STRIDE4.index((0, 0, 0))], 0.0)
+        self.assertEqual(prior[OFFSETS_STRIDE4.index((4, 0, 0))], -beta)
+        self.assertEqual(prior[OFFSETS_STRIDE4.index((4, 4, 0))], -2.0 * beta)
+        self.assertEqual(prior[OFFSETS_STRIDE4.index((4, 4, 4))], -3.0 * beta)
+
+    def test_quadratic_center_prior_rejects_invalid_beta(self) -> None:
+        for beta in (-0.1, math.inf, math.nan):
+            with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                quadratic_center_log_prior(OFFSETS_STRIDE1, beta=beta)
+        with self.assertRaisesRegex(TypeError, "real scalar"):
+            quadratic_center_log_prior(OFFSETS_STRIDE1, beta=True)
 
     def test_collar7_is_exact_max_descriptor_plus_stride_support_at_identity(self) -> None:
         shape = (19, 20, 21)
@@ -230,6 +260,56 @@ class StandardizationAndFusionTest(unittest.TestCase):
 
 
 class PosteriorAndDiagnosticsTest(unittest.TestCase):
+    def test_beta_zero_is_bit_identical_to_unbiased_posterior(self) -> None:
+        generator = torch.Generator().manual_seed(913)
+        costs = torch.randn((1, 27, 2, 3, 4), generator=generator)
+        valid = torch.rand((1, 27, 2, 3, 4), generator=generator) > 0.15
+        bank = centered_standardize(raw_volume(costs, valid=valid))
+
+        unbiased = posterior_from_standardized_costs(bank, temperature=0.7)
+        beta_zero = posterior_from_standardized_costs_with_prior(bank, beta=0.0, temperature=0.7)
+
+        self.assertTrue(torch.equal(beta_zero.probabilities, unbiased.probabilities))
+        self.assertTrue(torch.equal(beta_zero.entropy, unbiased.entropy))
+        self.assertTrue(torch.equal(beta_zero.confidence, unbiased.confidence))
+        self.assertIs(beta_zero.valid, unbiased.valid)
+        self.assertEqual(beta_zero.offsets, unbiased.offsets)
+        self.assertEqual(beta_zero.temperature, unbiased.temperature)
+
+    def test_quadratic_prior_prefers_centre_without_changing_validity(self) -> None:
+        costs = torch.tensor(
+            [sum(value * value for value in offset) for offset in OFFSETS_STRIDE4],
+            dtype=torch.float32,
+        ).view(1, 27, 1, 1, 1)
+        valid = torch.ones_like(costs, dtype=torch.bool)
+        invalid_index = OFFSETS_STRIDE4.index((-4, -4, -4))
+        valid[:, invalid_index] = False
+        bank = centered_standardize(raw_volume(costs, valid=valid, offsets=OFFSETS_STRIDE4))
+
+        posterior = posterior_from_standardized_costs_with_prior(bank, beta=0.5)
+
+        centre = posterior.probabilities[0, OFFSETS_STRIDE4.index((0, 0, 0)), 0, 0, 0]
+        face = posterior.probabilities[0, OFFSETS_STRIDE4.index((4, 0, 0)), 0, 0, 0]
+        corner = posterior.probabilities[0, OFFSETS_STRIDE4.index((4, 4, 4)), 0, 0, 0]
+        self.assertGreater(float(centre), float(face))
+        self.assertGreater(float(face), float(corner))
+        self.assertEqual(float(posterior.probabilities[0, invalid_index, 0, 0, 0]), 0.0)
+        self.assertIs(posterior.valid, bank.valid)
+        self.assertTrue(torch.equal(posterior.valid, bank.valid))
+
+    def test_prior_posterior_is_stride_invariant_for_identical_costs(self) -> None:
+        generator = torch.Generator().manual_seed(303)
+        costs = torch.randn((1, 27, 2, 1, 1), generator=generator)
+        stride1 = centered_standardize(raw_volume(costs, offsets=OFFSETS_STRIDE1))
+        stride4 = centered_standardize(raw_volume(costs, offsets=OFFSETS_STRIDE4))
+
+        posterior1 = posterior_from_standardized_costs_with_prior(stride1, beta=0.4)
+        posterior4 = posterior_from_standardized_costs_with_prior(stride4, beta=0.4)
+
+        self.assertTrue(torch.equal(posterior1.probabilities, posterior4.probabilities))
+        self.assertTrue(torch.equal(posterior1.entropy, posterior4.entropy))
+        self.assertTrue(torch.equal(posterior1.confidence, posterior4.confidence))
+
     def test_decoder_uses_explicit_zyx_offset_magnitude_and_sign(self) -> None:
         shape = (2, 2, 2)
         probabilities = torch.zeros((1, 27, *shape))

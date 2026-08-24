@@ -83,6 +83,9 @@ OFFSETS_STRIDE2: tuple[Offset, ...] = (
     (2, 2, 2),
 )
 
+OFFSETS_STRIDE3: tuple[Offset, ...] = tuple((3 * z, 3 * y, 3 * x) for z, y, x in OFFSETS_STRIDE1)
+OFFSETS_STRIDE4: tuple[Offset, ...] = tuple((4 * z, 4 * y, 4 * x) for z, y, x in OFFSETS_STRIDE1)
+
 MAIN_ARM_IDS = (
     "mind_d1_s1",
     "mind_d2_s1",
@@ -237,7 +240,31 @@ def offsets_for_stride(stride: int) -> tuple[Offset, ...]:
         return OFFSETS_STRIDE1
     if stride == 2:
         return OFFSETS_STRIDE2
-    raise ValueError("C4 supports only candidate strides 1 and 2")
+    if stride == 3:
+        return OFFSETS_STRIDE3
+    if stride == 4:
+        return OFFSETS_STRIDE4
+    raise ValueError("candidate stride must be one of 1, 2, 3 or 4")
+
+
+def quadratic_center_log_prior(
+    offsets: Sequence[Offset],
+    *,
+    beta: float,
+) -> tuple[float, ...]:
+    """Return ``-beta * ||offset||^2 / stride^2`` in candidate order."""
+
+    frozen = _validate_offsets(offsets)
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)):
+        raise TypeError("centre-prior beta must be a real scalar")
+    beta_value = float(beta)
+    if not math.isfinite(beta_value) or beta_value < 0.0:
+        raise ValueError("centre-prior beta must be finite and non-negative")
+    stride = max(abs(value) for offset in frozen for value in offset)
+    if stride < 1:
+        raise ValueError("centre-prior offsets must include a non-zero candidate")
+    denominator = float(stride * stride)
+    return tuple(-beta_value * sum(value * value for value in offset) / denominator for offset in frozen)
 
 
 def descriptor_support_margin(*, radius: int, dilation: int) -> int:
@@ -627,6 +654,56 @@ def posterior_from_standardized_costs(
     if not bool(torch.isfinite(costs.masked_select(valid)).all()):
         raise ValueError("valid standardized costs must be finite")
     logits = -costs / float(temperature)
+    negative_inf = torch.full_like(logits, -torch.inf)
+    maximum = torch.where(valid, logits, negative_inf).amax(dim=1, keepdim=True)
+    active = valid.any(dim=1, keepdim=True)
+    maximum = torch.where(active, maximum, torch.zeros_like(maximum))
+    weights = torch.where(valid, torch.exp(logits - maximum), torch.zeros_like(logits))
+    normalizer = weights.sum(dim=1, keepdim=True)
+    probabilities = torch.where(active, weights / normalizer.clamp_min(torch.finfo(costs.dtype).tiny), 0.0)
+    log_probabilities = torch.where(
+        probabilities > 0,
+        probabilities.clamp_min(torch.finfo(costs.dtype).tiny).log(),
+        torch.zeros_like(probabilities),
+    )
+    entropy = -(probabilities * log_probabilities).sum(dim=1, keepdim=True)
+    count = valid.sum(dim=1, keepdim=True)
+    confidence = torch.where(count > 1, 1.0 - entropy / count.to(costs.dtype).log(), active.to(costs.dtype))
+    confidence = confidence.clamp(0.0, 1.0)
+    for name, tensor in (("probabilities", probabilities), ("entropy", entropy), ("confidence", confidence)):
+        if not bool(torch.isfinite(tensor).all()):
+            raise FloatingPointError(f"posterior {name} became non-finite")
+    return PosteriorVolume(
+        cost_id=volume.cost_id,
+        probabilities=probabilities,
+        entropy=entropy,
+        confidence=confidence,
+        valid=valid,
+        offsets=volume.offsets,
+        temperature=float(temperature),
+    )
+
+
+def posterior_from_standardized_costs_with_prior(
+    volume: CenteredCostVolume,
+    *,
+    beta: float,
+    temperature: float = 1.0,
+) -> PosteriorVolume:
+    """Apply a stride-normalized quadratic centre prior to the C4 posterior."""
+
+    log_prior_values = quadratic_center_log_prior(volume.offsets, beta=beta)
+    if float(beta) == 0.0:
+        return posterior_from_standardized_costs(volume, temperature=temperature)
+    if not math.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError("posterior temperature must be finite and positive")
+    costs, valid = volume.standardized_costs, volume.valid
+    if not bool(valid.any()):
+        raise ValueError("posterior input has no valid candidate")
+    if not bool(torch.isfinite(costs.masked_select(valid)).all()):
+        raise ValueError("valid standardized costs must be finite")
+    log_prior = costs.new_tensor(log_prior_values).view(1, -1, 1, 1, 1)
+    logits = -costs / float(temperature) + log_prior
     negative_inf = torch.full_like(logits, -torch.inf)
     maximum = torch.where(valid, logits, negative_inf).amax(dim=1, keepdim=True)
     active = valid.any(dim=1, keepdim=True)
