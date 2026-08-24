@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared, side-effect-free shell mechanics for the C0/C1/C2/C3/NUMSTAB search-gate runners.
+# Shared, side-effect-free shell mechanics for the C0/C1/C2/C3/C4/NUMSTAB search-gate runners.
 #
 # Only helpers whose behaviour is byte-identical across the runners live here.  Anything
 # where the gates genuinely differ - the dirty-tree hint text, the GPU-list aggregate
