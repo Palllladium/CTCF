@@ -113,6 +113,14 @@ class ShellContractTest(unittest.TestCase):
         self.assertNotIn('SEED="${SEED:-0}"', text)
         self.assertNotIn(" SEED=%q ", text)
 
+    def test_shell_declares_checkpoint_free_native_manifest(self) -> None:
+        text = Path("tools/runners/eval/search_gate_c4.sh").read_text(encoding="utf-8")
+        command = '"$PYBIN" -m tools.analysis.run_artifacts finalize \\'
+        self.assertEqual(text.count(command), 1)
+        finalize_block = text.split(command, 1)[1].split('|| { STATUS="FAILED"; EXIT_CODE=1; }', 1)[0]
+        expected = "--expected-preflights 0 --no-strict-checkpoint-load"
+        self.assertIn(expected, finalize_block)
+
 
 if __name__ == "__main__":
     unittest.main()

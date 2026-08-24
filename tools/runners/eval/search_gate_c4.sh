@@ -169,7 +169,7 @@ package_and_finalize() {
     --run-root "$RUN_ROOT" --run-id "$RUN_ID" --status "$STATUS" --exit-code "$EXIT_CODE" \
     --started-at "$STARTED_AT" --completed-at "$completed_at" --git-head "$HEAD" --branch "$BRANCH" \
     --gpu-index "${GPUS[0]}" --mode development --paths-profile "$PATHS_PROFILE" --seed "$SEED" \
-    --time-steps 6 --expected-preflights 0 --remote-locator "$REMOTE_LOCATOR" \
+    --time-steps 6 --expected-preflights 0 --no-strict-checkpoint-load --remote-locator "$REMOTE_LOCATOR" \
     || { STATUS="FAILED"; EXIT_CODE=1; }
   mkdir -p results/exports
   package="results/exports/${RUN_ID}.tar.gz"
