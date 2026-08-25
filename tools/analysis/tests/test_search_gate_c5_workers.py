@@ -25,11 +25,13 @@ from tools.analysis.search_gate_c5_contracts import EXPECTED_SUPPORT_CONTRACT, a
 from tools.analysis.search_gate_c5_workers import (
     _apply_amplitude_and_clip,
     _assert_decision_label_free,
+    _assert_exact_geometry,
     _assert_unique_field_records,
     _build_reach_bank,
     _central_difference_zyx,
     _contrast_vectors,
     _decode_direction,
+    _geometry_bundle,
     _materialize_arm,
     _ngf_diagnostic,
     _ngf_reference,
@@ -37,6 +39,7 @@ from tools.analysis.search_gate_c5_workers import (
     _selector_rows,
 )
 from tools.analysis.search_gate_cost_volume import masked_vector_rms
+from tools.analysis.search_gate_metrics import DETJ_DIAGNOSTICS
 from tools.analysis.search_gate_multiscale import DecodedProposal
 from tools.analysis.transactional_search import save_flow_npz_atomic
 
@@ -89,6 +92,22 @@ class BankAndReachTest(unittest.TestCase):
 
 
 class MaterializationOrderTest(unittest.TestCase):
+    def test_component_only_detj_diagnostics_are_validated_without_a_scalar_value(self) -> None:
+        shape = (7, 7, 7)
+        field = torch.zeros((1, 3, *shape))
+        mask = torch.ones((1, 1, *shape), dtype=torch.bool)
+        geometry = _geometry_bundle(field, mask)
+        diagnostics = geometry[DETJ_DIAGNOSTICS]
+
+        self.assertEqual(diagnostics["status"], "OK")
+        self.assertIsNone(diagnostics["value"])
+        self.assertEqual(diagnostics["components"]["invalid_count"], 0.0)
+        _assert_exact_geometry(geometry, label="identity")
+
+        diagnostics["components"]["invalid_count"] = 1.0
+        with self.assertRaisesRegex(RuntimeError, "component-only detJ diagnostics"):
+            _assert_exact_geometry(geometry, label="tampered")
+
     def test_amplitude_is_applied_after_rms_match_and_before_clip(self) -> None:
         shape = (5, 5, 5)
         initial = torch.zeros((1, 3, *shape))

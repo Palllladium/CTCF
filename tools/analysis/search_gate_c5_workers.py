@@ -73,6 +73,7 @@ from tools.analysis.search_gate_c5_contracts import (
 )
 from tools.analysis.search_gate_cost_volume import masked_vector_rms
 from tools.analysis.search_gate_metrics import (
+    DETJ_DIAGNOSTICS,
     DIGITAL_DECOMPOSITION,
     LEARN2REG_SHIFTED_SDLOGJ_MASKED,
     MATHEMATICAL_SDLOGJ_CROP2,
@@ -181,7 +182,27 @@ def _metric_value(bundle: Mapping[str, Any], metric_id: str, label: str) -> floa
 
 def _assert_exact_geometry(bundle: Mapping[str, Mapping[str, Any]], *, label: str) -> None:
     for metric_id in METRIC_SPECS:
-        _metric_value(bundle, metric_id, label)
+        if metric_id != DETJ_DIAGNOSTICS:
+            _metric_value(bundle, metric_id, label)
+            continue
+        row = bundle.get(metric_id)
+        components = row.get("components") if isinstance(row, Mapping) else None
+        detj_min = components.get("detj_min") if isinstance(components, Mapping) else None
+        invalid_count = components.get("invalid_count") if isinstance(components, Mapping) else None
+        valid_components = all(
+            not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in (detj_min, invalid_count)
+        )
+        if (
+            not isinstance(row, Mapping)
+            or row.get("metric_id") != metric_id
+            or row.get("status") != "OK"
+            or row.get("value") is not None
+            or not valid_components
+            or float(detj_min) <= 0.0
+            or float(invalid_count) != 0.0
+        ):
+            raise RuntimeError(f"C5 component-only detJ diagnostics are invalid: {label}/{metric_id}")
     digital = bundle[DIGITAL_DECOMPOSITION]
     corner = float((digital.get("components") or {}).get("corner_union_violation_fraction", math.nan))
     if not math.isfinite(corner) or corner > 0.0:
