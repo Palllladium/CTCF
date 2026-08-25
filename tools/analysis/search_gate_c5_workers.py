@@ -180,28 +180,32 @@ def _metric_value(bundle: Mapping[str, Any], metric_id: str, label: str) -> floa
     return float(value)
 
 
+def _metric_contract_values(bundle: Mapping[str, Any], metric_id: str, label: str) -> tuple[float, ...]:
+    if metric_id != DETJ_DIAGNOSTICS:
+        return (_metric_value(bundle, metric_id, label),)
+    row = bundle.get(metric_id)
+    components = row.get("components") if isinstance(row, Mapping) else None
+    detj_min = components.get("detj_min") if isinstance(components, Mapping) else None
+    invalid_count = components.get("invalid_count") if isinstance(components, Mapping) else None
+    values = (detj_min, invalid_count)
+    if (
+        not isinstance(row, Mapping)
+        or row.get("metric_id") != metric_id
+        or row.get("status") != "OK"
+        or row.get("value") is not None
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
+            for value in values
+        )
+    ):
+        raise RuntimeError(f"C5 component-only detJ diagnostics are invalid: {label}/{metric_id}")
+    return tuple(float(value) for value in values)
+
+
 def _assert_exact_geometry(bundle: Mapping[str, Mapping[str, Any]], *, label: str) -> None:
     for metric_id in METRIC_SPECS:
-        if metric_id != DETJ_DIAGNOSTICS:
-            _metric_value(bundle, metric_id, label)
-            continue
-        row = bundle.get(metric_id)
-        components = row.get("components") if isinstance(row, Mapping) else None
-        detj_min = components.get("detj_min") if isinstance(components, Mapping) else None
-        invalid_count = components.get("invalid_count") if isinstance(components, Mapping) else None
-        valid_components = all(
-            not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
-            for value in (detj_min, invalid_count)
-        )
-        if (
-            not isinstance(row, Mapping)
-            or row.get("metric_id") != metric_id
-            or row.get("status") != "OK"
-            or row.get("value") is not None
-            or not valid_components
-            or float(detj_min) <= 0.0
-            or float(invalid_count) != 0.0
-        ):
+        values = _metric_contract_values(bundle, metric_id, label)
+        if metric_id == DETJ_DIAGNOSTICS and (values[0] <= 0.0 or values[1] != 0.0):
             raise RuntimeError(f"C5 component-only detJ diagnostics are invalid: {label}/{metric_id}")
     digital = bundle[DIGITAL_DECOMPOSITION]
     corner = float((digital.get("components") or {}).get("corner_union_violation_fraction", math.nan))
@@ -657,9 +661,12 @@ def _verify_baseline_geometry(
     case_id: str,
 ) -> None:
     for metric_id in METRIC_SPECS:
-        left = _metric_value(observed, metric_id, f"{case_id}/recomputed baseline")
-        right = _metric_value(expected, metric_id, f"{case_id}/frozen baseline")
-        if not math.isclose(left, right, rel_tol=0.0, abs_tol=1e-12):
+        left = _metric_contract_values(observed, metric_id, f"{case_id}/recomputed baseline")
+        right = _metric_contract_values(expected, metric_id, f"{case_id}/frozen baseline")
+        if len(left) != len(right) or any(
+            not math.isclose(observed_value, expected_value, rel_tol=0.0, abs_tol=1e-12)
+            for observed_value, expected_value in zip(left, right, strict=True)
+        ):
             raise RuntimeError(f"C5 baseline geometry differs from frozen C4: {case_id}/{metric_id}")
 
 

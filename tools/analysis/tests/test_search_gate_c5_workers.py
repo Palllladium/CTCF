@@ -37,6 +37,7 @@ from tools.analysis.search_gate_c5_workers import (
     _ngf_reference,
     _persist_candidate,
     _selector_rows,
+    _verify_baseline_geometry,
 )
 from tools.analysis.search_gate_cost_volume import masked_vector_rms
 from tools.analysis.search_gate_metrics import DETJ_DIAGNOSTICS
@@ -107,6 +108,19 @@ class MaterializationOrderTest(unittest.TestCase):
         diagnostics["components"]["invalid_count"] = 1.0
         with self.assertRaisesRegex(RuntimeError, "component-only detJ diagnostics"):
             _assert_exact_geometry(geometry, label="tampered")
+
+    def test_baseline_parity_compares_component_only_detj_diagnostics(self) -> None:
+        shape = (7, 7, 7)
+        field = torch.zeros((1, 3, *shape))
+        mask = torch.ones((1, 1, *shape), dtype=torch.bool)
+        observed = _geometry_bundle(field, mask)
+        expected = _geometry_bundle(field.clone(), mask)
+
+        _verify_baseline_geometry(observed, expected, case_id="identity")
+
+        expected[DETJ_DIAGNOSTICS]["components"]["detj_min"] = 0.5
+        with self.assertRaisesRegex(RuntimeError, "baseline geometry differs from frozen C4"):
+            _verify_baseline_geometry(observed, expected, case_id="tampered")
 
     def test_amplitude_is_applied_after_rms_match_and_before_clip(self) -> None:
         shape = (5, 5, 5)
