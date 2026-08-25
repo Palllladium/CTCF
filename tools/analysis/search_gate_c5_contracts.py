@@ -1104,6 +1104,7 @@ def _candidate_signals(
     decision_policy: Mapping[str, Any],
     expected_offset_table_sha256: str,
     expected_support_contract_sha256: str,
+    expected_informative_count: int,
     verify_heavy_bytes: bool,
     historical_anchor_field: Mapping[str, Any] | None = None,
 ) -> CandidateSignals:
@@ -1153,10 +1154,16 @@ def _candidate_signals(
 
     support = row.get("support") or {}
     utilities = row.get("utilities") or {}
-    ncc = utilities.get("ncc7") or {}
-    mind = utilities.get("mind_d2") or {}
+    expected_utilities = {"ncc5", "ncc7", "ncc9", "mind_d2", "ngf"}
+    if not isinstance(utilities, Mapping) or set(utilities) != expected_utilities:
+        raise RuntimeError(f"C5 utility inventory changed: {spec['arm_id']}")
 
-    def validate_utility(utility: Mapping[str, Any], utility_id: str) -> tuple[float, dict[str, Any]]:
+    def validate_utility(
+        utility: Mapping[str, Any],
+        utility_id: str,
+        *,
+        selector_eligible: bool,
+    ) -> tuple[float, dict[str, Any]]:
         baseline_count = utility.get("baseline_count")
         pair_count = utility.get("pair_count")
         if (
@@ -1174,6 +1181,7 @@ def _candidate_signals(
         improvement = _finite(utility.get("improvement"), f"C5 {spec['arm_id']}/{utility_id} improvement")
         if (
             utility.get("utility_id") != utility_id
+            or utility.get("selector_eligible") is not selector_eligible
             or not math.isclose(retention_value, pair_count / baseline_count, rel_tol=0.0, abs_tol=1e-12)
             or not math.isclose(improvement, baseline_loss - candidate_loss, rel_tol=0.0, abs_tol=1e-12)
         ):
@@ -1185,8 +1193,40 @@ def _candidate_signals(
         }
         return improvement, counts
 
-    ncc_improvement, ncc_counts = validate_utility(ncc, "COMMON_NCC7")
-    mind_improvement, mind_counts = validate_utility(mind, "COMMON_MIND_D2")
+    validated_utilities = {
+        name: validate_utility(
+            utilities[name],
+            str(EXPECTED_SUPPORT_CONTRACT["utilities"][name]["utility_id"]),
+            selector_eligible=bool(EXPECTED_SUPPORT_CONTRACT["utilities"][name]["selector_eligible"]),
+        )
+        for name in ("ncc5", "ncc7", "ncc9", "mind_d2")
+    }
+    ncc_improvement, ncc_counts = validated_utilities["ncc7"]
+    mind_improvement, mind_counts = validated_utilities["mind_d2"]
+
+    ngf = utilities["ngf"]
+    ngf_definition = EXPECTED_SUPPORT_CONTRACT["utilities"]["ngf"]
+    ngf_baseline_count = ngf.get("baseline_support_count")
+    ngf_pair_count = ngf.get("pair_support_count")
+    ngf_eta = _finite(ngf.get("eta"), f"C5 {spec['arm_id']}/ngf eta")
+    ngf_baseline = _finite(ngf.get("baseline_similarity"), f"C5 {spec['arm_id']}/ngf baseline similarity")
+    ngf_candidate = _finite(ngf.get("candidate_similarity"), f"C5 {spec['arm_id']}/ngf candidate similarity")
+    ngf_improvement = _finite(ngf.get("improvement"), f"C5 {spec['arm_id']}/ngf improvement")
+    if (
+        ngf.get("diagnostic_id") != ngf_definition["diagnostic_id"]
+        or ngf.get("selector_eligible") is not False
+        or isinstance(ngf_baseline_count, bool)
+        or not isinstance(ngf_baseline_count, int)
+        or ngf_baseline_count <= 0
+        or isinstance(ngf_pair_count, bool)
+        or not isinstance(ngf_pair_count, int)
+        or not 0 < ngf_pair_count <= ngf_baseline_count
+        or ngf_eta <= 0.0
+        or not 0.0 <= ngf_baseline <= 1.0
+        or not 0.0 <= ngf_candidate <= 1.0
+        or not math.isclose(ngf_improvement, ngf_candidate - ngf_baseline, rel_tol=0.0, abs_tol=1e-12)
+    ):
+        raise RuntimeError(f"C5 NGF diagnostic arithmetic changed: {spec['arm_id']}")
     retention = _finite(support.get("retention"), f"C5 {spec['arm_id']} support retention")
     if (
         support.get("ncc7") != ncc_counts
@@ -1203,6 +1243,7 @@ def _candidate_signals(
         raise RuntimeError(f"C5 geometry delta arithmetic changed: {spec['arm_id']}")
 
     proposal = row.get("proposal") or {}
+    posterior = proposal.get("posterior") or {}
     pipeline = dict(decision_policy.get("proposal_pipeline") or ())
     reaches = {item.get("reach_id"): item for item in decision_policy.get("reaches") or () if isinstance(item, Mapping)}
     reach = reaches.get(spec["reach_id"]) or {}
@@ -1215,6 +1256,8 @@ def _candidate_signals(
         or proposal.get("smoothing_passes") != pipeline.get("post_smoothing_passes")
         or proposal.get("collar_width") != pipeline.get("evidence_collar")
         or proposal.get("rms_target_source_id") != pipeline.get("rms_target_source_id")
+        or isinstance(posterior.get("active_voxels"), bool)
+        or posterior.get("active_voxels") != expected_informative_count
     ):
         raise RuntimeError(f"C5 proposal factor or pipeline identity changed: {spec['arm_id']}")
     amplitude = _finite(proposal.get("post_rms_amplitude"), f"C5 {spec['arm_id']} amplitude")
@@ -1251,7 +1294,7 @@ def _validate_case_provenance(
     payload: Mapping[str, Any],
     contract: Mapping[str, Any],
     case_id: str,
-) -> float:
+) -> tuple[float, dict[str, int]]:
     historical = contract["source_historical"][case_id]
     rms = payload.get("source_rms_reference") or {}
     residual_rms = _finite(rms.get("residual_rms"), f"C5 {case_id} RMS reference")
@@ -1290,16 +1333,34 @@ def _validate_case_provenance(
     observed_reaches = support.get("reach")
     if not isinstance(observed_reaches, list) or len(observed_reaches) != 4 or len(expected_reaches) != 4:
         raise RuntimeError(f"C5 reach-support inventory changed: {case_id}")
+    informative_by_reach: dict[str, int] = {}
     for observed, expected in zip(observed_reaches, expected_reaches, strict=True):
+        if not isinstance(observed, Mapping) or not isinstance(expected, Mapping):
+            raise RuntimeError(f"C5 reach support changed: {case_id}")
+        informative_count = observed.get("standardized_informative_count")
+        informative_fraction = _finite(
+            observed.get("standardized_informative_fraction"),
+            f"C5 {case_id}/{expected.get('reach_id')} standardized informative fraction",
+        )
         if (
             observed.get("reach_id") != expected.get("reach_id")
             or observed.get("stride_voxels") != expected.get("stride_voxels")
             or observed.get("generation_count") != common_count
             or observed.get("all_candidates_valid_count") != common_count
             or observed.get("all_candidates_valid") is not True
+            or isinstance(informative_count, bool)
+            or not isinstance(informative_count, int)
+            or not 0 < informative_count <= common_count
+            or not math.isclose(
+                informative_fraction,
+                informative_count / common_count,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
         ):
             raise RuntimeError(f"C5 reach support changed: {case_id}/{expected.get('reach_id')}")
-    return residual_rms
+        informative_by_reach[str(expected["reach_id"])] = informative_count
+    return residual_rms, informative_by_reach
 
 
 def validate_decision_case_marker(
@@ -1329,7 +1390,7 @@ def validate_decision_case_marker(
     initial = contract["source_initial"][case_id]["field"]
     if payload.get("source_initial_array_sha256") != initial.get("array_sha256"):
         raise RuntimeError(f"C5 decision marker is bound to another initial field: {case_id}")
-    residual_rms = _validate_case_provenance(payload, contract, case_id)
+    residual_rms, informative_by_reach = _validate_case_provenance(payload, contract, case_id)
 
     parity = payload.get("historical_anchor_parity")
     anchor_map = dict(zip(HISTORICAL_ANCHOR_ARM_IDS, SOURCE_C4_ANCHOR_IDS, strict=True))
@@ -1363,6 +1424,7 @@ def validate_decision_case_marker(
             decision_policy=contract["decision_policy"],
             expected_offset_table_sha256=contract["offset_table_sha256"],
             expected_support_contract_sha256=contract["support_contract_sha256"],
+            expected_informative_count=informative_by_reach[str(spec["reach_id"])],
             verify_heavy_bytes=verify_heavy_bytes,
             historical_anchor_field=source_anchor_by_c5.get(spec["arm_id"]),
         )
@@ -1503,6 +1565,7 @@ def load_decision_barrier(
     run_root: Path,
     expected_sha256: str,
     *,
+    contract: Mapping[str, Any],
     decision_contract_sha256: str,
     case_ids: Sequence[str],
 ) -> tuple[dict[str, Any], str]:
@@ -1519,10 +1582,41 @@ def load_decision_barrier(
         or payload.get("decision_workers_received_label_inputs") is not False
         or payload.get("test_split_accessed") is not False
         or list((payload.get("decision_case_sha256") or {}).keys()) != list(case_ids)
+        or not isinstance(payload.get("completed_at_utc"), str)
+        or not payload.get("completed_at_utc")
     ):
         raise RuntimeError("Invalid or altered C5 decision barrier")
-    for value in payload["decision_case_sha256"].values():
-        _require_sha(value, "C5 decision case")
+    if list(case_ids) != contract.get("case_ids"):
+        raise RuntimeError("C5 decision barrier case inventory differs from its contract")
+    attempt_id = payload.get("attempt_id")
+    workers = payload.get("workers")
+    if not isinstance(attempt_id, str) or not attempt_id or not isinstance(workers, list):
+        raise RuntimeError("C5 decision barrier worker provenance is missing")
+    if len(workers) != contract.get("num_shards"):
+        raise RuntimeError("C5 decision barrier worker inventory changed")
+    root = run_root.resolve()
+    for shard_index, record in enumerate(workers):
+        expected_relative = f"workers/decision/attempts/{attempt_id}/worker_{shard_index:02d}.json"
+        if not isinstance(record, Mapping) or record.get("path") != expected_relative:
+            raise RuntimeError(f"C5 decision barrier worker path changed: shard {shard_index}")
+        worker_path = root / expected_relative
+        if not worker_path.is_file() or sha256_file(worker_path) != _require_sha(
+            record.get("sha256"), f"C5 decision worker {shard_index}"
+        ):
+            raise RuntimeError(f"C5 decision barrier worker bytes changed: shard {shard_index}")
+        validate_worker_marker(
+            _load_json(worker_path),
+            contract,
+            decision_contract_sha256,
+            phase="decision",
+            shard_index=shard_index,
+            attempt_id=attempt_id,
+        )
+    for case_id, value in payload["decision_case_sha256"].items():
+        expected = _require_sha(value, "C5 decision case")
+        case_path = root / "cases" / case_id / "decision_complete.json"
+        if not case_path.is_file() or sha256_file(case_path) != expected:
+            raise RuntimeError(f"C5 frozen decision case bytes changed: {case_id}")
     return payload, actual
 
 
@@ -1548,7 +1642,7 @@ def build_evaluation_contract(
         "source_contract_sha256": _require_sha(source_contract_sha256, "C5 source contract"),
         "decision_contract_sha256": _require_sha(decision_contract_sha256, "C5 decision contract"),
         "decision_barrier_sha256": _require_sha(barrier_sha256, "C5 decision barrier"),
-        "decision_case_sha256": barrier["decision_case_sha256"],
+        "decision_case_sha256": dict(barrier["decision_case_sha256"]),
         "case_ids": source["case_ids"],
         "full_policy": source["full_policy"],
         "full_policy_sha256": source["full_policy_sha256"],
@@ -1568,6 +1662,7 @@ def build_evaluation_contract(
     validate_evaluation_contract(
         payload,
         source=source,
+        barrier=barrier,
         expected_source_sha256=source_contract_sha256,
         expected_decision_sha256=decision_contract_sha256,
         expected_barrier_sha256=barrier_sha256,
@@ -1579,6 +1674,7 @@ def validate_evaluation_contract(
     payload: Mapping[str, Any],
     *,
     source: Mapping[str, Any],
+    barrier: Mapping[str, Any],
     expected_source_sha256: str,
     expected_decision_sha256: str,
     expected_barrier_sha256: str,
@@ -1616,6 +1712,8 @@ def validate_evaluation_contract(
         raise RuntimeError("C5 evaluation contract has the wrong IXI label order")
     if list((payload.get("decision_case_sha256") or {}).keys()) != source["case_ids"]:
         raise RuntimeError("C5 evaluation contract has the wrong decision-case inventory")
+    if payload.get("decision_case_sha256") != barrier.get("decision_case_sha256"):
+        raise RuntimeError("C5 evaluation contract differs from the frozen decision-case hashes")
 
 
 def write_evaluation_contract(run_root: Path, payload: dict[str, Any]) -> str:
@@ -1627,6 +1725,7 @@ def load_evaluation_contract(
     expected_sha256: str,
     *,
     source: Mapping[str, Any],
+    barrier: Mapping[str, Any],
     expected_source_sha256: str,
     expected_decision_sha256: str,
     expected_barrier_sha256: str,
@@ -1639,6 +1738,7 @@ def load_evaluation_contract(
     validate_evaluation_contract(
         payload,
         source=source,
+        barrier=barrier,
         expected_source_sha256=expected_source_sha256,
         expected_decision_sha256=expected_decision_sha256,
         expected_barrier_sha256=expected_barrier_sha256,

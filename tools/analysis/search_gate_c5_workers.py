@@ -110,6 +110,15 @@ SCHEMA_VERSION = "v1"
 _ANCHOR_MAP = dict(zip(HISTORICAL_ANCHOR_ARM_IDS, SOURCE_C4_ANCHOR_IDS, strict=True))
 
 
+@dataclass(frozen=True)
+class ReachBankResult:
+    volume: CenteredCostVolume
+    elapsed_sec: float
+    generation_count: int
+    raw_all_candidates_valid_count: int
+    standardized_informative_count: int
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -445,7 +454,7 @@ def _build_reach_bank(
     initial: torch.Tensor,
     generation_mask: torch.Tensor,
     stride: int,
-) -> tuple[CenteredCostVolume, float]:
+) -> ReachBankResult:
     started = time.perf_counter()
     raw = build_raw_intensity_cost_volume(
         fixed_norm,
@@ -455,10 +464,35 @@ def _build_reach_bank(
         offsets=offsets_for_stride(stride),
         cost_id=f"intensity_s{stride}",
     )
-    invalid = generation_mask & ~raw.valid.all(dim=1, keepdim=True)
-    if bool(invalid.any()):
+    generation_count = int(generation_mask.sum(dtype=torch.int64).item())
+    raw_all_valid = generation_mask & raw.valid.all(dim=1, keepdim=True)
+    raw_all_valid_count = int(raw_all_valid.sum(dtype=torch.int64).item())
+    if raw_all_valid_count != generation_count:
         raise RuntimeError(f"C5 S{stride} is not fully valid on the frozen C4 generation support")
-    return centered_standardize(raw, standardization_floor=STANDARDIZATION_FLOOR), time.perf_counter() - started
+    volume = centered_standardize(raw, standardization_floor=STANDARDIZATION_FLOOR)
+    informative = generation_mask & volume.valid.all(dim=1, keepdim=True)
+    informative_count = int(informative.sum(dtype=torch.int64).item())
+    if not 0 < informative_count <= generation_count:
+        raise RuntimeError(f"C5 S{stride} standardized informative support is empty or invalid")
+    return ReachBankResult(
+        volume=volume,
+        elapsed_sec=time.perf_counter() - started,
+        generation_count=generation_count,
+        raw_all_candidates_valid_count=raw_all_valid_count,
+        standardized_informative_count=informative_count,
+    )
+
+
+def _reach_support_record(reach: Any, bank: ReachBankResult) -> dict[str, Any]:
+    return {
+        "reach_id": reach.reach_id,
+        "stride_voxels": reach.stride_voxels,
+        "generation_count": bank.generation_count,
+        "all_candidates_valid_count": bank.raw_all_candidates_valid_count,
+        "all_candidates_valid": bank.raw_all_candidates_valid_count == bank.generation_count,
+        "standardized_informative_count": bank.standardized_informative_count,
+        "standardized_informative_fraction": bank.standardized_informative_count / bank.generation_count,
+    }
 
 
 def _decode_direction(volume: CenteredCostVolume, beta: float) -> tuple[PosteriorVolume, DecodedProposal]:
@@ -588,6 +622,7 @@ def _assert_unique_field_records(rows: Sequence[Mapping[str, Any]]) -> None:
 
 def _assert_decision_label_free(payload: Mapping[str, Any]) -> None:
     allowed = {
+        "labels_loaded",
         "labels_loaded_to_device",
         "labels_available_to_decision_workers",
         "decision_contract_contains_label_data",
@@ -652,6 +687,17 @@ def _decision_case_path(run_root: Path, case_id: str) -> Path:
 
 def _worker_path(run_root: Path, phase: str, attempt_id: str, shard_index: int) -> Path:
     return run_root.resolve() / "workers" / phase / "attempts" / attempt_id / f"worker_{shard_index:02d}.json"
+
+
+def _publish_validated_marker(
+    path: Path,
+    payload: dict[str, Any],
+    validate: Callable[[Mapping[str, Any]], None],
+) -> None:
+    validate(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, payload)
+    validate(_load_json(path))
 
 
 def _verify_baseline_geometry(
@@ -816,30 +862,21 @@ def run_decision_case(
     posterior_direction_count = 0
     reach_support: list[dict[str, Any]] = []
     for reach in REACH_SPECS:
-        volume, bank_elapsed = _build_reach_bank(
+        bank = _build_reach_bank(
             fixed_norm,
             moving_norm,
             initial,
             common.common_mask,
             reach.stride_voxels,
         )
+        volume = bank.volume
         raw_bank_count += 1
         directions: dict[int, tuple[PosteriorVolume, DecodedProposal]] = {}
         for bias_level in range(3):
             arm = next(spec for spec in ARM_SPECS if spec.reach_id == reach.reach_id and spec.bias_level == bias_level)
             directions[bias_level] = _decode_direction(volume, arm.centre_beta)
             posterior_direction_count += 1
-        reach_support.append(
-            {
-                "reach_id": reach.reach_id,
-                "stride_voxels": reach.stride_voxels,
-                "generation_count": common.common_count,
-                "all_candidates_valid_count": int(
-                    (common.common_mask & volume.valid.all(dim=1, keepdim=True)).sum(dtype=torch.int64).item()
-                ),
-                "all_candidates_valid": True,
-            }
-        )
+        reach_support.append(_reach_support_record(reach, bank))
         for arm in (spec for spec in ARM_SPECS if spec.reach_id == reach.reach_id):
             posterior, decoded = directions[arm.bias_level]
             row, parity = _materialize_arm(
@@ -848,7 +885,7 @@ def run_decision_case(
                 decoded=decoded,
                 volume=volume,
                 posterior=posterior,
-                bank_elapsed=bank_elapsed,
+                bank_elapsed=bank.elapsed_sec,
                 initial=initial,
                 rms_reference=rms_reference,
                 mask=mask7,
@@ -917,9 +954,11 @@ def run_decision_case(
     if (raw_bank_count, posterior_direction_count, len(arm_rows), len(parity_rows)) != (4, 12, 36, 2):
         raise RuntimeError("C5 worker arithmetic differs from the frozen 4-bank/12-direction/36-arm design")
     _assert_decision_label_free(payload)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(marker, payload)
-    validate_decision_case_marker(payload, decision, decision_sha256, verify_heavy_bytes=True)
+    _publish_validated_marker(
+        marker,
+        payload,
+        lambda candidate: validate_decision_case_marker(candidate, decision, decision_sha256, verify_heavy_bytes=True),
+    )
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return marker
@@ -941,6 +980,15 @@ def run_decision_worker(
     if list(case_ids) != expected or str(physical_gpu) != str(decision["shard_to_physical_gpu"].get(str(shard_index))):
         raise RuntimeError("C5 decision worker does not match the frozen shard")
     for case_id in case_ids:
+        case_marker = _decision_case_path(run_root, case_id)
+        if case_marker.is_file():
+            validate_decision_case_marker(
+                _load_json(case_marker),
+                decision,
+                decision_sha256,
+                verify_heavy_bytes=True,
+            )
+            continue
         run_decision_case(
             case_id=case_id,
             shard_index=shard_index,
@@ -967,15 +1015,17 @@ def run_decision_worker(
         "execution": dict(execution or {}),
     }
     _assert_decision_label_free(payload)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(marker, payload)
-    validate_worker_marker(
+    _publish_validated_marker(
+        marker,
         payload,
-        decision,
-        decision_sha256,
-        phase="decision",
-        shard_index=shard_index,
-        attempt_id=attempt_id,
+        lambda candidate: validate_worker_marker(
+            candidate,
+            decision,
+            decision_sha256,
+            phase="decision",
+            shard_index=shard_index,
+            attempt_id=attempt_id,
+        ),
     )
     return marker
 
@@ -1137,18 +1187,20 @@ def run_evaluation_case(
         "selectors": selector_rows,
         "execution": dict(execution or {}),
     }
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(marker, payload)
-    validate_evaluation_case_marker(
+    _publish_validated_marker(
+        marker,
         payload,
-        decision,
-        decision_sha256,
-        barrier,
-        barrier_sha256,
-        evaluation_contract,
-        evaluation_contract_sha256,
-        decision_case,
-        expected_decision_sha,
+        lambda candidate: validate_evaluation_case_marker(
+            candidate,
+            decision,
+            decision_sha256,
+            barrier,
+            barrier_sha256,
+            evaluation_contract,
+            evaluation_contract_sha256,
+            decision_case,
+            expected_decision_sha,
+        ),
     )
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -1210,17 +1262,19 @@ def run_evaluation_worker(
         "test_split_accessed": False,
         "execution": dict(execution or {}),
     }
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(marker, payload)
-    validate_worker_marker(
+    _publish_validated_marker(
+        marker,
         payload,
-        decision,
-        decision_sha256,
-        phase="evaluation",
-        shard_index=shard_index,
-        attempt_id=attempt_id,
-        barrier_sha256=barrier_sha256,
-        evaluation_contract_sha256=evaluation_contract_sha256,
+        lambda candidate: validate_worker_marker(
+            candidate,
+            decision,
+            decision_sha256,
+            phase="evaluation",
+            shard_index=shard_index,
+            attempt_id=attempt_id,
+            barrier_sha256=barrier_sha256,
+            evaluation_contract_sha256=evaluation_contract_sha256,
+        ),
     )
     return marker
 

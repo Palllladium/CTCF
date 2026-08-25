@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
 
+from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.search_gate_c5 import (
     ARM_SPECS,
     C5_DECISION_POLICY_SHA256,
@@ -31,9 +33,11 @@ from tools.analysis.search_gate_c5_contracts import (
     build_decision_contract,
     build_evaluation_contract,
     build_source_contract,
+    load_decision_barrier,
     payload_sha256,
     validate_decision_case_marker,
     validate_evaluation_case_marker,
+    validate_evaluation_contract,
     validate_worker_marker,
     verify_rooted_record,
 )
@@ -219,15 +223,19 @@ class C5ContractFixture(unittest.TestCase):
                     "mind_d2": {"baseline_count": 90, "pair_count": 90, "retention": 1.0},
                 },
                 "utilities": {
-                    "ncc7": {
-                        "utility_id": "COMMON_NCC7",
+                    name: {
+                        "utility_id": f"COMMON_NCC{window}",
                         "baseline_count": 100,
                         "pair_count": 100,
                         "retention": 1.0,
                         "baseline_loss": 1.0,
                         "candidate_loss": 0.99,
                         "improvement": 0.01,
-                    },
+                        "selector_eligible": window == 7,
+                    }
+                    for name, window in (("ncc5", 5), ("ncc7", 7), ("ncc9", 9))
+                }
+                | {
                     "mind_d2": {
                         "utility_id": "COMMON_MIND_D2",
                         "baseline_count": 90,
@@ -236,6 +244,17 @@ class C5ContractFixture(unittest.TestCase):
                         "baseline_loss": 1.0,
                         "candidate_loss": 0.98,
                         "improvement": 0.02,
+                        "selector_eligible": True,
+                    },
+                    "ngf": {
+                        "diagnostic_id": "COMMON_NGF_CENTRAL3_FLOAT64_V1",
+                        "eta": 0.1,
+                        "baseline_support_count": 80,
+                        "pair_support_count": 80,
+                        "baseline_similarity": 0.8,
+                        "candidate_similarity": 0.81,
+                        "improvement": 0.01,
+                        "selector_eligible": False,
                     },
                 },
                 "proposal": {
@@ -248,6 +267,7 @@ class C5ContractFixture(unittest.TestCase):
                     "smoothing_passes": 1,
                     "collar_width": 7,
                     "rms_target_source_id": "source_c3_raw_conf_post1_requested",
+                    "posterior": {"active_voxels": 40 + int(str(spec["reach_id"])[1:])},
                     "rms_target": 0.1,
                     "rms_requested": 0.1 * spec["post_rms_amplitude"],
                     "rms_realized": 0.09 * spec["post_rms_amplitude"],
@@ -306,6 +326,8 @@ class C5ContractFixture(unittest.TestCase):
                         "generation_count": 90,
                         "all_candidates_valid_count": 90,
                         "all_candidates_valid": True,
+                        "standardized_informative_count": 40 + stride,
+                        "standardized_informative_fraction": (40 + stride) / 90,
                     }
                     for stride in range(1, 5)
                 ],
@@ -353,12 +375,37 @@ class DecisionTamperTest(C5ContractFixture):
         self.assertEqual(by_id["int_s1_a10_b0"]["candidate_field"]["root_id"], "source_c4_heavy")
         self.assertEqual(by_id["int_s2_a10_b0"]["candidate_field"]["root_id"], "source_c4_heavy")
 
+    def test_real_h100_reach_counts_separate_raw_validity_from_informativeness(self) -> None:
+        marker = self.decision_case()
+        support = marker["generation_support"]
+        support["geometry_count"] = 5_457_480
+        support["common_count"] = 5_271_036
+        support["retention"] = 5_271_036 / 5_457_480
+        informative = {
+            "S1": 2_123_006,
+            "S2": 2_255_998,
+            "S3": 2_385_912,
+            "S4": 2_517_907,
+        }
+        for reach in support["reach"]:
+            reach_id = reach["reach_id"]
+            reach["generation_count"] = support["common_count"]
+            reach["all_candidates_valid_count"] = support["common_count"]
+            reach["standardized_informative_count"] = informative[reach_id]
+            reach["standardized_informative_fraction"] = informative[reach_id] / support["common_count"]
+        for arm in marker["arms"]:
+            arm["proposal"]["posterior"]["active_voxels"] = informative[arm["reach_id"]]
+
+        validate_decision_case_marker(marker, self.decision, self.decision_sha, verify_heavy_bytes=False)
+
     def test_geometry_amplitude_and_selector_tampering_are_rejected(self) -> None:
         for mutate in (
             lambda marker: marker["arms"][0].__setitem__("mathematical_sdlogj_delta", 0.004),
             lambda marker: marker["arms"][0]["proposal"].__setitem__("rms_requested", 0.2),
             lambda marker: marker["arms"][0]["support"].__setitem__("retention", 0.999),
             lambda marker: marker["arms"][0]["utilities"]["ncc7"].__setitem__("improvement", 0.02),
+            lambda marker: marker["arms"][0]["utilities"]["ncc5"].__setitem__("improvement", 0.02),
+            lambda marker: marker["arms"][0]["utilities"]["ngf"].__setitem__("improvement", 0.02),
             lambda marker: marker["selectors"][0].__setitem__("selected_arm_id", marker["arms"][-1]["arm_id"]),
         ):
             marker = self.decision_case()
@@ -373,6 +420,8 @@ class DecisionTamperTest(C5ContractFixture):
             lambda marker: marker["arms"][0]["proposal"].__setitem__("pre_rms_multiplier", 1.0),
             lambda marker: marker["source_rms_reference"].__setitem__("source_decision_case_sha256", SHA_A),
             lambda marker: marker["generation_support"]["reach"][2].__setitem__("all_candidates_valid_count", 89),
+            lambda marker: marker["generation_support"]["reach"][2].__setitem__("standardized_informative_count", 0),
+            lambda marker: marker["arms"][0]["proposal"]["posterior"].__setitem__("active_voxels", 42),
             lambda marker: marker["baseline_geometry"][MATHEMATICAL_SDLOGJ_CROP2].__setitem__("value", 0.31),
             lambda marker: marker.__setitem__("execution", {"opaque": "hidden_segmentation.pkl"}),
         ):
@@ -383,6 +432,93 @@ class DecisionTamperTest(C5ContractFixture):
 
 
 class EvaluationTamperTest(C5ContractFixture):
+    def test_loaded_barrier_authenticates_worker_and_case_bytes(self) -> None:
+        attempt_id = "attempt"
+        root = self.target.parent / "run"
+        workers = []
+        for shard_index in range(self.decision["num_shards"]):
+            path = root / "workers" / "decision" / "attempts" / attempt_id / f"worker_{shard_index:02d}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema": "ctcf-search-c5-worker-v1",
+                "protocol_id": PROTOCOL_ID,
+                "status": "COMPLETE",
+                "phase": "decision",
+                "attempt_id": attempt_id,
+                "shard_index": shard_index,
+                "physical_gpu": self.decision["shard_to_physical_gpu"][str(shard_index)],
+                "case_ids": self.decision["shards"][str(shard_index)],
+                "decision_contract_sha256": self.decision_sha,
+                "labels_loaded": False,
+                "test_split_accessed": False,
+            }
+            path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            workers.append({"path": path.relative_to(root).as_posix(), "sha256": sha256_file(path)})
+        case_hashes = {}
+        for case_id in self.case_ids:
+            path = root / "cases" / case_id / "decision_complete.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+            case_hashes[case_id] = sha256_file(path)
+        barrier = {
+            "schema": BARRIER_SCHEMA,
+            "protocol_id": PROTOCOL_ID,
+            "status": "COMPLETE",
+            "attempt_id": attempt_id,
+            "decision_contract_sha256": self.decision_sha,
+            "decision_workers_received_label_inputs": False,
+            "test_split_accessed": False,
+            "workers": workers,
+            "decision_case_sha256": case_hashes,
+            "completed_at_utc": "2026-08-25T00:00:00Z",
+        }
+        barrier_path = root / "decision_barrier.json"
+        barrier_path.write_text(json.dumps(barrier, sort_keys=True), encoding="utf-8")
+        barrier_sha = sha256_file(barrier_path)
+        load_decision_barrier(
+            root,
+            barrier_sha,
+            contract=self.decision,
+            decision_contract_sha256=self.decision_sha,
+            case_ids=self.case_ids,
+        )
+
+        worker_path = root / workers[0]["path"]
+        worker_path.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "worker bytes changed"):
+            load_decision_barrier(
+                root,
+                barrier_sha,
+                contract=self.decision,
+                decision_contract_sha256=self.decision_sha,
+                case_ids=self.case_ids,
+            )
+
+    def test_evaluation_contract_is_bound_to_exact_barrier_case_hashes(self) -> None:
+        barrier = {
+            "schema": BARRIER_SCHEMA,
+            "status": "COMPLETE",
+            "decision_contract_sha256": self.decision_sha,
+            "decision_case_sha256": {case_id: SHA_A for case_id in self.case_ids},
+        }
+        evaluation = build_evaluation_contract(
+            self.source,
+            self.source_sha,
+            self.decision_sha,
+            barrier,
+            SHA_B,
+        )
+        evaluation["decision_case_sha256"][self.case_ids[0]] = SHA_C
+        with self.assertRaisesRegex(RuntimeError, "frozen decision-case hashes"):
+            validate_evaluation_contract(
+                evaluation,
+                source=self.source,
+                barrier=barrier,
+                expected_source_sha256=self.source_sha,
+                expected_decision_sha256=self.decision_sha,
+                expected_barrier_sha256=SHA_B,
+            )
+
     def test_evaluation_worker_is_bound_to_both_barrier_and_evaluation_contract(self) -> None:
         marker = {
             "schema": "ctcf-search-c5-worker-v1",

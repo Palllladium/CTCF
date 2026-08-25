@@ -223,6 +223,18 @@ echo "########## C5 frozen C4 authentication and contracts ##########"
 SOURCE_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/source_contract.json" | awk '{print $1}')"
 DECISION_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/decision_contract.json" | awk '{print $1}')"
 
+echo "########## C5 single-case label-free decision pilot ##########"
+pilot_log="$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID/pilot.log"
+mkdir -p "$(dirname "$pilot_log")"
+CUDA_VISIBLE_DEVICES="${GPUS[0]}" "$PYBIN" -m tools.analysis.run_search_gate_c5 decision-pilot \
+  --run-root "$RUN_ROOT" \
+  --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
+  --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
+  --num-shards "${#GPUS[@]}" --gpu 0 \
+  --physical-gpu "${GPUS[0]}" --attempt-id "$ATTEMPT_ID" \
+  > "$pilot_log" 2>&1
+echo "[DECISION PILOT] physical_gpu=${GPUS[0]} log=$pilot_log"
+
 echo "########## C5 label-free decision workers ##########"
 mkdir -p "$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID"
 for shard_index in "${!GPUS[@]}"; do

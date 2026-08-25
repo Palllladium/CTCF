@@ -56,7 +56,12 @@ from tools.analysis.search_gate_c5_contracts import (
     write_decision_barrier,
     write_evaluation_contract,
 )
-from tools.analysis.search_gate_c5_workers import finalize_c5, run_decision_worker, run_evaluation_worker
+from tools.analysis.search_gate_c5_workers import (
+    finalize_c5,
+    run_decision_case,
+    run_decision_worker,
+    run_evaluation_worker,
+)
 from tools.analysis.search_gate_common import git, utc_now
 from tools.analysis.search_gate_multiscale import offsets_for_stride
 from tools.analysis.search_gate_runtime import parse_physical_gpus
@@ -286,6 +291,7 @@ def _load_evaluation_bundle(
     barrier, barrier_sha = load_decision_barrier(
         args.run_root,
         args.barrier_sha256,
+        contract=isolated,
         decision_contract_sha256=isolated_sha,
         case_ids=isolated["case_ids"],
     )
@@ -298,6 +304,7 @@ def _load_evaluation_bundle(
         args.run_root,
         args.evaluation_contract_sha256,
         source=source,
+        barrier=barrier,
         expected_source_sha256=source_sha,
         expected_decision_sha256=decision_sha,
         expected_barrier_sha256=barrier_sha,
@@ -423,6 +430,66 @@ def prepare_stage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _decision_execution(
+    decision: Mapping[str, Any],
+    *,
+    attempt_id: str,
+    shard_index: int,
+    physical_gpu: str,
+    device: torch.device,
+) -> dict[str, Any]:
+    return {
+        "phase": "decision",
+        "attempt_id": attempt_id,
+        "shard_index": shard_index,
+        "physical_gpu": physical_gpu,
+        "host": platform.node(),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "device": str(device),
+        "gpu_name": torch.cuda.get_device_name(device),
+        "seed": decision["seed"],
+        "deterministic": True,
+        "labels_loaded_to_device": False,
+    }
+
+
+def decision_pilot_stage(args: argparse.Namespace) -> int:
+    decision, decision_sha = _load_isolated_decision(
+        args.run_root,
+        args.source_contract_sha256,
+        args.decision_contract_sha256,
+    )
+    _assert_clean_code(decision["git_head"], "decision pilot")
+    _assert_runtime(decision["runtime_signature"], "decision pilot")
+    if args.num_shards != decision["num_shards"] or not decision["shards"].get("0"):
+        raise RuntimeError("C5 decision pilot requires the complete non-empty shard inventory")
+    if args.physical_gpu != decision["shard_to_physical_gpu"]["0"]:
+        raise RuntimeError("C5 decision pilot physical GPU changed")
+    device = setup_device(args.gpu, seed=decision["seed"], deterministic=True)
+    if device.type != "cuda":
+        raise RuntimeError("C5 decision pilot requires CUDA")
+    case_id = decision["shards"]["0"][0]
+    marker = run_decision_case(
+        case_id=case_id,
+        shard_index=0,
+        physical_gpu=args.physical_gpu,
+        run_root=args.run_root,
+        decision=decision,
+        decision_sha256=decision_sha,
+        device=device,
+        execution=_decision_execution(
+            decision,
+            attempt_id=args.attempt_id,
+            shard_index=0,
+            physical_gpu=args.physical_gpu,
+            device=device,
+        ),
+    )
+    print(f"[C5 DECISION PILOT COMPLETE] case={case_id} marker={marker}")
+    return 0
+
+
 def decision_worker_stage(args: argparse.Namespace) -> int:
     decision, decision_sha = _load_isolated_decision(
         args.run_root,
@@ -439,20 +506,13 @@ def decision_worker_stage(args: argparse.Namespace) -> int:
     device = setup_device(args.gpu, seed=decision["seed"], deterministic=True)
     if device.type != "cuda":
         raise RuntimeError("C5 decision worker requires CUDA")
-    execution = {
-        "phase": "decision",
-        "attempt_id": args.attempt_id,
-        "shard_index": args.shard_index,
-        "physical_gpu": args.physical_gpu,
-        "host": platform.node(),
-        "python": platform.python_version(),
-        "torch": torch.__version__,
-        "device": str(device),
-        "gpu_name": torch.cuda.get_device_name(device),
-        "seed": decision["seed"],
-        "deterministic": True,
-        "labels_loaded_to_device": False,
-    }
+    execution = _decision_execution(
+        decision,
+        attempt_id=args.attempt_id,
+        shard_index=args.shard_index,
+        physical_gpu=args.physical_gpu,
+        device=device,
+    )
     marker = run_decision_worker(
         case_ids=assigned,
         shard_index=args.shard_index,
@@ -481,6 +541,7 @@ def decision_barrier_stage(args: argparse.Namespace) -> int:
         barrier, digest = load_decision_barrier(
             args.run_root,
             sha256_file(barrier_path),
+            contract=decision,
             decision_contract_sha256=decision_sha,
             case_ids=decision["case_ids"],
         )
@@ -519,6 +580,7 @@ def freeze_evaluation_stage(args: argparse.Namespace) -> int:
     barrier, barrier_sha = load_decision_barrier(
         args.run_root,
         args.barrier_sha256,
+        contract=isolated,
         decision_contract_sha256=isolated_sha,
         case_ids=isolated["case_ids"],
     )
@@ -648,6 +710,15 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--physical-gpus", required=True)
     prepare.add_argument("--min-free-gib", type=float, default=DEFAULT_MIN_FREE_GIB)
 
+    pilot = subparsers.add_parser("decision-pilot")
+    pilot.add_argument("--run-root", type=Path, required=True)
+    pilot.add_argument("--source-contract-sha256", required=True)
+    pilot.add_argument("--decision-contract-sha256", required=True)
+    pilot.add_argument("--num-shards", type=int, required=True)
+    pilot.add_argument("--gpu", type=int, default=0)
+    pilot.add_argument("--physical-gpu", required=True)
+    pilot.add_argument("--attempt-id", required=True)
+
     for action in ("decision-worker", "evaluation-worker"):
         worker = subparsers.add_parser(action)
         worker.add_argument("--run-root", type=Path, required=True)
@@ -689,6 +760,7 @@ def main(argv: list[str] | None = None) -> int:
     actions = {
         "selfcheck": selfcheck_stage,
         "prepare": prepare_stage,
+        "decision-pilot": decision_pilot_stage,
         "decision-worker": decision_worker_stage,
         "decision-barrier": decision_barrier_stage,
         "freeze-evaluation": freeze_evaluation_stage,

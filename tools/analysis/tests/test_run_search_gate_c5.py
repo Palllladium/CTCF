@@ -108,6 +108,38 @@ class DiskBudgetTest(unittest.TestCase):
 
 
 class DecisionProcessIsolationTest(unittest.TestCase):
+    def test_decision_pilot_runs_only_the_first_case_without_label_inputs(self) -> None:
+        decision = {
+            "git_head": "a" * 40,
+            "runtime_signature": {"runtime": "frozen"},
+            "num_shards": 1,
+            "shard_to_physical_gpu": {"0": "2"},
+            "shards": {"0": ["subject_1", "subject_2"]},
+            "seed": 0,
+        }
+        args = argparse.Namespace(
+            run_root=Path("run"),
+            source_contract_sha256="b" * 64,
+            decision_contract_sha256="c" * 64,
+            num_shards=1,
+            gpu=0,
+            physical_gpu="2",
+            attempt_id="attempt",
+        )
+        with (
+            patch.object(runner, "load_source_contract", side_effect=AssertionError("source contract was loaded")),
+            patch.object(runner, "load_evaluation_contract", side_effect=AssertionError("evaluation was loaded")),
+            patch.object(runner, "load_decision_contract_isolated", return_value=(decision, "c" * 64)),
+            patch.object(runner, "_assert_clean_code"),
+            patch.object(runner, "_assert_runtime"),
+            patch.object(runner, "setup_device", return_value=torch.device("cuda")),
+            patch.object(torch.cuda, "get_device_name", return_value="H100"),
+            patch.object(runner, "run_decision_case", return_value=Path("decision_complete.json")) as case,
+        ):
+            self.assertEqual(runner.decision_pilot_stage(args), 0)
+        self.assertEqual(case.call_args.kwargs["case_id"], "subject_1")
+        self.assertFalse(case.call_args.kwargs["execution"]["labels_loaded_to_device"])
+
     def test_decision_stage_loads_only_the_label_free_contract(self) -> None:
         decision = {
             "git_head": "a" * 40,
@@ -218,6 +250,7 @@ class PostBarrierEvaluationTest(unittest.TestCase):
             {
                 "selfcheck",
                 "prepare",
+                "decision-pilot",
                 "decision-worker",
                 "decision-barrier",
                 "freeze-evaluation",
@@ -274,6 +307,10 @@ class ShellContractTest(unittest.TestCase):
         ]
         self.assertEqual(order, sorted(order))
         self.assertIn('--evaluation-contract-sha256 "$EVALUATION_CONTRACT_SHA256"', self.text)
+
+    def test_shell_runs_one_reusable_decision_pilot_before_fanout(self) -> None:
+        self.assertLess(self.text.index("decision-pilot"), self.text.index("decision-worker"))
+        self.assertIn('CUDA_VISIBLE_DEVICES="${GPUS[0]}"', self.text)
 
     def test_shell_uses_five_default_gpus_and_defensible_disk_budget(self) -> None:
         self.assertIn('GPU_LIST="${GPU_LIST:-2,3,4,5,6}"', self.text)
