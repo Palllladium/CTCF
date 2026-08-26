@@ -15,6 +15,22 @@ SOURCE_C4_DIR="${SOURCE_C4_DIR:-results/search_gate_c4/C4_DEVELOPMENT_20260824T1
 SOURCE_C4_HEAVY_ROOT="${SOURCE_C4_HEAVY_ROOT:-results/search_gate_c4_heavy/C4_DEVELOPMENT_20260824T161239Z_c69d12000176}"
 MIN_FREE_GIB="${MIN_FREE_GIB:-180}"
 REMOTE_LOCATOR="${REMOTE_LOCATOR:-}"
+RESUME_AFTER_BARRIER="${RESUME_AFTER_BARRIER:-0}"
+RECOVERY_SOURCE_SHA256="6b3607681d39486358233ac33ee73cd50bcadc859c09d185b78c56a6d2450eea"
+RECOVERY_DECISION_SHA256="9c60a2718d3af126ca050766535876e3690896545ecfe0d54ca113ef53ceff77"
+RECOVERY_BARRIER_SHA256="5ecc26975df37c5c6e6bdb31919b133c2ef94dff7c5ce1d587885705d0940cc7"
+if [[ "$RESUME_AFTER_BARRIER" != "0" && "$RESUME_AFTER_BARRIER" != "1" ]]; then
+  echo "[FAIL] RESUME_AFTER_BARRIER must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$RESUME_AFTER_BARRIER" == "1" && -z "${RUN_ID:-}" ]]; then
+  echo "[FAIL] Post-barrier recovery requires an explicit existing RUN_ID" >&2
+  exit 2
+fi
+FREEZE_RECOVERY_ARGS=()
+if [[ "$RESUME_AFTER_BARRIER" == "1" ]]; then
+  FREEZE_RECOVERY_ARGS+=(--resume-after-barrier)
+fi
 
 sg_parse_gpu_list "$GPU_LIST"
 if [[ "${#GPUS[@]}" -lt 1 || "$(printf '%s\n' "${GPUS[@]}" | sort -u | wc -l)" -ne "${#GPUS[@]}" ]]; then
@@ -22,6 +38,10 @@ if [[ "${#GPUS[@]}" -lt 1 || "$(printf '%s\n' "${GPUS[@]}" | sort -u | wc -l)" -
   exit 2
 fi
 GPU_CANONICAL="$(IFS=,; printf '%s' "${GPUS[*]}")"
+if [[ "$RESUME_AFTER_BARRIER" == "1" && "$GPU_CANONICAL" != "0,1,2,3,4" ]]; then
+  echo "[FAIL] The frozen C5 recovery bundle requires GPU_LIST=0,1,2,3,4" >&2
+  exit 2
+fi
 
 sg_export_pythonpath
 GIT_STATUS_AT_START="$(git status --porcelain=v1)"
@@ -61,6 +81,29 @@ if [[ "$HEAVY_RUN_ROOT_ABS" == "$RUN_ROOT_ABS" || "$HEAVY_RUN_ROOT_ABS" == "$RUN
   echo "[FAIL] Compact RUN_ROOT and HEAVY_RUN_ROOT must not overlap" >&2
   exit 2
 fi
+if [[ "$RESUME_AFTER_BARRIER" == "1" ]]; then
+  for required in \
+    "$RUN_ROOT/source_contract.json" \
+    "$RUN_ROOT/decision_contract.json" \
+    "$RUN_ROOT/decision_barrier.json" \
+    "$RUN_ROOT/runner_contract.txt" \
+    "$HEAVY_RUN_ROOT"; do
+    if [[ ! -e "$required" ]]; then
+      echo "[FAIL] Post-barrier recovery input is missing: $required" >&2
+      exit 1
+    fi
+  done
+  if [[ -e "$RUN_ROOT/evaluation_contract.json" ]]; then
+    echo "[FAIL] This recovery path requires a run that stopped before evaluation-contract creation" >&2
+    exit 1
+  fi
+  if [[ "$(sha256sum "$RUN_ROOT/source_contract.json" | awk '{print $1}')" != "$RECOVERY_SOURCE_SHA256" || \
+        "$(sha256sum "$RUN_ROOT/decision_contract.json" | awk '{print $1}')" != "$RECOVERY_DECISION_SHA256" || \
+        "$(sha256sum "$RUN_ROOT/decision_barrier.json" | awk '{print $1}')" != "$RECOVERY_BARRIER_SHA256" ]]; then
+    echo "[FAIL] Existing C5 contracts do not match the authorized post-barrier recovery bundle" >&2
+    exit 1
+  fi
+fi
 PACKAGE_ABS="$(pwd)/results/exports/${RUN_ID}.tar.gz"
 if [[ -z "$REMOTE_LOCATOR" ]]; then
   REMOTE_LOCATOR="$(sg_default_remote_locator "$PACKAGE_ABS")"
@@ -71,6 +114,15 @@ exec 9>"$RUN_ROOT/.run.lock"
 if ! flock -n 9; then
   echo "[FAIL] Another C5 process already holds RUN_ID=$RUN_ID" >&2
   exit 1
+fi
+if [[ "$RESUME_AFTER_BARRIER" == "1" ]]; then
+  echo "########## C5 read-only recovery preflight ##########"
+  "$PYBIN" -m tools.analysis.run_search_gate_c5 recovery-preflight \
+    --run-root "$RUN_ROOT" \
+    --source-contract-sha256 "$RECOVERY_SOURCE_SHA256" \
+    --decision-contract-sha256 "$RECOVERY_DECISION_SHA256" \
+    --barrier-sha256 "$RECOVERY_BARRIER_SHA256" \
+    --physical-gpus "$GPU_CANONICAL"
 fi
 ATTEMPT_ROOT="$RUN_ROOT/attempts/$ATTEMPT_ID"
 if [[ -e "$ATTEMPT_ROOT" ]]; then
@@ -89,8 +141,13 @@ mkdir -p "$ATTEMPT_ROOT"
   printf 'source_c4_dir=%s\n' "$SOURCE_C4_DIR_ABS"
   printf 'source_c4_heavy_root=%s\n' "$SOURCE_C4_HEAVY_ROOT_ABS"
   printf 'min_free_gib=%s\n' "$MIN_FREE_GIB"
+  printf 'resume_after_barrier=%s\n' "$RESUME_AFTER_BARRIER"
 } > "$ATTEMPT_ROOT/runner_contract.txt"
-if [[ ! -f "$RUN_ROOT/runner_contract.txt" ]]; then
+if [[ "$RESUME_AFTER_BARRIER" == "1" ]]; then
+  mkdir -p "$ATTEMPT_ROOT/prior_root_provenance"
+  cp "$RUN_ROOT/runner_contract.txt" "$ATTEMPT_ROOT/prior_root_provenance/runner_contract.txt"
+  cp "$ATTEMPT_ROOT/runner_contract.txt" "$RUN_ROOT/runner_contract.txt"
+elif [[ ! -f "$RUN_ROOT/runner_contract.txt" ]]; then
   cp "$ATTEMPT_ROOT/runner_contract.txt" "$RUN_ROOT/runner_contract.txt"
 elif ! cmp -s "$ATTEMPT_ROOT/runner_contract.txt" "$RUN_ROOT/runner_contract.txt"; then
   echo "[FAIL] Resume settings differ from the original C5 RUN_ID contract" >&2
@@ -110,7 +167,8 @@ fi
     "$GPU_LIST" "$PYBIN" "$PATHS_PROFILE" "$OUT_ROOT" "$HEAVY_OUT_ROOT"
   printf 'RUN_ID=%q ATTEMPT_ID=%q SOURCE_C4_DIR=%q SOURCE_C4_HEAVY_ROOT=%q ' \
     "$RUN_ID" "$ATTEMPT_ID" "$SOURCE_C4_DIR" "$SOURCE_C4_HEAVY_ROOT"
-  printf 'MIN_FREE_GIB=%q REMOTE_LOCATOR=%q bash %q\n' "$MIN_FREE_GIB" "$REMOTE_LOCATOR" "$0"
+  printf 'MIN_FREE_GIB=%q RESUME_AFTER_BARRIER=%q REMOTE_LOCATOR=%q bash %q\n' \
+    "$MIN_FREE_GIB" "$RESUME_AFTER_BARRIER" "$REMOTE_LOCATOR" "$0"
 } > "$ATTEMPT_ROOT/commands.sh"
 git status --porcelain=v1 > "$ATTEMPT_ROOT/git_status.txt"
 {
@@ -119,7 +177,12 @@ git status --porcelain=v1 > "$ATTEMPT_ROOT/git_status.txt"
   nvidia-smi || true
 } > "$ATTEMPT_ROOT/environment.txt" 2>&1
 for artifact in commands.sh git_status.txt environment.txt; do
-  if [[ ! -f "$RUN_ROOT/$artifact" ]]; then
+  if [[ "$RESUME_AFTER_BARRIER" == "1" ]]; then
+    if [[ -f "$RUN_ROOT/$artifact" ]]; then
+      cp "$RUN_ROOT/$artifact" "$ATTEMPT_ROOT/prior_root_provenance/$artifact"
+    fi
+    cp "$ATTEMPT_ROOT/$artifact" "$RUN_ROOT/$artifact"
+  elif [[ ! -f "$RUN_ROOT/$artifact" ]]; then
     cp "$ATTEMPT_ROOT/$artifact" "$RUN_ROOT/$artifact"
   fi
 done
@@ -211,72 +274,80 @@ for artifact in transactional_selfcheck.json c5_selfcheck.json; do
   fi
 done
 
-echo "########## C5 frozen C4 authentication and contracts ##########"
-"$PYBIN" -m tools.analysis.run_search_gate_c5 prepare \
-  --run-root "$RUN_ROOT" \
-  --heavy-root "$HEAVY_RUN_ROOT" \
-  --source-c4-dir "$SOURCE_C4_DIR" \
-  --source-c4-heavy-root "$SOURCE_C4_HEAVY_ROOT" \
-  --num-shards "${#GPUS[@]}" \
-  --physical-gpus "$GPU_CANONICAL" \
-  --min-free-gib "$MIN_FREE_GIB"
-SOURCE_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/source_contract.json" | awk '{print $1}')"
-DECISION_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/decision_contract.json" | awk '{print $1}')"
+if [[ "$RESUME_AFTER_BARRIER" == "0" ]]; then
+  echo "########## C5 frozen C4 authentication and contracts ##########"
+  "$PYBIN" -m tools.analysis.run_search_gate_c5 prepare \
+    --run-root "$RUN_ROOT" \
+    --heavy-root "$HEAVY_RUN_ROOT" \
+    --source-c4-dir "$SOURCE_C4_DIR" \
+    --source-c4-heavy-root "$SOURCE_C4_HEAVY_ROOT" \
+    --num-shards "${#GPUS[@]}" \
+    --physical-gpus "$GPU_CANONICAL" \
+    --min-free-gib "$MIN_FREE_GIB"
+  SOURCE_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/source_contract.json" | awk '{print $1}')"
+  DECISION_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/decision_contract.json" | awk '{print $1}')"
 
-echo "########## C5 single-case label-free decision pilot ##########"
-pilot_log="$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID/pilot.log"
-mkdir -p "$(dirname "$pilot_log")"
-CUDA_VISIBLE_DEVICES="${GPUS[0]}" "$PYBIN" -m tools.analysis.run_search_gate_c5 decision-pilot \
-  --run-root "$RUN_ROOT" \
-  --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
-  --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
-  --num-shards "${#GPUS[@]}" --gpu 0 \
-  --physical-gpu "${GPUS[0]}" --attempt-id "$ATTEMPT_ID" \
-  > "$pilot_log" 2>&1
-echo "[DECISION PILOT] physical_gpu=${GPUS[0]} log=$pilot_log"
+  echo "########## C5 single-case label-free decision pilot ##########"
+  pilot_log="$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID/pilot.log"
+  mkdir -p "$(dirname "$pilot_log")"
+  CUDA_VISIBLE_DEVICES="${GPUS[0]}" "$PYBIN" -m tools.analysis.run_search_gate_c5 decision-pilot \
+    --run-root "$RUN_ROOT" \
+    --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
+    --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
+    --num-shards "${#GPUS[@]}" --gpu 0 \
+    --physical-gpu "${GPUS[0]}" --attempt-id "$ATTEMPT_ID" \
+    > "$pilot_log" 2>&1
+  echo "[DECISION PILOT] physical_gpu=${GPUS[0]} log=$pilot_log"
 
-echo "########## C5 label-free decision workers ##########"
-mkdir -p "$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID"
-for shard_index in "${!GPUS[@]}"; do
-  physical_gpu="${GPUS[$shard_index]}"
-  log="$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID/worker_$(printf '%02d' "$shard_index").log"
-  (
-    CUDA_VISIBLE_DEVICES="$physical_gpu" "$PYBIN" -m tools.analysis.run_search_gate_c5 decision-worker \
-      --run-root "$RUN_ROOT" \
-      --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
-      --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
-      --shard-index "$shard_index" --num-shards "${#GPUS[@]}" --gpu 0 \
-      --physical-gpu "$physical_gpu" --attempt-id "$ATTEMPT_ID"
-  ) > "$log" 2>&1 &
-  PIDS+=("$!")
-  echo "[DECISION WORKER] shard=$shard_index physical_gpu=$physical_gpu pid=$! log=$log"
-done
-worker_failed=0
-for index in "${!PIDS[@]}"; do
-  if ! wait "${PIDS[$index]}"; then
-    echo "[FAIL] C5 decision shard $index failed; inspect its worker log." >&2
-    worker_failed=1
+  echo "########## C5 label-free decision workers ##########"
+  mkdir -p "$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID"
+  for shard_index in "${!GPUS[@]}"; do
+    physical_gpu="${GPUS[$shard_index]}"
+    log="$RUN_ROOT/workers/decision/attempts/$ATTEMPT_ID/worker_$(printf '%02d' "$shard_index").log"
+    (
+      CUDA_VISIBLE_DEVICES="$physical_gpu" "$PYBIN" -m tools.analysis.run_search_gate_c5 decision-worker \
+        --run-root "$RUN_ROOT" \
+        --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
+        --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
+        --shard-index "$shard_index" --num-shards "${#GPUS[@]}" --gpu 0 \
+        --physical-gpu "$physical_gpu" --attempt-id "$ATTEMPT_ID"
+    ) > "$log" 2>&1 &
+    PIDS+=("$!")
+    echo "[DECISION WORKER] shard=$shard_index physical_gpu=$physical_gpu pid=$! log=$log"
+  done
+  worker_failed=0
+  for index in "${!PIDS[@]}"; do
+    if ! wait "${PIDS[$index]}"; then
+      echo "[FAIL] C5 decision shard $index failed; inspect its worker log." >&2
+      worker_failed=1
+    fi
+  done
+  PIDS=()
+  if [[ "$worker_failed" -ne 0 ]]; then
+    exit 1
   fi
-done
-PIDS=()
-if [[ "$worker_failed" -ne 0 ]]; then
-  exit 1
-fi
 
-echo "########## C5 immutable decision barrier ##########"
-"$PYBIN" -m tools.analysis.run_search_gate_c5 decision-barrier \
-  --run-root "$RUN_ROOT" \
-  --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
-  --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
-  --attempt-id "$ATTEMPT_ID"
-BARRIER_SHA256="$(sha256sum "$RUN_ROOT/decision_barrier.json" | awk '{print $1}')"
+  echo "########## C5 immutable decision barrier ##########"
+  "$PYBIN" -m tools.analysis.run_search_gate_c5 decision-barrier \
+    --run-root "$RUN_ROOT" \
+    --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
+    --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
+    --attempt-id "$ATTEMPT_ID"
+  BARRIER_SHA256="$(sha256sum "$RUN_ROOT/decision_barrier.json" | awk '{print $1}')"
+else
+  echo "########## C5 authenticated post-barrier recovery ##########"
+  SOURCE_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/source_contract.json" | awk '{print $1}')"
+  DECISION_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/decision_contract.json" | awk '{print $1}')"
+  BARRIER_SHA256="$(sha256sum "$RUN_ROOT/decision_barrier.json" | awk '{print $1}')"
+fi
 
 echo "########## C5 post-barrier evaluation contract ##########"
 "$PYBIN" -m tools.analysis.run_search_gate_c5 freeze-evaluation \
   --run-root "$RUN_ROOT" \
   --source-contract-sha256 "$SOURCE_CONTRACT_SHA256" \
   --decision-contract-sha256 "$DECISION_CONTRACT_SHA256" \
-  --barrier-sha256 "$BARRIER_SHA256"
+  --barrier-sha256 "$BARRIER_SHA256" \
+  "${FREEZE_RECOVERY_ARGS[@]}"
 EVALUATION_CONTRACT_SHA256="$(sha256sum "$RUN_ROOT/evaluation_contract.json" | awk '{print $1}')"
 
 echo "########## C5 post-freeze evaluation workers ##########"

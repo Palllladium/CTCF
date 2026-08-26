@@ -23,8 +23,13 @@ from tools.analysis.search_gate_c5_contracts import (
     DECISION_CASE_SCHEMA,
     EVALUATION_CASE_SCHEMA,
     EVALUATION_LABEL_IDS,
+    EVALUATION_TRANSITION_POST_BARRIER_RECOVERY,
     EXPECTED_SUPPORT_CONTRACT,
     PROTOCOL_ID,
+    RECOVERABLE_DECISION_BARRIER_SHA256,
+    RECOVERABLE_DECISION_CONTRACT_SHA256,
+    RECOVERABLE_DECISION_GIT_HEAD,
+    RECOVERABLE_SOURCE_CONTRACT_SHA256,
     SOURCE_C4_ANCHOR_IDS,
     SOURCE_C4_GIT_HEAD,
     SOURCE_C4_MANIFEST_SHA256,
@@ -34,12 +39,14 @@ from tools.analysis.search_gate_c5_contracts import (
     build_evaluation_contract,
     build_source_contract,
     load_decision_barrier,
+    load_evaluation_contract,
     payload_sha256,
     validate_decision_case_marker,
     validate_evaluation_case_marker,
     validate_evaluation_contract,
     validate_worker_marker,
     verify_rooted_record,
+    write_evaluation_contract,
 )
 from tools.analysis.search_gate_metrics import MATHEMATICAL_SDLOGJ_CROP2
 
@@ -77,7 +84,8 @@ class C5ContractFixture(unittest.TestCase):
         self.target = base / "c5"
         for root in (self.c3, self.c4, self.target):
             root.mkdir()
-        self.case_ids = [f"subject_{index:03d}" for index in range(58)]
+        ordered_case_ids = [f"subject_{index:03d}" for index in range(58)]
+        self.case_ids = ordered_case_ids[17:] + ordered_case_ids[:17]
         image_inputs = {"atlas": _field("source_c3_heavy", "images/atlas.npy")}
         image_inputs.update({case_id: _field("source_c3_heavy", f"images/{case_id}.npy") for case_id in self.case_ids})
         source_initial = {
@@ -517,6 +525,88 @@ class EvaluationTamperTest(C5ContractFixture):
                 expected_source_sha256=self.source_sha,
                 expected_decision_sha256=self.decision_sha,
                 expected_barrier_sha256=SHA_B,
+            )
+
+    def test_barrier_and_evaluation_round_trip_preserve_inventory_not_mapping_order(self) -> None:
+        self.assertNotEqual(self.case_ids, sorted(self.case_ids))
+        case_hashes = {case_id: SHA_A for case_id in self.case_ids}
+        barrier = {
+            "schema": BARRIER_SCHEMA,
+            "protocol_id": PROTOCOL_ID,
+            "status": "COMPLETE",
+            "decision_contract_sha256": self.decision_sha,
+            "decision_workers_received_label_inputs": False,
+            "test_split_accessed": False,
+            "decision_case_sha256": case_hashes,
+        }
+        evaluation = build_evaluation_contract(
+            self.source,
+            self.source_sha,
+            self.decision_sha,
+            barrier,
+            SHA_B,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evaluation_sha = write_evaluation_contract(root, evaluation)
+            loaded, loaded_sha = load_evaluation_contract(
+                root,
+                evaluation_sha,
+                source=self.source,
+                barrier=barrier,
+                expected_source_sha256=self.source_sha,
+                expected_decision_sha256=self.decision_sha,
+                expected_barrier_sha256=SHA_B,
+            )
+        self.assertEqual(loaded_sha, evaluation_sha)
+        self.assertEqual(set(loaded["decision_case_sha256"]), set(self.case_ids))
+        self.assertNotEqual(list(loaded["decision_case_sha256"]), self.case_ids)
+        for mutate in (
+            lambda value: value["decision_case_sha256"].pop(self.case_ids[0]),
+            lambda value: value["decision_case_sha256"].__setitem__("subject_extra", SHA_A),
+        ):
+            altered = copy.deepcopy(evaluation)
+            mutate(altered)
+            with self.assertRaisesRegex(RuntimeError, "wrong decision-case inventory"):
+                validate_evaluation_contract(
+                    altered,
+                    source=self.source,
+                    barrier=barrier,
+                    expected_source_sha256=self.source_sha,
+                    expected_decision_sha256=self.decision_sha,
+                    expected_barrier_sha256=SHA_B,
+                )
+
+    def test_post_barrier_recovery_is_bound_to_the_exact_failed_bundle(self) -> None:
+        source = copy.deepcopy(self.source)
+        source["git_head"] = RECOVERABLE_DECISION_GIT_HEAD
+        barrier = {
+            "schema": BARRIER_SCHEMA,
+            "protocol_id": PROTOCOL_ID,
+            "status": "COMPLETE",
+            "decision_contract_sha256": RECOVERABLE_DECISION_CONTRACT_SHA256,
+            "decision_case_sha256": {case_id: SHA_A for case_id in self.case_ids},
+        }
+        evaluation = build_evaluation_contract(
+            source,
+            RECOVERABLE_SOURCE_CONTRACT_SHA256,
+            RECOVERABLE_DECISION_CONTRACT_SHA256,
+            barrier,
+            RECOVERABLE_DECISION_BARRIER_SHA256,
+            evaluation_git_head=GIT_SHA,
+            evaluation_runtime_signature=source["runtime_signature"],
+            code_transition=EVALUATION_TRANSITION_POST_BARRIER_RECOVERY,
+        )
+        self.assertEqual(evaluation["evaluation_code"]["git_head"], GIT_SHA)
+        evaluation["source_contract_sha256"] = SHA_A
+        with self.assertRaisesRegex(RuntimeError, "not an authorized recovery"):
+            validate_evaluation_contract(
+                evaluation,
+                source=source,
+                barrier=barrier,
+                expected_source_sha256=SHA_A,
+                expected_decision_sha256=RECOVERABLE_DECISION_CONTRACT_SHA256,
+                expected_barrier_sha256=RECOVERABLE_DECISION_BARRIER_SHA256,
             )
 
     def test_evaluation_worker_is_bound_to_both_barrier_and_evaluation_contract(self) -> None:

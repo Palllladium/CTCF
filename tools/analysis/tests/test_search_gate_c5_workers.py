@@ -516,8 +516,10 @@ class FullShapeFinalizerTest(unittest.TestCase):
     def test_full_58_by_36_by_5_finalizer_inventory_and_hashes(self) -> None:
         case_ids = [f"subject_{index:03d}" for index in range(58)]
         frozen_sha = "a" * 64
+        git_head = "e" * 40
         decision = {
             "case_ids": case_ids,
+            "git_head": git_head,
             "source_contract_sha256": frozen_sha,
             "full_policy_sha256": frozen_sha,
             "decision_policy_sha256": frozen_sha,
@@ -554,7 +556,15 @@ class FullShapeFinalizerTest(unittest.TestCase):
                     decision_sha256="b" * 64,
                     barrier=barrier,
                     barrier_sha256="c" * 64,
-                    evaluation_contract={},
+                    evaluation_contract={
+                        "evaluation_code": {
+                            "decision_git_head": git_head,
+                            "git_head": git_head,
+                            "runtime_signature": {},
+                            "transition": "SAME_COMMIT",
+                            "transition_reason": "NONE",
+                        }
+                    },
                     evaluation_contract_sha256="d" * 64,
                 )
 

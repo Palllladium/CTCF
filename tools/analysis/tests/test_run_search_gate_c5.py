@@ -16,7 +16,13 @@ from tools.analysis.search_gate_c5 import (
     C5_POLICY_SHA256,
     INFERENCE_FAMILY_IDS,
 )
-from tools.analysis.search_gate_c5_contracts import EXPECTED_SUPPORT_CONTRACT, payload_sha256
+from tools.analysis.search_gate_c5_contracts import (
+    EXPECTED_SUPPORT_CONTRACT,
+    RECOVERABLE_DECISION_BARRIER_SHA256,
+    RECOVERABLE_DECISION_CONTRACT_SHA256,
+    RECOVERABLE_SOURCE_CONTRACT_SHA256,
+    payload_sha256,
+)
 
 
 class FrozenRunnerPayloadTest(unittest.TestCase):
@@ -208,7 +214,8 @@ class DecisionProcessIsolationTest(unittest.TestCase):
 class PostBarrierEvaluationTest(unittest.TestCase):
     def test_evaluation_contract_is_created_only_from_a_loaded_barrier(self) -> None:
         source = {"case_ids": ["subject_1"]}
-        decision = {"git_head": "a" * 40, "runtime_signature": {"runtime": "frozen"}, "case_ids": ["subject_1"]}
+        runtime = {"runtime": "frozen"}
+        decision = {"git_head": "a" * 40, "runtime_signature": runtime, "case_ids": ["subject_1"]}
         barrier = {"schema": "barrier"}
         evaluation = {"schema": "evaluation"}
         args = argparse.Namespace(
@@ -232,6 +239,7 @@ class PostBarrierEvaluationTest(unittest.TestCase):
             patch.object(runner, "_load_contract_pair", side_effect=load_full),
             patch.object(runner, "_assert_clean_code"),
             patch.object(runner, "_assert_runtime"),
+            patch.object(runner, "_runtime_signature", return_value=runtime),
             patch.object(runner, "load_decision_barrier", side_effect=load_barrier) as barrier_loader,
             patch.object(runner, "build_evaluation_contract", return_value=evaluation) as build,
             patch.object(runner, "write_evaluation_contract", return_value="4" * 64) as write,
@@ -239,8 +247,93 @@ class PostBarrierEvaluationTest(unittest.TestCase):
             self.assertEqual(runner.freeze_evaluation_stage(args), 0)
         barrier_loader.assert_called_once()
         self.assertEqual(order, ["barrier", "source"])
-        build.assert_called_once_with(source, "1" * 64, "2" * 64, barrier, "3" * 64)
+        build.assert_called_once_with(
+            source,
+            "1" * 64,
+            "2" * 64,
+            barrier,
+            "3" * 64,
+            evaluation_git_head="a" * 40,
+            evaluation_runtime_signature=runtime,
+            code_transition="SAME_COMMIT",
+        )
         write.assert_called_once_with(Path("run"), evaluation)
+
+    def test_explicit_post_barrier_resume_records_the_new_consumer_head(self) -> None:
+        source = {"case_ids": ["subject_1"]}
+        runtime = {"runtime": "frozen"}
+        decision = {"git_head": "a" * 40, "runtime_signature": runtime, "case_ids": ["subject_1"]}
+        barrier = {"schema": "barrier"}
+        args = argparse.Namespace(
+            run_root=Path("run"),
+            source_contract_sha256="1" * 64,
+            decision_contract_sha256="2" * 64,
+            barrier_sha256="3" * 64,
+            resume_after_barrier=True,
+        )
+        with (
+            patch.object(runner, "git", return_value="b" * 40),
+            patch.object(runner, "_load_isolated_decision", return_value=(decision, "2" * 64)),
+            patch.object(runner, "_load_contract_pair", return_value=(source, decision, "1" * 64, "2" * 64)),
+            patch.object(runner, "_assert_clean_code"),
+            patch.object(runner, "_assert_runtime"),
+            patch.object(runner, "_runtime_signature", return_value=runtime),
+            patch.object(runner, "load_decision_barrier", return_value=(barrier, "3" * 64)),
+            patch.object(runner, "build_evaluation_contract", return_value={"schema": "evaluation"}) as build,
+            patch.object(runner, "write_evaluation_contract", return_value="4" * 64),
+        ):
+            self.assertEqual(runner.freeze_evaluation_stage(args), 0)
+        self.assertEqual(build.call_args.kwargs["evaluation_git_head"], "b" * 40)
+        self.assertEqual(build.call_args.kwargs["code_transition"], "POST_BARRIER_RECOVERY")
+
+    def test_recovery_preflight_validates_frozen_gpu_and_heavy_inputs_without_writing(self) -> None:
+        runtime = {"runtime": "frozen"}
+        decision = {
+            "git_head": "a" * 40,
+            "runtime_signature": runtime,
+            "case_ids": ["subject_1"],
+            "num_shards": 5,
+            "physical_gpus": ["0", "1", "2", "3", "4"],
+        }
+        barrier = {"schema": "barrier"}
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            heavy_root = Path(directory) / "heavy"
+            run_root.mkdir()
+            heavy_root.mkdir()
+            source = {
+                "case_ids": ["subject_1"],
+                "roots": {
+                    "source_c3_heavy": str(heavy_root),
+                    "source_c4_heavy": str(heavy_root),
+                    "target_c5_heavy": str(heavy_root),
+                },
+            }
+            args = argparse.Namespace(
+                run_root=run_root,
+                source_contract_sha256="1" * 64,
+                decision_contract_sha256="2" * 64,
+                barrier_sha256="3" * 64,
+                physical_gpus="0,1,2,3,4",
+            )
+            with (
+                patch.object(runner, "_load_isolated_decision", return_value=(decision, "2" * 64)),
+                patch.object(runner, "_load_contract_pair", return_value=(source, decision, "1" * 64, "2" * 64)),
+                patch.object(
+                    runner,
+                    "_evaluation_code_transition",
+                    return_value=("b" * 40, runtime, "POST_BARRIER_RECOVERY"),
+                ),
+                patch.object(runner, "load_decision_barrier", return_value=(barrier, "3" * 64)),
+                patch.object(
+                    runner,
+                    "build_evaluation_contract",
+                    return_value={"evaluation_code": {"git_head": "b" * 40}},
+                ) as build,
+            ):
+                self.assertEqual(runner.recovery_preflight_stage(args), 0)
+            build.assert_called_once()
+            self.assertFalse((run_root / "evaluation_contract.json").exists())
 
     def test_cli_requires_evaluation_hash_for_label_stage_and_finalizer(self) -> None:
         parser = runner.build_parser()
@@ -254,6 +347,7 @@ class PostBarrierEvaluationTest(unittest.TestCase):
                 "decision-worker",
                 "decision-barrier",
                 "freeze-evaluation",
+                "recovery-preflight",
                 "evaluation-worker",
                 "finalize",
             },
@@ -276,6 +370,21 @@ class PostBarrierEvaluationTest(unittest.TestCase):
             ]
         )
         self.assertEqual(prepare.min_free_gib, 180.0)
+        freeze = parser.parse_args(
+            [
+                "freeze-evaluation",
+                "--run-root",
+                "run",
+                "--source-contract-sha256",
+                "1" * 64,
+                "--decision-contract-sha256",
+                "2" * 64,
+                "--barrier-sha256",
+                "3" * 64,
+                "--resume-after-barrier",
+            ]
+        )
+        self.assertTrue(freeze.resume_after_barrier)
 
 
 class ShellContractTest(unittest.TestCase):
@@ -320,6 +429,16 @@ class ShellContractTest(unittest.TestCase):
         self.assertIn('tar -czf "$package" -C "$OUT_ROOT" "$RUN_ID"', self.text)
         self.assertNotIn('-C "$HEAVY_OUT_ROOT"', self.text)
         self.assertIn("--expected-preflights 0 --no-strict-checkpoint-load", self.text)
+
+    def test_shell_resume_skips_decision_and_requires_an_existing_run(self) -> None:
+        self.assertIn('RESUME_AFTER_BARRIER="${RESUME_AFTER_BARRIER:-0}"', self.text)
+        self.assertIn("Post-barrier recovery requires an explicit existing RUN_ID", self.text)
+        self.assertIn('if [[ "$RESUME_AFTER_BARRIER" == "0" ]]; then', self.text)
+        self.assertIn("FREEZE_RECOVERY_ARGS+=(--resume-after-barrier)", self.text)
+        self.assertIn("recovery-preflight", self.text)
+        self.assertIn(f'RECOVERY_SOURCE_SHA256="{RECOVERABLE_SOURCE_CONTRACT_SHA256}"', self.text)
+        self.assertIn(f'RECOVERY_DECISION_SHA256="{RECOVERABLE_DECISION_CONTRACT_SHA256}"', self.text)
+        self.assertIn(f'RECOVERY_BARRIER_SHA256="{RECOVERABLE_DECISION_BARRIER_SHA256}"', self.text)
 
 
 if __name__ == "__main__":

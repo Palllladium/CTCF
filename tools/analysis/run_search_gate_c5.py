@@ -39,6 +39,8 @@ from tools.analysis.search_gate_c5 import (
     decision_policy_contract,
 )
 from tools.analysis.search_gate_c5_contracts import (
+    EVALUATION_TRANSITION_POST_BARRIER_RECOVERY,
+    EVALUATION_TRANSITION_SAME_COMMIT,
     EXPECTED_SUPPORT_CONTRACT,
     SOURCE_C4_MANIFEST_SHA256,
     SOURCE_C4_RUN_ID,
@@ -312,6 +314,28 @@ def _load_evaluation_bundle(
     return source, decision, source_sha, decision_sha, barrier, barrier_sha, evaluation, evaluation_sha
 
 
+def _evaluation_code_transition(
+    decision: Mapping[str, Any],
+    *,
+    resume_after_barrier: bool,
+) -> tuple[str, dict[str, Any], str]:
+    if resume_after_barrier:
+        evaluation_git_head = git("rev-parse", "HEAD")
+        _assert_clean_code(evaluation_git_head, "post-barrier recovery")
+    else:
+        evaluation_git_head = decision["git_head"]
+        _assert_clean_code(evaluation_git_head, "evaluation")
+    _assert_runtime(decision["runtime_signature"], "evaluation")
+    transition = (
+        EVALUATION_TRANSITION_SAME_COMMIT
+        if evaluation_git_head == decision["git_head"]
+        else EVALUATION_TRANSITION_POST_BARRIER_RECOVERY
+    )
+    if transition == EVALUATION_TRANSITION_POST_BARRIER_RECOVERY and not resume_after_barrier:
+        raise RuntimeError("C5 evaluation code changed without an explicit post-barrier recovery")
+    return evaluation_git_head, _runtime_signature(), transition
+
+
 def selfcheck_stage(args: argparse.Namespace) -> int:
     assert_frozen_policy()
     assert_frozen_decision_policy()
@@ -575,8 +599,11 @@ def freeze_evaluation_stage(args: argparse.Namespace) -> int:
         args.source_contract_sha256,
         args.decision_contract_sha256,
     )
-    _assert_clean_code(isolated["git_head"], "evaluation-contract freeze")
-    _assert_runtime(isolated["runtime_signature"], "evaluation-contract freeze")
+    resume_after_barrier = bool(getattr(args, "resume_after_barrier", False))
+    evaluation_git_head, evaluation_runtime, transition = _evaluation_code_transition(
+        isolated,
+        resume_after_barrier=resume_after_barrier,
+    )
     barrier, barrier_sha = load_decision_barrier(
         args.run_root,
         args.barrier_sha256,
@@ -589,16 +616,94 @@ def freeze_evaluation_stage(args: argparse.Namespace) -> int:
     )
     if decision_sha != isolated_sha or decision != isolated:
         raise RuntimeError("C5 decision contract changed while opening the post-barrier evaluation contract")
-    evaluation = build_evaluation_contract(source, source_sha, decision_sha, barrier, barrier_sha)
+    evaluation = build_evaluation_contract(
+        source,
+        source_sha,
+        decision_sha,
+        barrier,
+        barrier_sha,
+        evaluation_git_head=evaluation_git_head,
+        evaluation_runtime_signature=evaluation_runtime,
+        code_transition=transition,
+    )
     digest = write_evaluation_contract(args.run_root, evaluation)
     print(f"[C5 EVALUATION CONTRACT] {digest}")
     return 0
 
 
+def recovery_preflight_stage(args: argparse.Namespace) -> int:
+    if (args.run_root.resolve() / "evaluation_contract.json").exists():
+        raise RuntimeError("C5 recovery preflight requires a run stopped before evaluation-contract creation")
+    isolated, isolated_sha = _load_isolated_decision(
+        args.run_root,
+        args.source_contract_sha256,
+        args.decision_contract_sha256,
+    )
+    physical_gpus = parse_physical_gpus(
+        args.physical_gpus,
+        isolated["num_shards"],
+        "C5 recovery requires the frozen physical GPU inventory",
+    )
+    if physical_gpus != isolated["physical_gpus"]:
+        raise RuntimeError("C5 recovery physical GPUs differ from the frozen decision contract")
+    evaluation_git_head, evaluation_runtime, transition = _evaluation_code_transition(
+        isolated,
+        resume_after_barrier=True,
+    )
+    if transition != EVALUATION_TRANSITION_POST_BARRIER_RECOVERY:
+        raise RuntimeError("C5 recovery preflight requires a distinct post-barrier consumer commit")
+    barrier, barrier_sha = load_decision_barrier(
+        args.run_root,
+        args.barrier_sha256,
+        contract=isolated,
+        decision_contract_sha256=isolated_sha,
+        case_ids=isolated["case_ids"],
+    )
+    source, decision, source_sha, decision_sha = _load_contract_pair(
+        args.run_root,
+        args.source_contract_sha256,
+        args.decision_contract_sha256,
+    )
+    if decision_sha != isolated_sha or decision != isolated:
+        raise RuntimeError("C5 recovery decision contract differs from its isolated preflight load")
+    missing_heavy_roots = [
+        f"{root_id}={path}" for root_id, value in source["roots"].items() if not (path := Path(value)).is_dir()
+    ]
+    if missing_heavy_roots:
+        raise RuntimeError(f"C5 recovery heavy roots are missing: {missing_heavy_roots}")
+    evaluation = build_evaluation_contract(
+        source,
+        source_sha,
+        decision_sha,
+        barrier,
+        barrier_sha,
+        evaluation_git_head=evaluation_git_head,
+        evaluation_runtime_signature=evaluation_runtime,
+        code_transition=transition,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "mode": EVALUATION_TRANSITION_POST_BARRIER_RECOVERY,
+                "decision_git_head": decision["git_head"],
+                "evaluation_git_head": evaluation["evaluation_code"]["git_head"],
+                "decision_barrier_sha256": barrier_sha,
+                "cases": len(decision["case_ids"]),
+                "physical_gpus": physical_gpus,
+                "test_115_authorized": False,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def evaluation_worker_stage(args: argparse.Namespace) -> int:
     _, decision, _, decision_sha, barrier, barrier_sha, evaluation, evaluation_sha = _load_evaluation_bundle(args)
-    _assert_clean_code(decision["git_head"], "evaluation worker")
-    _assert_runtime(decision["runtime_signature"], "evaluation worker")
+    evaluation_code = evaluation["evaluation_code"]
+    _assert_clean_code(evaluation_code["git_head"], "evaluation worker")
+    _assert_runtime(evaluation_code["runtime_signature"], "evaluation worker")
     if args.num_shards != decision["num_shards"] or not 0 <= args.shard_index < args.num_shards:
         raise RuntimeError("C5 evaluation worker shard parameters changed")
     if args.physical_gpu != decision["shard_to_physical_gpu"][str(args.shard_index)]:
@@ -660,8 +765,9 @@ def evaluation_worker_stage(args: argparse.Namespace) -> int:
 
 def finalize_stage(args: argparse.Namespace) -> int:
     _, decision, _, decision_sha, barrier, barrier_sha, evaluation, evaluation_sha = _load_evaluation_bundle(args)
-    _assert_clean_code(decision["git_head"], "finalization")
-    _assert_runtime(decision["runtime_signature"], "finalization")
+    evaluation_code = evaluation["evaluation_code"]
+    _assert_clean_code(evaluation_code["git_head"], "finalization")
+    _assert_runtime(evaluation_code["runtime_signature"], "finalization")
     for shard_index in range(decision["num_shards"]):
         path = (
             args.run_root.resolve()
@@ -744,6 +850,14 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--source-contract-sha256", required=True)
     freeze.add_argument("--decision-contract-sha256", required=True)
     freeze.add_argument("--barrier-sha256", required=True)
+    freeze.add_argument("--resume-after-barrier", action="store_true")
+
+    recovery = subparsers.add_parser("recovery-preflight")
+    recovery.add_argument("--run-root", type=Path, required=True)
+    recovery.add_argument("--source-contract-sha256", required=True)
+    recovery.add_argument("--decision-contract-sha256", required=True)
+    recovery.add_argument("--barrier-sha256", required=True)
+    recovery.add_argument("--physical-gpus", required=True)
 
     finalize = subparsers.add_parser("finalize")
     finalize.add_argument("--run-root", type=Path, required=True)
@@ -764,6 +878,7 @@ def main(argv: list[str] | None = None) -> int:
         "decision-worker": decision_worker_stage,
         "decision-barrier": decision_barrier_stage,
         "freeze-evaluation": freeze_evaluation_stage,
+        "recovery-preflight": recovery_preflight_stage,
         "evaluation-worker": evaluation_worker_stage,
         "finalize": finalize_stage,
     }

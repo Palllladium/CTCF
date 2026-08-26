@@ -43,7 +43,7 @@ SCHEMA_VERSION = "v1"
 SOURCE_SCHEMA = "ctcf-search-c5-source-contract-v1"
 DECISION_SCHEMA = "ctcf-search-c5-decision-contract-v1"
 BARRIER_SCHEMA = "ctcf-search-c5-decision-barrier-v1"
-EVALUATION_CONTRACT_SCHEMA = "ctcf-search-c5-evaluation-contract-v1"
+EVALUATION_CONTRACT_SCHEMA = "ctcf-search-c5-evaluation-contract-v2"
 DECISION_CASE_SCHEMA = "ctcf-search-c5-decision-case-v1"
 EVALUATION_CASE_SCHEMA = "ctcf-search-c5-evaluation-case-v1"
 WORKER_SCHEMA = "ctcf-search-c5-worker-v1"
@@ -53,6 +53,14 @@ SOURCE_C4_MANIFEST_SHA256 = "dd3c6a6eb4d0fdcb479b7dee4d722c4573cd68a59ac3849a048
 SOURCE_C4_RUN_MANIFEST_SHA256 = "70d6f526501a26b442ad1d3b821028a7d5ed9ef5b6c809f7e7fdebe2cc15460e"
 SOURCE_C4_GIT_HEAD = "c69d12000176c796e96dd15f4b831c8df05ef64b"
 SOURCE_C4_ANCHOR_IDS = ("intensity_s1", "intensity_s2")
+
+EVALUATION_TRANSITION_SAME_COMMIT = "SAME_COMMIT"
+EVALUATION_TRANSITION_POST_BARRIER_RECOVERY = "POST_BARRIER_RECOVERY"
+POST_BARRIER_RECOVERY_REASON = "DECISION_BARRIER_MAPPING_ORDER_VALIDATOR_HOTFIX"
+RECOVERABLE_DECISION_GIT_HEAD = "242dde3281d22c573a4a64bc494c8d2e5ef597b2"
+RECOVERABLE_SOURCE_CONTRACT_SHA256 = "6b3607681d39486358233ac33ee73cd50bcadc859c09d185b78c56a6d2450eea"
+RECOVERABLE_DECISION_CONTRACT_SHA256 = "9c60a2718d3af126ca050766535876e3690896545ecfe0d54ca113ef53ceff77"
+RECOVERABLE_DECISION_BARRIER_SHA256 = "5ecc26975df37c5c6e6bdb31919b133c2ef94dff7c5ce1d587885705d0940cc7"
 EVALUATION_LABEL_IDS = (
     1,
     2,
@@ -1581,7 +1589,8 @@ def load_decision_barrier(
         or payload.get("decision_contract_sha256") != decision_contract_sha256
         or payload.get("decision_workers_received_label_inputs") is not False
         or payload.get("test_split_accessed") is not False
-        or list((payload.get("decision_case_sha256") or {}).keys()) != list(case_ids)
+        or not isinstance(payload.get("decision_case_sha256"), Mapping)
+        or set(payload["decision_case_sha256"]) != set(case_ids)
         or not isinstance(payload.get("completed_at_utc"), str)
         or not payload.get("completed_at_utc")
     ):
@@ -1626,6 +1635,10 @@ def build_evaluation_contract(
     decision_contract_sha256: str,
     barrier: Mapping[str, Any],
     barrier_sha256: str,
+    *,
+    evaluation_git_head: str | None = None,
+    evaluation_runtime_signature: Mapping[str, Any] | None = None,
+    code_transition: str = EVALUATION_TRANSITION_SAME_COMMIT,
 ) -> dict[str, Any]:
     validate_source_contract(source)
     if (
@@ -1635,6 +1648,11 @@ def build_evaluation_contract(
         or set(barrier.get("decision_case_sha256") or {}) != set(source["case_ids"])
     ):
         raise RuntimeError("C5 evaluation contract requires a complete matching decision barrier")
+    evaluation_head = source["git_head"] if evaluation_git_head is None else evaluation_git_head
+    evaluation_runtime = (
+        source["runtime_signature"] if evaluation_runtime_signature is None else evaluation_runtime_signature
+    )
+    transition_reason = "NONE" if code_transition == EVALUATION_TRANSITION_SAME_COMMIT else POST_BARRIER_RECOVERY_REASON
     payload = {
         "schema": EVALUATION_CONTRACT_SCHEMA,
         "protocol_id": PROTOCOL_ID,
@@ -1642,6 +1660,13 @@ def build_evaluation_contract(
         "source_contract_sha256": _require_sha(source_contract_sha256, "C5 source contract"),
         "decision_contract_sha256": _require_sha(decision_contract_sha256, "C5 decision contract"),
         "decision_barrier_sha256": _require_sha(barrier_sha256, "C5 decision barrier"),
+        "evaluation_code": {
+            "decision_git_head": source["git_head"],
+            "git_head": evaluation_head,
+            "runtime_signature": dict(evaluation_runtime),
+            "transition": code_transition,
+            "transition_reason": transition_reason,
+        },
         "decision_case_sha256": dict(barrier["decision_case_sha256"]),
         "case_ids": source["case_ids"],
         "full_policy": source["full_policy"],
@@ -1710,10 +1735,47 @@ def validate_evaluation_contract(
         raise RuntimeError("C5 evaluation contract differs from its authenticated source projection")
     if tuple(payload.get("evaluation_label_ids") or ()) != EVALUATION_LABEL_IDS:
         raise RuntimeError("C5 evaluation contract has the wrong IXI label order")
-    if list((payload.get("decision_case_sha256") or {}).keys()) != source["case_ids"]:
+    decision_hashes = payload.get("decision_case_sha256")
+    if not isinstance(decision_hashes, Mapping) or set(decision_hashes) != set(source["case_ids"]):
         raise RuntimeError("C5 evaluation contract has the wrong decision-case inventory")
     if payload.get("decision_case_sha256") != barrier.get("decision_case_sha256"):
         raise RuntimeError("C5 evaluation contract differs from the frozen decision-case hashes")
+    evaluation_code = payload.get("evaluation_code")
+    if not isinstance(evaluation_code, Mapping) or set(evaluation_code) != {
+        "decision_git_head",
+        "git_head",
+        "runtime_signature",
+        "transition",
+        "transition_reason",
+    }:
+        raise RuntimeError("C5 evaluation code provenance is missing or malformed")
+    decision_head = str(source.get("git_head", ""))
+    evaluation_head = str(evaluation_code.get("git_head", ""))
+    if (
+        evaluation_code.get("decision_git_head") != decision_head
+        or GIT_SHA_RE.fullmatch(evaluation_head) is None
+        or evaluation_code.get("runtime_signature") != source.get("runtime_signature")
+    ):
+        raise RuntimeError("C5 evaluation code provenance differs from its decision source")
+    transition = evaluation_code.get("transition")
+    if transition == EVALUATION_TRANSITION_SAME_COMMIT:
+        if evaluation_head != decision_head or evaluation_code.get("transition_reason") != "NONE":
+            raise RuntimeError("C5 same-commit evaluation provenance is inconsistent")
+    elif transition == EVALUATION_TRANSITION_POST_BARRIER_RECOVERY:
+        recoverable = (
+            decision_head == RECOVERABLE_DECISION_GIT_HEAD
+            and expected_source_sha256 == RECOVERABLE_SOURCE_CONTRACT_SHA256
+            and expected_decision_sha256 == RECOVERABLE_DECISION_CONTRACT_SHA256
+            and expected_barrier_sha256 == RECOVERABLE_DECISION_BARRIER_SHA256
+        )
+        if (
+            not recoverable
+            or evaluation_head == decision_head
+            or evaluation_code.get("transition_reason") != POST_BARRIER_RECOVERY_REASON
+        ):
+            raise RuntimeError("C5 post-barrier code transition is not an authorized recovery")
+    else:
+        raise RuntimeError("C5 evaluation code transition is unknown")
 
 
 def write_evaluation_contract(run_root: Path, payload: dict[str, Any]) -> str:

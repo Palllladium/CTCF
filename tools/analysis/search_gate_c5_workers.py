@@ -1638,6 +1638,9 @@ def finalize_c5(
         },
     }
     scientific_identity = {
+        "decision_git_head": decision["git_head"],
+        "evaluation_git_head": evaluation_contract["evaluation_code"]["git_head"],
+        "code_transition": evaluation_contract["evaluation_code"]["transition"],
         "source_contract_sha256": decision["source_contract_sha256"],
         "decision_contract_sha256": decision_sha256,
         "full_policy_sha256": decision["full_policy_sha256"],
@@ -1719,6 +1722,7 @@ def finalize_c5(
         "offset_table_sha256": decision["offset_table_sha256"],
         "support_contract_sha256": decision["support_contract_sha256"],
         "contrast_contract_sha256": decision["contrast_contract_sha256"],
+        "code_provenance": dict(evaluation_contract["evaluation_code"]),
         "design_counts": design_counts,
         "test_115_authorized": False,
         "test_split_accessed": False,
