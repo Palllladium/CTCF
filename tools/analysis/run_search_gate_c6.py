@@ -102,9 +102,16 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _json_equivalent(left: Any, right: Any) -> bool:
+    """Compare the JSON values that will survive an actual write/read round trip."""
+
+    options = {"ensure_ascii": False, "sort_keys": True, "separators": (",", ":"), "allow_nan": False}
+    return json.dumps(left, **options) == json.dumps(right, **options)
+
+
 def _immutable_json(path: Path, payload: dict[str, Any]) -> str:
     if path.exists():
-        if _load_json(path) != payload:
+        if not _json_equivalent(_load_json(path), payload):
             raise FileExistsError(f"refusing to replace immutable C6 artifact: {path}")
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,12 +257,17 @@ def _assert_decision_label_free(payload: Mapping[str, Any]) -> None:
     def visit(value: Any, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, Mapping):
             for key, child in value.items():
+                child_path = (*path, str(key))
+                if child_path == ("policy",):
+                    if not _json_equivalent(child, policy_dict()):
+                        raise RuntimeError("C6 decision contract contains an altered frozen policy")
+                    continue
                 token = str(key).lower()
                 if token in allowed_flags and child is not False:
-                    raise RuntimeError(f"C6 label-free flag is not false: {'.'.join((*path, str(key)))}")
+                    raise RuntimeError(f"C6 label-free flag is not false: {'.'.join(child_path)}")
                 if "dice" in token or "segmentation" in token or ("label" in token and token not in allowed_flags):
-                    raise RuntimeError(f"C6 decision contract contains evaluation data: {'.'.join((*path, str(key)))}")
-                visit(child, (*path, str(key)))
+                    raise RuntimeError(f"C6 decision contract contains evaluation data: {'.'.join(child_path)}")
+                visit(child, child_path)
         elif isinstance(value, (list, tuple)):
             for index, child in enumerate(value):
                 visit(child, (*path, str(index)))
@@ -340,7 +352,7 @@ def _load_decision(run_root: Path, digest: str) -> dict[str, Any]:
         payload.get("schema") != DECISION_SCHEMA
         or payload.get("protocol_id") != PROTOCOL_ID
         or payload.get("policy_sha256") != C6_POLICY_SHA256
-        or payload.get("policy") != policy_dict()
+        or not _json_equivalent(payload.get("policy"), policy_dict())
         or payload.get("test_115_authorized") is not False
         or payload.get("test_split_accessed") is not False
         or len(case_ids) != EXPECTED_CASE_COUNT

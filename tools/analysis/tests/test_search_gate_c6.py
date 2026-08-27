@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import unittest
 from dataclasses import replace
@@ -417,6 +418,21 @@ class FrozenContractTest(unittest.TestCase):
             payload["injected"] = injected
             with self.assertRaises(RuntimeError):
                 _assert_decision_label_free(payload)
+
+    def test_decision_contract_allows_only_the_exact_frozen_policy_metadata(self) -> None:
+        safe = {
+            "policy": policy_dict(),
+            "policy_sha256": C6_POLICY_SHA256,
+            "labels_loaded_to_device": False,
+            "labels_loaded": False,
+        }
+        _assert_decision_label_free(safe)
+        _assert_decision_label_free(json.loads(json.dumps(safe)))
+
+        tampered = copy.deepcopy(safe)
+        tampered["policy"]["injected_label_values"] = [1, 2]
+        with self.assertRaisesRegex(RuntimeError, "altered frozen policy"):
+            _assert_decision_label_free(tampered)
 
     def test_cli_exposes_every_runner_stage(self) -> None:
         parser = build_parser()
