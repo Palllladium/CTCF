@@ -31,6 +31,7 @@ from tools.analysis.search_gate_c5b import (
     PRE_RMS_MULTIPLIER,
     PROTOCOL_ID,
     REFERENCE_ARM_ID,
+    SCHEMA_VERSION,
     SDLOGJ_VS_REFERENCE_FAMILY_ID,
     SELECTABLE_ARM_IDS,
     STANDARDIZATION_FLOOR,
@@ -42,6 +43,7 @@ from tools.analysis.search_gate_c5b import (
     regional_zero_family_id,
     select_next_branch,
     simultaneous_paired_summaries,
+    validate_c5b_geometry_bundle,
 )
 from tools.analysis.search_gate_c5b_contracts import (
     DECISION_CASE_SCHEMA,
@@ -64,8 +66,6 @@ from tools.analysis.search_gate_intensity_runtime import (
     postprocess_intensity_direction,
 )
 from tools.analysis.search_gate_metrics import (
-    DETJ_DIAGNOSTICS,
-    DIGITAL_DECOMPOSITION,
     LEARN2REG_SHIFTED_SDLOGJ_MASKED,
     MATHEMATICAL_SDLOGJ_CROP2,
     METRIC_SPECS,
@@ -143,26 +143,6 @@ def _metric_value(bundle: Mapping[str, Any], metric_id: str, label: str) -> floa
     return float(value)
 
 
-def _assert_exact_geometry(bundle: Mapping[str, Any], label: str) -> None:
-    if set(bundle) != set(METRIC_SPECS):
-        raise RuntimeError(f"C5b metric inventory changed: {label}")
-    for metric_id, row in bundle.items():
-        if not isinstance(row, Mapping) or row.get("metric_id") != metric_id or row.get("status") != "OK":
-            raise RuntimeError(f"C5b geometry metric failed: {label}/{metric_id}")
-    detj = bundle[DETJ_DIAGNOSTICS].get("components") or {}
-    if float(detj.get("detj_min", math.nan)) <= 0.0 or float(detj.get("invalid_count", math.nan)) != 0.0:
-        raise RuntimeError(f"C5b central Jacobian is invalid: {label}")
-    digital = bundle[DIGITAL_DECOMPOSITION].get("components") or {}
-    if float(digital.get("corner_union_violation_fraction", math.nan)) != 0.0:
-        raise RuntimeError(f"C5b exact digital certificate failed: {label}")
-
-
-def _corner_union_fold_count(bundle: Mapping[str, Any]) -> int:
-    components = bundle[DIGITAL_DECOMPOSITION]["components"]
-    voxels = int(float(components["voxels"]))
-    return round(float(components["corner_union_violation_fraction"]) * voxels)
-
-
 def _publish(path: Path, payload: dict[str, Any], validator: Callable[[Mapping[str, Any]], None]) -> None:
     validator(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +175,7 @@ def _anchor_row(
     if digest != source["array_sha256"]:
         raise RuntimeError(f"C5b source anchor array differs: {case_id}/{arm_id}")
     geometry = _geometry_bundle(field, mask)
-    _assert_exact_geometry(geometry, f"{case_id}/{arm_id}")
+    diagnostics = validate_c5b_geometry_bundle(geometry, f"{case_id}/{arm_id}")
     return {
         "arm_index": spec.arm_index,
         "arm_id": arm_id,
@@ -213,7 +193,7 @@ def _anchor_row(
             "epsilon_decimal": "0.001",
             "provenance": "FROZEN_SOURCE",
         },
-        "observed_fold_count": _corner_union_fold_count(geometry),
+        "observed_fold_count": diagnostics.corner_union_violation_count,
         "geometry": geometry,
     }
 
@@ -240,7 +220,7 @@ def _new_arm_row(
     if exact.get("sha256") != digest:
         raise RuntimeError(f"C5b exact certificate hash changed: {case_id}/{arm_id}")
     geometry = _geometry_bundle(stored.to(mask.device), mask)
-    _assert_exact_geometry(geometry, f"{case_id}/{arm_id}")
+    diagnostics = validate_c5b_geometry_bundle(geometry, f"{case_id}/{arm_id}")
     proposal = {
         "amplitude_stage": "after_rms_match_before_local_clip",
         "post_rms_amplitude": spec.post_rms_amplitude,
@@ -268,7 +248,7 @@ def _new_arm_row(
         "source_parity": None,
         "candidate_field": _field_record(path, "target_c5b_heavy", root, digest),
         "exact": exact,
-        "observed_fold_count": _corner_union_fold_count(geometry),
+        "observed_fold_count": diagnostics.corner_union_violation_count,
         "geometry": geometry,
     }
 
@@ -754,6 +734,9 @@ def finalize_c5b(
     baseline_labels = {label: [] for label in EVALUATION_LABEL_IDS}
     exact_by_arm = {arm_id: [] for arm_id in arm_ids}
     folds_by_arm = {arm_id: [] for arm_id in arm_ids}
+    digital_ten_percent_by_arm = {arm_id: [] for arm_id in arm_ids}
+    digital_ten_count_by_arm = {arm_id: [] for arm_id in arm_ids}
+    digital_jstar_fraction_by_arm = {arm_id: [] for arm_id in arm_ids}
     for case_id in decision["case_ids"]:
         drows = {row["arm_id"]: row for row in decision_cases[case_id]["arms"]}
         erows = {row["arm_id"]: row for row in evaluation_cases[case_id]["arms"]}
@@ -761,11 +744,15 @@ def finalize_c5b(
         for arm_id in arm_ids:
             drow, erow = drows[arm_id], erows[arm_id]
             sdlogj = _metric_value(drow["geometry"], MATHEMATICAL_SDLOGJ_CROP2, f"{case_id}/{arm_id}")
-            fold_count = int(drow["observed_fold_count"])
+            geometry = validate_c5b_geometry_bundle(drow["geometry"], f"{case_id}/{arm_id}")
+            fold_count = geometry.corner_union_violation_count
             dice_by_arm[arm_id].append(float(erow["candidate_dice"]))
             sd_by_arm[arm_id].append(sdlogj)
             exact_by_arm[arm_id].append(drow["exact"].get("certified") is True)
             folds_by_arm[arm_id].append(fold_count)
+            digital_ten_percent_by_arm[arm_id].append(geometry.digital_ten_union_percent)
+            digital_ten_count_by_arm[arm_id].append(geometry.digital_ten_union_violation_count)
+            digital_jstar_fraction_by_arm[arm_id].append(geometry.jstar_union_violation_fraction)
             if arm_id in retention_by_arm:
                 retention_by_arm[arm_id].append(float(drow["proposal"]["clip_rms_retention"]))
             per_arm.append(
@@ -780,6 +767,10 @@ def finalize_c5b(
                     "mathematical_sdlogj": sdlogj,
                     "clip_rms_retention": drow["proposal"].get("clip_rms_retention"),
                     "observed_fold_count": fold_count,
+                    "digital_ten_union_violation_count": geometry.digital_ten_union_violation_count,
+                    "digital_ten_union_violation_fraction": geometry.digital_ten_union_violation_fraction,
+                    "digital_ten_union_percent": geometry.digital_ten_union_percent,
+                    "digital_jstar_union_violation_fraction": geometry.jstar_union_violation_fraction,
                     "exact_certified": drow["exact"]["certified"],
                     "candidate_field": drow["candidate_field"],
                 }
@@ -879,6 +870,9 @@ def finalize_c5b(
                 else None,
                 "all_exact_certified": all(exact_by_arm[arm_id]),
                 "observed_fold_count": sum(folds_by_arm[arm_id]),
+                "digital_ten_union_violation_count_total": sum(digital_ten_count_by_arm[arm_id]),
+                "digital_ten_union_percent_mean": float(np.mean(digital_ten_percent_by_arm[arm_id])),
+                "digital_jstar_union_violation_fraction_mean": float(np.mean(digital_jstar_fraction_by_arm[arm_id])),
                 "dice_inference": asdict(assessment.dice_vs_reference) if assessment else None,
                 "sdlogj_inference": asdict(assessment.sdlogj_vs_reference) if assessment else None,
             }
@@ -894,7 +888,7 @@ def finalize_c5b(
         for row in rows
     ]
     summary = {
-        "schema": "ctcf-search-c5b-summary-v1",
+        "schema": f"ctcf-search-c5b-summary-{SCHEMA_VERSION}",
         "protocol_id": PROTOCOL_ID,
         "dataset": "IXI_VALIDATION_58",
         "cases": EXPECTED_CASE_COUNT,
@@ -904,6 +898,7 @@ def finalize_c5b(
             "arm_id": REFERENCE_ARM_ID,
             "dice_mean": float(np.mean(reference_dice)),
             "mathematical_sdlogj_mean": float(np.mean(reference_sd)),
+            "digital_ten_union_percent_mean": float(np.mean(digital_ten_percent_by_arm[REFERENCE_ARM_ID])),
         },
         "arms": arm_summary,
         "diagnostic_w2_vs_w1": {
@@ -912,6 +907,12 @@ def finalize_c5b(
             ),
             "sdlogj_delta_mean": float(
                 np.mean(np.asarray(sd_by_arm[DIAGNOSTIC_ARM_ID]) - np.asarray(sd_by_arm[ANCHOR_ARM_IDS[2]]))
+            ),
+            "digital_ten_union_percent_delta_mean": float(
+                np.mean(
+                    np.asarray(digital_ten_percent_by_arm[DIAGNOSTIC_ARM_ID])
+                    - np.asarray(digital_ten_percent_by_arm[ANCHOR_ARM_IDS[2]])
+                )
             ),
         },
         "next_branch": asdict(branch),
@@ -937,7 +938,7 @@ def finalize_c5b(
         )
     }
     manifest = {
-        "schema": "ctcf-search-c5b-run-manifest-v1",
+        "schema": f"ctcf-search-c5b-run-manifest-{SCHEMA_VERSION}",
         "protocol_id": PROTOCOL_ID,
         "status": "COMPLETE",
         "source_contract_sha256": sha256_file(root / "source_contract.json"),

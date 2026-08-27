@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import tempfile
 import unittest
@@ -20,14 +21,17 @@ from tools.analysis.search_gate_c5b import (
     PROTOCOL_ID,
     REFERENCE_ARM_ID,
     SELECTABLE_ARM_IDS,
+    validate_c5b_geometry_bundle,
 )
 from tools.analysis.search_gate_c5b_contracts import (
     DECISION_CASE_SCHEMA,
     DECISION_SCHEMA,
     EVALUATION_CASE_SCHEMA,
     EVALUATION_CONTRACT_SCHEMA,
+    SOURCE_SCHEMA,
     WORKER_SCHEMA,
     build_evaluation_barrier,
+    load_contracts,
     load_decision_contract_isolated,
     load_evaluation_barrier,
     validate_decision_case_marker,
@@ -36,13 +40,23 @@ from tools.analysis.search_gate_c5b_contracts import (
     verify_field_record,
 )
 from tools.analysis.search_gate_c5b_workers import finalize_c5b
-from tools.analysis.search_gate_metrics import DETJ_DIAGNOSTICS, DIGITAL_DECOMPOSITION, METRIC_SPECS
+from tools.analysis.search_gate_metrics import (
+    DETERMINANT_NAMES,
+    DETJ_DIAGNOSTICS,
+    DIGITAL_DECOMPOSITION,
+    METRIC_SPECS,
+)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 
 
-def geometry(sdlogj: float = 0.3) -> dict[str, dict[str, object]]:
+def geometry(
+    sdlogj: float = 0.3,
+    *,
+    corner_union_count: int = 0,
+    jstar_union_count: int = 0,
+) -> dict[str, dict[str, object]]:
     rows: dict[str, dict[str, object]] = {}
     for metric_id in METRIC_SPECS:
         rows[metric_id] = {
@@ -56,6 +70,7 @@ def geometry(sdlogj: float = 0.3) -> dict[str, dict[str, object]]:
     rows[DETJ_DIAGNOSTICS]["value"] = None
     rows[DETJ_DIAGNOSTICS]["components"] = {
         "voxels": 100.0,
+        "finite_count": 100.0,
         "detj_min": 0.1,
         "detj_max": 2.0,
         "nonfinite_count": 0.0,
@@ -65,16 +80,28 @@ def geometry(sdlogj: float = 0.3) -> dict[str, dict[str, object]]:
         "invalid_count": 0.0,
         "invalid_fraction": 0.0,
     }
-    rows[DIGITAL_DECOMPOSITION]["value"] = 0.0
+    voxels = 100
+    counts = {name: 0 for name in DETERMINANT_NAMES}
+    counts["corner_mmm"] = corner_union_count
+    counts["jstar1"] = jstar_union_count
+    union_count = corner_union_count + jstar_union_count
+    rows[DIGITAL_DECOMPOSITION]["value"] = 100.0 * union_count / voxels
     rows[DIGITAL_DECOMPOSITION]["components"] = {
-        "voxels": 100.0,
-        "corner_union_violation_fraction": 0.0,
-        "jstar_union_violation_fraction": 0.0,
-        "union_violation_count": 0.0,
-        "union_violation_fraction": 0.0,
-        "sum_of_component_fractions": 0.0,
+        "voxels": float(voxels),
+        "corner_union_violation_fraction": corner_union_count / voxels,
+        "jstar_union_violation_fraction": jstar_union_count / voxels,
+        "union_violation_count": float(union_count),
+        "union_violation_fraction": union_count / voxels,
+        "sum_of_component_fractions": sum(counts.values()) / voxels,
         **{
-            f"corner_{token}_violation_count": 0.0 for token in ("mmm", "mmp", "mpm", "mpp", "pmm", "pmp", "ppm", "ppp")
+            key: value
+            for name, count in counts.items()
+            for key, value in (
+                (f"{name}_min", -0.1 if count else 0.1),
+                (f"{name}_nonfinite_count", 0.0),
+                (f"{name}_violation_count", float(count)),
+                (f"{name}_violation_fraction", count / voxels),
+            )
         },
     }
     return rows
@@ -226,6 +253,51 @@ class IsolatedDecisionLoaderTest(unittest.TestCase):
             observed = load_decision_contract_isolated(root, sha256_file(root / "decision_contract.json"))
             self.assertEqual(observed, decision)
 
+    def test_full_loader_rejects_missing_or_changed_historical_geometry_preflight(self) -> None:
+        case_ids = [f"subject_{index:03d}" for index in range(EXPECTED_CASE_COUNT)]
+        expected_preflight = {
+            "validated_anchor_count": 3 * EXPECTED_CASE_COUNT,
+            "central_invalid_count": 0,
+            "corner_union_violation_count": 0,
+            "digital_ten_nonzero_anchor_count": 3 * EXPECTED_CASE_COUNT,
+        }
+        for mutation in (None, "missing", "corner"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                projection = {"case_ids": case_ids, "anchor_geometry_preflight": dict(expected_preflight)}
+                if mutation == "missing":
+                    projection.pop("anchor_geometry_preflight")
+                elif mutation == "corner":
+                    projection["anchor_geometry_preflight"]["corner_union_violation_count"] = 1
+                source = {
+                    "schema": SOURCE_SCHEMA,
+                    "protocol_id": PROTOCOL_ID,
+                    "status": "AUTHENTICATED",
+                    "policy_sha256": C5B_POLICY_SHA256,
+                    "source_projection": projection,
+                    "test_115_authorized": False,
+                    "test_split_accessed": False,
+                }
+                atomic_write_json(root / "source_contract.json", source)
+                source_sha = sha256_file(root / "source_contract.json")
+                decision = {
+                    "schema": DECISION_SCHEMA,
+                    "protocol_id": PROTOCOL_ID,
+                    "status": "FROZEN_LABEL_FREE",
+                    "policy_sha256": C5B_POLICY_SHA256,
+                    "source_contract_sha256": source_sha,
+                    "case_ids": case_ids,
+                    "test_115_authorized": False,
+                    "test_split_accessed": False,
+                }
+                atomic_write_json(root / "decision_contract.json", decision)
+                decision_sha = sha256_file(root / "decision_contract.json")
+                if mutation is None:
+                    load_contracts(root, source_sha, decision_sha)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "anchor geometry preflight"):
+                        load_contracts(root, source_sha, decision_sha)
+
 
 class DecisionMarkerContractTest(unittest.TestCase):
     def test_exact_marker_passes_and_mapping_order_is_irrelevant(self) -> None:
@@ -271,6 +343,48 @@ class DecisionMarkerContractTest(unittest.TestCase):
         wrong_witness = decision_marker()
         wrong_witness["arms"][0]["observed_fold_count"] = 1
         for mutation in (wrong_id, nonfinite, negative_count, wrong_witness):
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                validate_decision_case_marker(mutation, contract, SHA_B, verify_heavy_bytes=False)
+
+    def test_nonzero_jstar_is_diagnostic_but_corner_violation_remains_fatal(self) -> None:
+        contract = decision_contract()
+        diagnostic = decision_marker()
+        for row in diagnostic["arms"]:
+            row["geometry"] = geometry(jstar_union_count=2)
+        validate_decision_case_marker(diagnostic, contract, SHA_B, verify_heavy_bytes=False)
+        observed = validate_c5b_geometry_bundle(diagnostic["arms"][0]["geometry"], "diagnostic")
+        self.assertEqual(observed.digital_ten_union_violation_count, 2)
+        self.assertEqual(observed.corner_union_violation_count, 0)
+
+        folded = decision_marker()
+        folded["arms"][0]["geometry"] = geometry(corner_union_count=1)
+        folded["arms"][0]["observed_fold_count"] = 1
+        with self.assertRaisesRegex(RuntimeError, "corner determinant exactness failed"):
+            validate_decision_case_marker(folded, contract, SHA_B, verify_heavy_bytes=False)
+
+    def test_geometry_accounting_mutations_fail_before_the_barrier(self) -> None:
+        contract = decision_contract()
+        mutations = []
+
+        wrong_union_fraction = decision_marker()
+        wrong_union_fraction["arms"][0]["geometry"] = geometry(jstar_union_count=2)
+        wrong_union_fraction["arms"][0]["geometry"][DIGITAL_DECOMPOSITION]["components"]["union_violation_fraction"] = (
+            0.03
+        )
+        mutations.append(wrong_union_fraction)
+
+        wrong_component_sum = decision_marker()
+        wrong_component_sum["arms"][0]["geometry"] = geometry(jstar_union_count=2)
+        wrong_component_sum["arms"][0]["geometry"][DIGITAL_DECOMPOSITION]["components"][
+            "sum_of_component_fractions"
+        ] = 0.03
+        mutations.append(wrong_component_sum)
+
+        wrong_central_fraction = decision_marker()
+        wrong_central_fraction["arms"][0]["geometry"][DETJ_DIAGNOSTICS]["components"]["invalid_fraction"] = 0.01
+        mutations.append(wrong_central_fraction)
+
+        for mutation in mutations:
             with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
                 validate_decision_case_marker(mutation, contract, SHA_B, verify_heavy_bytes=False)
 
@@ -505,7 +619,10 @@ class FinalizerWiringTest(unittest.TestCase):
                             "proposal": proposal,
                             "exact": {"certified": True},
                             "observed_fold_count": 0,
-                            "geometry": geometry(0.300 if spec.arm_id == REFERENCE_ARM_ID else 0.301),
+                            "geometry": geometry(
+                                0.300 if spec.arm_id == REFERENCE_ARM_ID else 0.301,
+                                jstar_union_count=2,
+                            ),
                             "candidate_field": {"root_id": "synthetic", "relative_path": spec.arm_id},
                         }
                     )
@@ -559,8 +676,22 @@ class FinalizerWiringTest(unittest.TestCase):
             self.assertEqual(branch["selected_arm_id"], SELECTABLE_ARM_IDS[0])
             self.assertNotEqual(branch["selected_arm_id"], DIAGNOSTIC_ARM_ID)
             summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["schema"], "ctcf-search-c5b-summary-v2")
             self.assertAlmostEqual(summary["reference_c4"]["dice_mean"], 0.76)
+            self.assertAlmostEqual(summary["reference_c4"]["digital_ten_union_percent_mean"], 2.0)
             self.assertEqual(len(summary["arms"]), 7)
+            self.assertTrue(
+                all(
+                    row["digital_ten_union_violation_count_total"] == 2 * EXPECTED_CASE_COUNT for row in summary["arms"]
+                )
+            )
+            self.assertAlmostEqual(summary["diagnostic_w2_vs_w1"]["digital_ten_union_percent_delta_mean"], 0.0)
+            manifest = json.loads((root / "c5b_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema"], "ctcf-search-c5b-run-manifest-v2")
+            with (root / "per_arm.csv").open(encoding="utf-8", newline="") as stream:
+                per_arm = list(csv.DictReader(stream))
+            self.assertEqual(len(per_arm), EXPECTED_CASE_COUNT * len(ARM_SPECS))
+            self.assertTrue(all(float(row["digital_ten_union_percent"]) == 2.0 for row in per_arm))
 
 
 class RunnerSourceTest(unittest.TestCase):

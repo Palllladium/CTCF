@@ -19,6 +19,7 @@ from tools.analysis.search_gate_c5b import (
     ARM_SPECS,
     C5B_POLICY_SHA256,
     PROTOCOL_ID,
+    SCHEMA_VERSION,
     TEST_115_AUTHORIZED,
     assert_frozen_policy,
 )
@@ -162,7 +163,7 @@ def _execution(
 def selfcheck_stage(args: argparse.Namespace) -> int:
     assert_frozen_policy()
     report = {
-        "schema": "ctcf-search-c5b-selfcheck-v1",
+        "schema": f"ctcf-search-c5b-selfcheck-{SCHEMA_VERSION}",
         "protocol_id": PROTOCOL_ID,
         "status": "PASS",
         "policy_sha256": C5B_POLICY_SHA256,
@@ -209,6 +210,7 @@ def prepare_stage(args: argparse.Namespace) -> int:
                 "decision_contract_sha256": decision_sha,
                 "n_cases": len(decision["case_ids"]),
                 "new_heavy_field_count": 4 * len(decision["case_ids"]),
+                "historical_anchor_geometry_preflight": source["source_projection"]["anchor_geometry_preflight"],
             }
         )
     )

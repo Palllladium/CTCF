@@ -30,6 +30,8 @@ from tools.analysis.search_gate_c5b import (
     DESCRIPTOR_ID,
     DIAGNOSTIC_ARM_ID,
     DICE_VS_REFERENCE_FAMILY_ID,
+    DIGITAL_CORNER_UNION_REQUIRED_ZERO,
+    DIGITAL_TEN_UNION_ROLE,
     EVALUATION_LABEL_IDS,
     EXPECTED_CASE_COUNT,
     IMAGE_NORMALIZATION_MODE,
@@ -37,8 +39,10 @@ from tools.analysis.search_gate_c5b import (
     POSTCLIP_INTERPOLATION_ALLOWED,
     POSTERIOR_TEMPERATURE,
     PRE_RMS_MULTIPLIER,
+    PROTOCOL_ID,
     REFERENCE_ARM_ID,
     REGIONAL_REPAIR_LABEL_IDS,
+    SCHEMA_VERSION,
     SDLOGJ_VS_REFERENCE_FAMILY_ID,
     SELECTABLE_ARM_IDS,
     STANDARDIZATION_FLOOR,
@@ -171,6 +175,8 @@ def evidence(
 
 class FrozenProtocolTest(unittest.TestCase):
     def test_exact_arms_and_roles_are_frozen(self):
+        self.assertEqual(PROTOCOL_ID, "CTCF-SEARCH-GATE-C5B-V2")
+        self.assertEqual(SCHEMA_VERSION, "v2")
         self.assertEqual(
             ANCHOR_ARM_IDS,
             ("c4_int_s2_a10_b0", "c5_int_s4_a10_b0_w1", "c5_int_s4_a20_b0_w1"),
@@ -187,6 +193,8 @@ class FrozenProtocolTest(unittest.TestCase):
         self.assertFalse(ARM_SPECS[-1].selectable)
         self.assertFalse(POSTCLIP_INTERPOLATION_ALLOWED)
         self.assertFalse(TEST_115_AUTHORIZED)
+        self.assertTrue(DIGITAL_CORNER_UNION_REQUIRED_ZERO)
+        self.assertEqual(DIGITAL_TEN_UNION_ROLE, "DIAGNOSTIC_ONLY_NOT_A_TRILINEAR_FOLD_WITNESS")
 
     def test_inherited_c5_mechanism_is_frozen(self):
         self.assertEqual(DESCRIPTOR_ID, "ZSCORED_INTENSITY")
@@ -207,8 +215,12 @@ class FrozenProtocolTest(unittest.TestCase):
 
     def test_policy_hash_and_bytes_are_stable(self):
         self.assertEqual(policy_sha256(), C5B_POLICY_SHA256)
-        self.assertEqual(policy_sha256(), "ff4efaf30d836b4a0bfda89f22b1c1715d86f5349bc5e4a0c2b706ce03ed1b1c")
+        self.assertEqual(C5B_POLICY_SHA256, "50fb2f75a640e695eda30c4dff74c8eb72ebcfb6cd54974f26e9142c493ec2bd")
         policy = dict(C5B_POLICY)
+        self.assertEqual(policy["protocol_id"], "CTCF-SEARCH-GATE-C5B-V2")
+        self.assertTrue(policy["digital_corner_union_required_zero"])
+        self.assertEqual(policy["digital_ten_union_role"], DIGITAL_TEN_UNION_ROLE)
+        self.assertNotIn("digital_ten_union_required_zero", policy)
         self.assertEqual(policy["winner_mean_tie_tolerance"], WINNER_MEAN_TIE_TOLERANCE)
         self.assertEqual(policy["winner_tie_break_order"], WINNER_TIE_BREAK_ORDER)
         self.assertEqual(canonical_policy_bytes(), canonical_policy_bytes())

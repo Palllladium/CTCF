@@ -10,10 +10,16 @@ from typing import Any
 
 import numpy as np
 
-from tools.analysis.search_gate_metrics import MATHEMATICAL_SDLOGJ_CROP2
+from tools.analysis.search_gate_metrics import (
+    DETERMINANT_NAMES,
+    DETJ_DIAGNOSTICS,
+    DIGITAL_DECOMPOSITION,
+    MATHEMATICAL_SDLOGJ_CROP2,
+    METRIC_SPECS,
+)
 
-PROTOCOL_ID = "CTCF-SEARCH-GATE-C5B-V1"
-SCHEMA_VERSION = "v1"
+PROTOCOL_ID = "CTCF-SEARCH-GATE-C5B-V2"
+SCHEMA_VERSION = "v2"
 EXPECTED_CASE_COUNT = 58
 DEVELOPMENT_DATASET_ID = "IXI_VALIDATION_58"
 TEST_115_AUTHORIZED = False
@@ -45,10 +51,186 @@ BRIDGE_CONSTRUCTION = "recompute_from_authenticated_preclip_s4_direction"
 POSTCLIP_INTERPOLATION_ALLOWED = False
 OBSERVED_FOLD_COUNT_DEFINITION = "digital_corner_union_violation_witnesses"
 CENTRAL_DETJ_INVALID_REQUIRED_ZERO = True
-DIGITAL_TEN_UNION_REQUIRED_ZERO = True
+DIGITAL_CORNER_UNION_REQUIRED_ZERO = True
+DIGITAL_TEN_UNION_ROLE = "DIAGNOSTIC_ONLY_NOT_A_TRILINEAR_FOLD_WITNESS"
 SDLOGJ_METRIC_ID = MATHEMATICAL_SDLOGJ_CROP2
 DICE_AGGREGATION = "unweighted_macro_mean_over_fixed_30_ixi_labels"
 DICE_WARP_INTERPOLATION = "nearest"
+
+
+@dataclass(frozen=True, slots=True)
+class C5BGeometryDiagnostics:
+    central_invalid_count: int
+    central_detj_min: float
+    corner_union_violation_count: int
+    jstar_union_violation_count: int
+    jstar_union_violation_fraction: float
+    digital_ten_union_violation_count: int
+    digital_ten_union_violation_fraction: float
+    digital_ten_union_percent: float
+
+
+def _geometry_finite(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise RuntimeError(f"{label} must be a finite real scalar")
+    return float(value)
+
+
+def _geometry_count(value: Any, label: str) -> int:
+    observed = _geometry_finite(value, label)
+    if observed < 0.0 or not observed.is_integer():
+        raise RuntimeError(f"{label} must be a non-negative integer")
+    return int(observed)
+
+
+def _fraction_count(value: Any, voxels: int, label: str) -> int:
+    fraction = _geometry_finite(value, label)
+    if not 0.0 <= fraction <= 1.0:
+        raise RuntimeError(f"{label} must lie in [0,1]")
+    count = round(fraction * voxels)
+    if not math.isclose(fraction, count / voxels, rel_tol=0.0, abs_tol=1e-12):
+        raise RuntimeError(f"{label} is not an exact voxel fraction")
+    return count
+
+
+def validate_c5b_geometry_bundle(geometry: Any, label: str) -> C5BGeometryDiagnostics:
+    """Validate exact-field geometry while keeping J1*/J2* diagnostic-only."""
+    if not isinstance(geometry, Mapping) or set(geometry) != set(METRIC_SPECS):
+        raise RuntimeError(f"C5b geometry inventory changed: {label}")
+    for metric_id in METRIC_SPECS:
+        row = geometry[metric_id]
+        if not isinstance(row, Mapping) or row.get("metric_id") != metric_id or row.get("status") != "OK":
+            raise RuntimeError(f"C5b geometry metric identity changed: {label}/{metric_id}")
+        if not isinstance(row.get("components"), Mapping):
+            raise RuntimeError(f"C5b geometry components are absent: {label}/{metric_id}")
+        if metric_id == DETJ_DIAGNOSTICS:
+            if row.get("value") is not None:
+                raise RuntimeError(f"C5b detJ diagnostics unexpectedly has a scalar value: {label}")
+        else:
+            _geometry_finite(row.get("value"), f"C5b geometry value {label}/{metric_id}")
+
+    detj = geometry[DETJ_DIAGNOSTICS]["components"]
+    detj_voxels = _geometry_count(detj.get("voxels"), f"C5b detJ voxels {label}")
+    finite_count = _geometry_count(detj.get("finite_count"), f"C5b detJ finite count {label}")
+    nonfinite = _geometry_count(detj.get("nonfinite_count"), f"C5b detJ nonfinite count {label}")
+    nonpositive = _geometry_count(detj.get("nonpositive_count"), f"C5b detJ nonpositive count {label}")
+    invalid = _geometry_count(detj.get("invalid_count"), f"C5b detJ invalid count {label}")
+    detj_min = _geometry_finite(detj.get("detj_min"), f"C5b minimum detJ {label}")
+    if (
+        detj_voxels <= 0
+        or finite_count + nonfinite != detj_voxels
+        or nonpositive > finite_count
+        or invalid != nonfinite + nonpositive
+        or (CENTRAL_DETJ_INVALID_REQUIRED_ZERO and invalid != 0)
+        or detj_min <= 0.0
+    ):
+        raise RuntimeError(f"C5b central Jacobian validity failed: {label}")
+    for count_name, count in (
+        ("nonfinite", nonfinite),
+        ("nonpositive", nonpositive),
+        ("invalid", invalid),
+    ):
+        fraction = _geometry_finite(detj.get(f"{count_name}_fraction"), f"C5b detJ {count_name} fraction {label}")
+        if not math.isclose(fraction, count / detj_voxels, rel_tol=0.0, abs_tol=1e-12):
+            raise RuntimeError(f"C5b detJ count/fraction arithmetic changed: {label}/{count_name}")
+    for key, value in detj.items():
+        observed = _geometry_finite(value, f"C5b detJ component {label}/{key}")
+        if key.endswith("_fraction") and not 0.0 <= observed <= 1.0:
+            raise RuntimeError(f"C5b detJ fraction is outside [0,1]: {label}/{key}")
+
+    digital_row = geometry[DIGITAL_DECOMPOSITION]
+    digital = digital_row["components"]
+    expected_components = {
+        "voxels",
+        "corner_union_violation_fraction",
+        "jstar_union_violation_fraction",
+        "union_violation_count",
+        "union_violation_fraction",
+        "sum_of_component_fractions",
+        *(
+            key
+            for name in DETERMINANT_NAMES
+            for key in (
+                f"{name}_min",
+                f"{name}_nonfinite_count",
+                f"{name}_violation_count",
+                f"{name}_violation_fraction",
+            )
+        ),
+    }
+    if set(digital) != expected_components:
+        raise RuntimeError(f"C5b digital component inventory changed: {label}")
+    voxels = _geometry_count(digital["voxels"], f"C5b digital voxels {label}")
+    union_count = _geometry_count(digital["union_violation_count"], f"C5b digital union count {label}")
+    if voxels <= 0 or union_count > voxels:
+        raise RuntimeError(f"C5b digital voxel accounting failed: {label}")
+    for key, value in digital.items():
+        observed = _geometry_finite(value, f"C5b digital component {label}/{key}")
+        if key.endswith("_count"):
+            count = _geometry_count(value, f"C5b digital count {label}/{key}")
+            if count > voxels:
+                raise RuntimeError(f"C5b digital count exceeds support: {label}/{key}")
+        elif key.endswith("_fraction") and not 0.0 <= observed <= 1.0:
+            raise RuntimeError(f"C5b digital fraction is outside [0,1]: {label}/{key}")
+    component_counts: dict[str, int] = {}
+    for name in DETERMINANT_NAMES:
+        count = _geometry_count(digital[f"{name}_violation_count"], f"C5b digital count {label}/{name}")
+        nonfinite_count = _geometry_count(
+            digital[f"{name}_nonfinite_count"], f"C5b digital nonfinite count {label}/{name}"
+        )
+        fraction = _geometry_finite(digital[f"{name}_violation_fraction"], f"C5b digital fraction {label}/{name}")
+        determinant_min = _geometry_finite(digital[f"{name}_min"], f"C5b digital minimum {label}/{name}")
+        if (
+            nonfinite_count > count
+            or (count == 0 and determinant_min <= 0.0)
+            or not math.isclose(fraction, count / voxels, rel_tol=0.0, abs_tol=1e-12)
+        ):
+            raise RuntimeError(f"C5b digital count/fraction arithmetic changed: {label}/{name}")
+        component_counts[name] = count
+    union_fraction = _geometry_finite(digital["union_violation_fraction"], f"C5b digital union fraction {label}")
+    if not math.isclose(union_fraction, union_count / voxels, rel_tol=0.0, abs_tol=1e-12):
+        raise RuntimeError(f"C5b digital union count/fraction arithmetic changed: {label}")
+    corner_count = _fraction_count(
+        digital["corner_union_violation_fraction"], voxels, f"C5b digital corner-union fraction {label}"
+    )
+    jstar_count = _fraction_count(
+        digital["jstar_union_violation_fraction"], voxels, f"C5b digital Jstar-union fraction {label}"
+    )
+    corner_component_counts = [component_counts[name] for name in DETERMINANT_NAMES[:8]]
+    jstar_component_counts = [component_counts[name] for name in DETERMINANT_NAMES[8:]]
+    if not max(corner_component_counts) <= corner_count <= sum(corner_component_counts):
+        raise RuntimeError(f"C5b digital corner-union decomposition changed: {label}")
+    if not max(jstar_component_counts) <= jstar_count <= sum(jstar_component_counts):
+        raise RuntimeError(f"C5b digital Jstar-union decomposition changed: {label}")
+    if not max(corner_count, jstar_count) <= union_count <= corner_count + jstar_count:
+        raise RuntimeError(f"C5b digital union decomposition changed: {label}")
+    component_fraction_sum = math.fsum(
+        _geometry_finite(digital[f"{name}_violation_fraction"], f"C5b digital fraction {label}/{name}")
+        for name in DETERMINANT_NAMES
+    )
+    if not math.isclose(
+        _geometry_finite(digital["sum_of_component_fractions"], f"C5b digital component sum {label}"),
+        component_fraction_sum,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError(f"C5b digital component sum changed: {label}")
+    digital_percent = _geometry_finite(digital_row["value"], f"C5b digital percentage {label}")
+    if not math.isclose(digital_percent, 100.0 * union_fraction, rel_tol=0.0, abs_tol=1e-12):
+        raise RuntimeError(f"C5b digital percentage arithmetic changed: {label}")
+    if DIGITAL_CORNER_UNION_REQUIRED_ZERO and corner_count != 0:
+        raise RuntimeError(f"C5b corner determinant exactness failed: {label}")
+    return C5BGeometryDiagnostics(
+        central_invalid_count=invalid,
+        central_detj_min=detj_min,
+        corner_union_violation_count=corner_count,
+        jstar_union_violation_count=jstar_count,
+        jstar_union_violation_fraction=float(digital["jstar_union_violation_fraction"]),
+        digital_ten_union_violation_count=union_count,
+        digital_ten_union_violation_fraction=union_fraction,
+        digital_ten_union_percent=digital_percent,
+    )
+
 
 BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 0
@@ -570,7 +752,8 @@ def _policy_items() -> tuple[tuple[str, Any], ...]:
         ("postclip_interpolation_allowed", POSTCLIP_INTERPOLATION_ALLOWED),
         ("observed_fold_count_definition", OBSERVED_FOLD_COUNT_DEFINITION),
         ("central_detj_invalid_required_zero", CENTRAL_DETJ_INVALID_REQUIRED_ZERO),
-        ("digital_ten_union_required_zero", DIGITAL_TEN_UNION_REQUIRED_ZERO),
+        ("digital_corner_union_required_zero", DIGITAL_CORNER_UNION_REQUIRED_ZERO),
+        ("digital_ten_union_role", DIGITAL_TEN_UNION_ROLE),
         ("sdlogj_metric_id", SDLOGJ_METRIC_ID),
         ("dice_aggregation", DICE_AGGREGATION),
         ("dice_warp_interpolation", DICE_WARP_INTERPOLATION),
@@ -623,7 +806,7 @@ def policy_sha256() -> str:
     return hashlib.sha256(canonical_policy_bytes()).hexdigest()
 
 
-C5B_POLICY_SHA256 = "ff4efaf30d836b4a0bfda89f22b1c1715d86f5349bc5e4a0c2b706ce03ed1b1c"
+C5B_POLICY_SHA256 = "50fb2f75a640e695eda30c4dff74c8eb72ebcfb6cd54974f26e9142c493ec2bd"
 
 
 def assert_frozen_policy() -> None:

@@ -12,6 +12,8 @@ from typing import Any
 
 import numpy as np
 
+from tools.analysis.search_gate_c5b import SCHEMA_VERSION, validate_c5b_geometry_bundle
+
 FROZEN_C5_RUN_ID = "C5_DEVELOPMENT_20260825T175112Z_242dde3281d2"
 FROZEN_C5_PROTOCOL_ID = "CTCF-SEARCH-GATE-C5-V1"
 FROZEN_C5_MANIFEST_SHA256 = "2fad4990d1b557101f9eb93312c3d2705f79f81a6d46753bdcdd7da879a65027"
@@ -365,11 +367,12 @@ def _validate_case_markers(
 
 def _anchor_from_marker(
     marker: Mapping[str, Any],
+    case_id: str,
     arm_id: str,
     expected_root: str,
     stride: int,
     amplitude: float,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Any]:
     arms = marker.get("arms")
     if not isinstance(arms, list):
         raise RuntimeError("Frozen C5 decision marker lacks its arm inventory")
@@ -399,8 +402,9 @@ def _anchor_from_marker(
         or persistence.get("saved_npz_sha256") != field.get("npz_sha256")
         or persistence.get("reloaded_array_sha256") != field.get("array_sha256")
     ):
-        raise RuntimeError(f"Frozen C5 anchor provenance changed: {arm_id}")
-    return _retag_record(field, expected_root)
+        raise RuntimeError(f"Frozen C5 anchor provenance changed: {case_id}/{arm_id}")
+    diagnostics = validate_c5b_geometry_bundle(row.get("geometry"), f"frozen C5/{case_id}/{arm_id}")
+    return _retag_record(field, expected_root), diagnostics
 
 
 def assert_c5b_decision_projection_is_label_free(payload: Mapping[str, Any]) -> None:
@@ -451,6 +455,7 @@ def authenticate_c5_source(
     source_initial: dict[str, dict[str, Any]] = {}
     source_rms: dict[str, dict[str, Any]] = {}
     source_anchors: dict[str, dict[str, Any]] = {}
+    anchor_geometry = []
     unique_fields: set[tuple[str, str]] = set()
     for case_id in case_ids:
         initial_payload = decision["source_initial"][case_id] or {}
@@ -475,9 +480,12 @@ def authenticate_c5_source(
                 f"{case_id} RMS origin",
             ),
         }
-        anchors = {
-            name: {
-                "field": _anchor_from_marker(markers[case_id], arm_id, owner, stride, amplitude),
+        anchors = {}
+        for name, (arm_id, owner, stride, amplitude) in _ANCHORS.items():
+            field, diagnostics = _anchor_from_marker(markers[case_id], case_id, arm_id, owner, stride, amplitude)
+            anchor_geometry.append(diagnostics)
+            anchors[name] = {
+                "field": field,
                 "parent_marker_sha256": _require_sha(
                     (c5.get("decision_case_sha256") or {}).get(case_id),
                     f"{case_id} C5 decision marker",
@@ -487,8 +495,6 @@ def authenticate_c5_source(
                 "centre_beta": 0.0,
                 "clip_sweeps": 1,
             }
-            for name, (arm_id, owner, stride, amplitude) in _ANCHORS.items()
-        }
         frozen_c4 = (decision["source_c4_anchors"][case_id] or {}).get("intensity_s2") or {}
         if anchors["c4_reference_s2_a10_b0"]["field"] != _retag_record(frozen_c4.get("field") or {}, "source_c4_heavy"):
             raise RuntimeError(f"Frozen C4 reference differs inside C5: {case_id}")
@@ -501,7 +507,7 @@ def authenticate_c5_source(
             unique_fields.add(identity)
 
     projection = {
-        "schema": "ctcf-search-c5b-decision-source-v1",
+        "schema": f"ctcf-search-c5b-decision-source-{SCHEMA_VERSION}",
         "source_protocol_id": FROZEN_C5_PROTOCOL_ID,
         "source_identity": {
             "run_id": FROZEN_C5_RUN_ID,
@@ -523,6 +529,14 @@ def authenticate_c5_source(
         "source_initial": source_initial,
         "source_rms": source_rms,
         "source_anchors": source_anchors,
+        "anchor_geometry_preflight": {
+            "validated_anchor_count": len(anchor_geometry),
+            "central_invalid_count": sum(row.central_invalid_count for row in anchor_geometry),
+            "corner_union_violation_count": sum(row.corner_union_violation_count for row in anchor_geometry),
+            "digital_ten_nonzero_anchor_count": sum(
+                row.digital_ten_union_violation_count > 0 for row in anchor_geometry
+            ),
+        },
         "test_115_authorized": False,
         "test_split_accessed": False,
     }

@@ -20,29 +20,36 @@ from tools.analysis.search_gate_c5b import (
     EXPECTED_CASE_COUNT,
     PROTOCOL_ID,
     REFERENCE_ARM_ID,
+    SCHEMA_VERSION,
     SELECTABLE_ARM_IDS,
+    validate_c5b_geometry_bundle,
 )
 from tools.analysis.search_gate_c5b_source import (
     assert_c5b_decision_projection_is_label_free,
     authenticate_c5_source,
 )
-from tools.analysis.search_gate_metrics import DETJ_DIAGNOSTICS, DIGITAL_DECOMPOSITION, METRIC_SPECS
 from tools.analysis.search_gate_runtime import round_robin_shards, shard_gpu_map
 
-SOURCE_SCHEMA = "ctcf-search-c5b-source-v1"
-DECISION_SCHEMA = "ctcf-search-c5b-decision-v1"
-DECISION_CASE_SCHEMA = "ctcf-search-c5b-decision-case-v1"
-WORKER_SCHEMA = "ctcf-search-c5b-worker-v1"
-BARRIER_SCHEMA = "ctcf-search-c5b-decision-barrier-v1"
-EVALUATION_CONTRACT_SCHEMA = "ctcf-search-c5b-evaluation-contract-v1"
-EVALUATION_CASE_SCHEMA = "ctcf-search-c5b-evaluation-case-v1"
-EVALUATION_BARRIER_SCHEMA = "ctcf-search-c5b-evaluation-barrier-v1"
+SOURCE_SCHEMA = f"ctcf-search-c5b-source-{SCHEMA_VERSION}"
+DECISION_SCHEMA = f"ctcf-search-c5b-decision-{SCHEMA_VERSION}"
+DECISION_CASE_SCHEMA = f"ctcf-search-c5b-decision-case-{SCHEMA_VERSION}"
+WORKER_SCHEMA = f"ctcf-search-c5b-worker-{SCHEMA_VERSION}"
+BARRIER_SCHEMA = f"ctcf-search-c5b-decision-barrier-{SCHEMA_VERSION}"
+EVALUATION_CONTRACT_SCHEMA = f"ctcf-search-c5b-evaluation-contract-{SCHEMA_VERSION}"
+EVALUATION_CASE_SCHEMA = f"ctcf-search-c5b-evaluation-case-{SCHEMA_VERSION}"
+EVALUATION_BARRIER_SCHEMA = f"ctcf-search-c5b-evaluation-barrier-{SCHEMA_VERSION}"
 
 _SOURCE_ANCHOR_NAMES = (
     "c4_reference_s2_a10_b0",
     "c5_s4_a10_b0_sweep1",
     "c5_s4_a20_b0_sweep1",
 )
+_EXPECTED_ANCHOR_GEOMETRY_PREFLIGHT = {
+    "validated_anchor_count": EXPECTED_CASE_COUNT * len(_SOURCE_ANCHOR_NAMES),
+    "central_invalid_count": 0,
+    "corner_union_violation_count": 0,
+    "digital_ten_nonzero_anchor_count": EXPECTED_CASE_COUNT * len(_SOURCE_ANCHOR_NAMES),
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -86,6 +93,14 @@ def _nonnegative_integer(value: Any, label: str) -> int:
 
 def _array_sha256(array: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(array).tobytes(order="C")).hexdigest()
+
+
+def _validate_anchor_geometry_preflight(projection: Mapping[str, Any]) -> None:
+    observed = projection.get("anchor_geometry_preflight")
+    if not isinstance(observed, Mapping) or dict(observed) != _EXPECTED_ANCHOR_GEOMETRY_PREFLIGHT:
+        raise RuntimeError(
+            f"C5b historical anchor geometry preflight changed: {observed!r} != {_EXPECTED_ANCHOR_GEOMETRY_PREFLIGHT!r}"
+        )
 
 
 def _assert_decision_payload_label_free(payload: Mapping[str, Any]) -> None:
@@ -203,6 +218,7 @@ def prepare_contracts(
     physical_gpus: Sequence[str],
 ) -> tuple[dict[str, Any], dict[str, Any], str, str]:
     projection = authenticate_c5_source(source_c5_dir, source_c5_heavy_root, verify_heavy_bytes=True)
+    _validate_anchor_geometry_preflight(projection)
     case_ids = list(projection["case_ids"])
     if len(case_ids) != EXPECTED_CASE_COUNT:
         raise RuntimeError("C5b source is not the frozen validation-58 inventory")
@@ -312,6 +328,7 @@ def load_contracts(run_root: Path, source_sha256: str, decision_sha256: str) -> 
         raise RuntimeError("C5b decision contract points to another source contract")
     if decision.get("case_ids") != source.get("source_projection", {}).get("case_ids"):
         raise RuntimeError("C5b source/decision case inventories disagree")
+    _validate_anchor_geometry_preflight(source["source_projection"])
     return source, decision
 
 
@@ -332,79 +349,6 @@ def _expected_shard(decision: Mapping[str, Any], case_id: str) -> int:
     if len(matches) != 1:
         raise RuntimeError(f"C5b case lacks a unique shard: {case_id}")
     return matches[0]
-
-
-def _validate_geometry_bundle(geometry: Any, label: str) -> int:
-    if not isinstance(geometry, Mapping) or set(geometry) != set(METRIC_SPECS):
-        raise RuntimeError(f"C5b geometry inventory changed: {label}")
-    for metric_id in METRIC_SPECS:
-        row = geometry[metric_id]
-        if not isinstance(row, Mapping) or row.get("metric_id") != metric_id or row.get("status") != "OK":
-            raise RuntimeError(f"C5b geometry metric identity changed: {label}/{metric_id}")
-        components = row.get("components")
-        if not isinstance(components, Mapping):
-            raise RuntimeError(f"C5b geometry components are absent: {label}/{metric_id}")
-        if metric_id == DETJ_DIAGNOSTICS:
-            if row.get("value") is not None:
-                raise RuntimeError(f"C5b detJ diagnostics unexpectedly has a scalar value: {label}")
-        else:
-            _finite(row.get("value"), f"C5b geometry value {label}/{metric_id}")
-
-    detj = geometry[DETJ_DIAGNOSTICS]["components"]
-    detj_voxels = _nonnegative_integer(detj.get("voxels"), f"C5b detJ voxels {label}")
-    nonfinite = _nonnegative_integer(detj.get("nonfinite_count"), f"C5b detJ nonfinite count {label}")
-    nonpositive = _nonnegative_integer(detj.get("nonpositive_count"), f"C5b detJ nonpositive count {label}")
-    invalid = _nonnegative_integer(detj.get("invalid_count"), f"C5b detJ invalid count {label}")
-    if (
-        detj_voxels <= 0
-        or nonfinite > detj_voxels
-        or nonpositive > detj_voxels
-        or invalid != nonfinite + nonpositive
-        or invalid != 0
-        or _finite(detj.get("detj_min"), f"C5b minimum detJ {label}") <= 0.0
-    ):
-        raise RuntimeError(f"C5b central Jacobian validity failed: {label}")
-    for key, value in detj.items():
-        observed = _finite(value, f"C5b detJ component {label}/{key}")
-        if key.endswith("_fraction") and not 0.0 <= observed <= 1.0:
-            raise RuntimeError(f"C5b detJ fraction is outside [0,1]: {label}/{key}")
-
-    digital_row = geometry[DIGITAL_DECOMPOSITION]
-    digital = digital_row["components"]
-    voxels = _nonnegative_integer(digital.get("voxels"), f"C5b digital voxels {label}")
-    union_count = _nonnegative_integer(
-        digital.get("union_violation_count"), f"C5b digital union violation count {label}"
-    )
-    if voxels <= 0 or union_count > voxels:
-        raise RuntimeError(f"C5b digital voxel accounting failed: {label}")
-    for key, value in digital.items():
-        observed = _finite(value, f"C5b digital component {label}/{key}")
-        if key.endswith("_count"):
-            count = _nonnegative_integer(value, f"C5b digital count {label}/{key}")
-            if count > voxels:
-                raise RuntimeError(f"C5b digital count exceeds support: {label}/{key}")
-        elif key.endswith("_fraction") and not 0.0 <= observed <= 1.0:
-            raise RuntimeError(f"C5b digital fraction is outside [0,1]: {label}/{key}")
-    for key, value in digital.items():
-        if not key.endswith("_violation_count"):
-            continue
-        fraction_key = key.removesuffix("_count") + "_fraction"
-        if fraction_key in digital and not math.isclose(
-            float(digital[fraction_key]), float(value) / voxels, rel_tol=0.0, abs_tol=1e-12
-        ):
-            raise RuntimeError(f"C5b digital count/fraction arithmetic changed: {label}/{key}")
-    union_fraction = _finite(digital.get("union_violation_fraction"), f"C5b digital union fraction {label}")
-    corner_fraction = _finite(
-        digital.get("corner_union_violation_fraction"), f"C5b digital corner-union fraction {label}"
-    )
-    corner_count = round(corner_fraction * voxels)
-    if not math.isclose(corner_fraction, corner_count / voxels, rel_tol=0.0, abs_tol=1e-12):
-        raise RuntimeError(f"C5b corner-union fraction is not an exact voxel count: {label}")
-    if not math.isclose(float(digital_row["value"]), 100.0 * union_fraction, rel_tol=0.0, abs_tol=1e-12):
-        raise RuntimeError(f"C5b digital percentage arithmetic changed: {label}")
-    if union_count != 0 or union_fraction != 0.0:
-        raise RuntimeError(f"C5b digital exactness failed: {label}")
-    return corner_count
 
 
 def _validate_execution(
@@ -502,8 +446,8 @@ def validate_decision_case_marker(
         exact = row["exact"]
         if exact.get("sha256") != field.get("array_sha256") or exact.get("epsilon_decimal") != "0.001":
             raise RuntimeError(f"C5b exact certificate differs from field bytes: {case_id}/{spec.arm_id}")
-        observed_fold_count = _validate_geometry_bundle(row.get("geometry"), f"{case_id}/{spec.arm_id}")
-        if row.get("observed_fold_count") != observed_fold_count:
+        geometry = validate_c5b_geometry_bundle(row.get("geometry"), f"{case_id}/{spec.arm_id}")
+        if row.get("observed_fold_count") != geometry.corner_union_violation_count:
             raise RuntimeError(f"C5b corner-union fold witness changed: {case_id}/{spec.arm_id}")
         if spec.arm_id in ANCHOR_ARM_IDS[1:]:
             parity = row.get("source_parity") or {}

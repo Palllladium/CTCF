@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate C5b: bounded pre-clip S4 amplitude bridge on IXI validation-58.
+# Gate C5b V2: bounded pre-clip S4 amplitude bridge on IXI validation-58.
 set -euo pipefail
 
 # shellcheck source=tools/runners/eval/_search_gate_common.sh
@@ -77,6 +77,7 @@ mkdir -p "$ATTEMPT_ROOT"
 
 {
   printf 'gpu_list=%s\n' "$GPU_CANONICAL"
+  printf 'protocol_id=%s\n' 'CTCF-SEARCH-GATE-C5B-V2'
   printf 'git_head=%s\n' "$HEAD"
   printf 'paths_profile=%s\n' "$PATHS_PROFILE"
   printf 'compact_run_root=%s\n' "$RUN_ROOT_ABS"

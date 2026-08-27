@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from tools.analysis import search_gate_c5b_source as source_auth
+from tools.analysis.search_gate_c5b import SCHEMA_VERSION, validate_c5b_geometry_bundle
 
 HISTORICAL_PRODUCT = Path("results/search_gate_c5/C5_DEVELOPMENT_20260825T175112Z_242dde3281d2")
 REQUIRE_HISTORICAL = os.environ.get("CTCF_REQUIRE_HISTORICAL_GOLDENS") == "1"
@@ -49,8 +50,9 @@ class SuccessfulC5GoldenTest(unittest.TestCase):
 
     def test_exact_successful_product_builds_the_minimal_decision_projection(self) -> None:
         projection = self.authenticate()
-        self.assertEqual(projection["schema"], "ctcf-search-c5b-decision-source-v1")
+        self.assertEqual(projection["schema"], f"ctcf-search-c5b-decision-source-{SCHEMA_VERSION}")
         self.assertEqual(len(projection["case_ids"]), 58)
+        self.assertEqual(projection["case_ids"][0], "subject_344")
         self.assertEqual(
             set(projection["image_inputs"]),
             {"atlas", *projection["case_ids"]},
@@ -64,6 +66,11 @@ class SuccessfulC5GoldenTest(unittest.TestCase):
         )
         self.assertIs(projection["test_115_authorized"], False)
         self.assertIs(projection["test_split_accessed"], False)
+        preflight = projection["anchor_geometry_preflight"]
+        self.assertEqual(preflight["validated_anchor_count"], 3 * 58)
+        self.assertEqual(preflight["central_invalid_count"], 0)
+        self.assertEqual(preflight["corner_union_violation_count"], 0)
+        self.assertGreater(preflight["digital_ten_nonzero_anchor_count"], 0)
         source_auth.assert_c5b_decision_projection_is_label_free(projection)
         serialized = json.dumps(projection, sort_keys=True).lower()
         self.assertNotIn(str(HISTORICAL_PRODUCT.resolve()).lower(), serialized)
@@ -92,6 +99,23 @@ class SuccessfulC5GoldenTest(unittest.TestCase):
             {name: value["clip_sweeps"] for name, value in anchors.items()},
             {name: 1 for name in anchors},
         )
+
+    def test_subject_344_real_geometry_separates_exact_corners_from_jstar_diagnostic(self) -> None:
+        marker = json.loads(
+            (HISTORICAL_PRODUCT / "cases/subject_344/decision_complete.json").read_text(encoding="utf-8")
+        )
+        expected = {
+            "int_s2_a10_b0": 414,
+            "int_s4_a10_b0": 454,
+            "int_s4_a20_b0": 1152,
+        }
+        for arm_id, union_count in expected.items():
+            with self.subTest(arm_id=arm_id):
+                arm = next(row for row in marker["arms"] if row["arm_id"] == arm_id)
+                observed = validate_c5b_geometry_bundle(arm["geometry"], f"subject_344/{arm_id}")
+                self.assertEqual(observed.corner_union_violation_count, 0)
+                self.assertEqual(observed.digital_ten_union_violation_count, union_count)
+                self.assertGreater(observed.jstar_union_violation_fraction, 0.0)
 
     def test_wrong_explicit_c5_heavy_root_is_rejected_even_without_byte_verification(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Explicit C5 heavy root differs"):
@@ -192,8 +216,10 @@ class ProjectionAndRootUnitTest(unittest.TestCase):
 
     def test_authenticator_does_not_import_c5_implementation_modules(self) -> None:
         text = Path(source_auth.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("from tools.analysis.search_gate_c5", text)
-        self.assertNotIn("import tools.analysis.search_gate_c5", text)
+        self.assertNotIn("from tools.analysis.search_gate_c5 import", text)
+        self.assertNotIn("import tools.analysis.search_gate_c5\n", text)
+        self.assertNotIn("search_gate_c5_contracts", text)
+        self.assertNotIn("search_gate_c5_workers", text)
 
 
 if __name__ == "__main__":
