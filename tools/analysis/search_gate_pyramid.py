@@ -38,6 +38,9 @@ class PyramidStage:
     requested_stage_rms: float
     realized_stage_rms: float
     clip_retention: float
+    clip_work_eps: float | None
+    continuation_eps: float | None
+    output_fast_cert_bound: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +214,8 @@ def build_pyramid_direction(
     rewarp_between_levels: bool,
     full_collar: int,
     work_eps: float,
+    stage_work_eps_decrement: float,
+    exact_claim_eps: float,
     standardization_floor: float,
     image_std_floor: float,
     proposal_multiplier: float,
@@ -239,6 +244,15 @@ def build_pyramid_direction(
         raise ValueError(f"unknown pyramid family: {family}")
     if not isinstance(rewarp_between_levels, bool):
         raise TypeError("rewarp_between_levels must be bool")
+    if not 0.0 < exact_claim_eps < work_eps:
+        raise ValueError("exact_claim_eps must be positive and lower than work_eps")
+    if not 0.0 < stage_work_eps_decrement < work_eps - exact_claim_eps:
+        raise ValueError("stage_work_eps_decrement must fit between exact_claim_eps and work_eps")
+    stage_work_eps = tuple(
+        round(work_eps - index * stage_work_eps_decrement, 9) for index in range(len(frozen_factors))
+    )
+    if stage_work_eps[-1] <= exact_claim_eps:
+        raise ValueError("stage work-margin schedule reaches the exact claim margin")
 
     full_mask = geometry_mask(spatial, full_collar, initial.device)
     reference_rms = masked_vector_rms(rms_reference, full_mask)
@@ -249,7 +263,7 @@ def build_pyramid_direction(
     accumulated = torch.zeros_like(initial)
     stages: list[PyramidStage] = []
 
-    for factor in frozen_factors:
+    for stage_index, factor in enumerate(frozen_factors):
         base_current = current if rewarp_between_levels else initial
         if family == "true_pyramid":
             level_fixed = downsample_image(fixed, factor)
@@ -303,19 +317,38 @@ def build_pyramid_direction(
         )
         requested = processed.displacement
         if rewarp_between_levels:
-            updated, operator = certified_local_clip_candidate(
-                current,
-                requested,
-                full_mask,
-                work_eps=work_eps,
-                sweeps=stage_clip_sweeps,
+            clip_eps = stage_work_eps[stage_index]
+            continuation_eps = (
+                stage_work_eps[stage_index + 1] if stage_index + 1 < len(stage_work_eps) else exact_claim_eps
             )
+            try:
+                updated, operator = certified_local_clip_candidate(
+                    current,
+                    requested,
+                    full_mask,
+                    work_eps=clip_eps,
+                    sweeps=stage_clip_sweeps,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"C6 {family} factors={frozen_factors} stage={stage_index} factor={factor} "
+                    f"work_eps={clip_eps}: {exc}"
+                ) from exc
+            output_fast_cert_bound = float(operator["output_fast_cert_bound"])
+            if not math.isfinite(output_fast_cert_bound) or output_fast_cert_bound < continuation_eps:
+                raise RuntimeError(
+                    f"C6 {family} factors={frozen_factors} stage={stage_index} factor={factor} "
+                    f"cannot continue safely: output bound {output_fast_cert_bound} < {continuation_eps}"
+                )
             realized = updated - current
             current = updated
         else:
             realized = requested
             accumulated = accumulated + requested
             operator = {"retained_norm_ratio": 1.0}
+            clip_eps = None
+            continuation_eps = None
+            output_fast_cert_bound = None
         stages.append(
             PyramidStage(
                 factor=factor,
@@ -330,6 +363,9 @@ def build_pyramid_direction(
                 requested_stage_rms=stage_target,
                 realized_stage_rms=masked_vector_rms(realized, full_mask),
                 clip_retention=float(operator["retained_norm_ratio"]),
+                clip_work_eps=clip_eps,
+                continuation_eps=continuation_eps,
+                output_fast_cert_bound=output_fast_cert_bound,
             )
         )
 

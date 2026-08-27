@@ -75,14 +75,14 @@ from tools.analysis.transactional_search import (
 )
 from utils import dice_per_label, setup_device
 
-SOURCE_SCHEMA = "ctcf-search-c6-source-v1"
-DECISION_SCHEMA = "ctcf-search-c6-decision-v1"
-DECISION_CASE_SCHEMA = "ctcf-search-c6-decision-case-v1"
-WORKER_SCHEMA = "ctcf-search-c6-worker-v1"
-BARRIER_SCHEMA = "ctcf-search-c6-decision-barrier-v1"
-EVALUATION_CONTRACT_SCHEMA = "ctcf-search-c6-evaluation-contract-v1"
-EVALUATION_CASE_SCHEMA = "ctcf-search-c6-evaluation-case-v1"
-EVALUATION_BARRIER_SCHEMA = "ctcf-search-c6-evaluation-barrier-v1"
+SOURCE_SCHEMA = "ctcf-search-c6-source-v2"
+DECISION_SCHEMA = "ctcf-search-c6-decision-v2"
+DECISION_CASE_SCHEMA = "ctcf-search-c6-decision-case-v2"
+WORKER_SCHEMA = "ctcf-search-c6-worker-v2"
+BARRIER_SCHEMA = "ctcf-search-c6-decision-barrier-v2"
+EVALUATION_CONTRACT_SCHEMA = "ctcf-search-c6-evaluation-contract-v2"
+EVALUATION_CASE_SCHEMA = "ctcf-search-c6-evaluation-case-v2"
+EVALUATION_BARRIER_SCHEMA = "ctcf-search-c6-evaluation-barrier-v2"
 DEFAULT_MIN_FREE_GIB = 80.0
 RESUME_MIN_FREE_GIB = 5.0
 DIRECTION_DIAGNOSTIC_FIELDS = (
@@ -277,6 +277,32 @@ def _assert_decision_label_free(payload: Mapping[str, Any]) -> None:
     visit(payload)
 
 
+def _stage_initial_margin_preflight(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    case_ids = list(snapshot.get("case_ids") or [])
+    records = snapshot.get("source_initial") or {}
+    if len(case_ids) != EXPECTED_CASE_COUNT or set(records) != set(case_ids):
+        raise RuntimeError("C6 stage-margin preflight received an incomplete initial-field inventory")
+    rows: list[tuple[str, float]] = []
+    for case_id in case_ids:
+        exact = records[case_id].get("exact") or {}
+        lower = exact.get("interval_lo_min")
+        if exact.get("certified") is not True or not isinstance(lower, (int, float)) or not math.isfinite(float(lower)):
+            raise RuntimeError(f"C6 initial exact certificate is incomplete: {case_id}")
+        rows.append((case_id, float(lower)))
+    minimum_case_id, minimum = min(rows, key=lambda row: row[1])
+    below = [case_id for case_id, lower in rows if lower < WORK_EPS]
+    if below:
+        raise RuntimeError(f"C6 initial fields do not support first-stage work_eps={WORK_EPS}: {below}")
+    return {
+        "schema": "ctcf-search-c6-stage-initial-margin-preflight-v2",
+        "required_first_stage_eps": WORK_EPS,
+        "n_cases": len(rows),
+        "below_required_count": 0,
+        "minimum_interval_lo": minimum,
+        "minimum_case_id": minimum_case_id,
+    }
+
+
 def prepare_contracts(
     *,
     run_root: Path,
@@ -288,12 +314,14 @@ def prepare_contracts(
     snapshot = authenticate_frozen_c4(source_c4_dir, source_c4_heavy_root, verify_anchor_bytes=True)
     if len(snapshot["case_ids"]) != EXPECTED_CASE_COUNT:
         raise RuntimeError("C6 source C4 does not contain IXI validation-58")
+    stage_margin_preflight = _stage_initial_margin_preflight(snapshot)
     source = {
         "schema": SOURCE_SCHEMA,
         "protocol_id": PROTOCOL_ID,
         "policy": policy_dict(),
         "policy_sha256": C6_POLICY_SHA256,
         "source_snapshot": snapshot,
+        "stage_initial_margin_preflight": stage_margin_preflight,
         "test_115_authorized": False,
         "test_split_accessed": False,
     }
@@ -319,6 +347,7 @@ def prepare_contracts(
         "source_historical": snapshot["source_historical"],
         "source_c4_anchors": snapshot["source_c4_anchors"],
         "baseline_geometry": snapshot["baseline_geometry"],
+        "stage_initial_margin_preflight": stage_margin_preflight,
         "num_shards": len(physical_gpus),
         "physical_gpus": list(physical_gpus),
         "shard_to_physical_gpu": shard_gpu_map(list(physical_gpus)),
@@ -348,11 +377,17 @@ def _load_decision(run_root: Path, digest: str) -> dict[str, Any]:
     payload = _load_json(path)
     case_ids = payload.get("case_ids") or []
     physical_gpus = payload.get("physical_gpus") or []
+    stage_margin = payload.get("stage_initial_margin_preflight") or {}
     if (
         payload.get("schema") != DECISION_SCHEMA
         or payload.get("protocol_id") != PROTOCOL_ID
         or payload.get("policy_sha256") != C6_POLICY_SHA256
         or not _json_equivalent(payload.get("policy"), policy_dict())
+        or stage_margin.get("required_first_stage_eps") != WORK_EPS
+        or stage_margin.get("n_cases") != EXPECTED_CASE_COUNT
+        or stage_margin.get("below_required_count") != 0
+        or not isinstance(stage_margin.get("minimum_interval_lo"), (int, float))
+        or float(stage_margin.get("minimum_interval_lo", -math.inf)) < WORK_EPS
         or payload.get("test_115_authorized") is not False
         or payload.get("test_split_accessed") is not False
         or len(case_ids) != EXPECTED_CASE_COUNT
@@ -1113,7 +1148,7 @@ def finalize(
         no_rewarp_vs_rewarp=no_rewarp,
     )
     summary = {
-        "schema": "ctcf-search-c6-summary-v1",
+        "schema": "ctcf-search-c6-summary-v2",
         "protocol_id": PROTOCOL_ID,
         "status": "COMPLETE",
         "n_cases": EXPECTED_CASE_COUNT,
@@ -1177,7 +1212,7 @@ def finalize(
     atomic_write_json(paths["next_branch"], branch)
     files = {key: sha256_file(path) for key, path in paths.items()}
     manifest = {
-        "schema": "ctcf-search-c6-run-manifest-v1",
+        "schema": "ctcf-search-c6-run-manifest-v2",
         "protocol_id": PROTOCOL_ID,
         "status": "COMPLETE",
         "policy_sha256": C6_POLICY_SHA256,
@@ -1229,6 +1264,7 @@ def selfcheck_stage(args: argparse.Namespace) -> int:
         "arm_ids": [row.arm_id for row in ARM_SPECS],
         "selectable_arm_ids": list(SELECTABLE_ARM_IDS),
         "matched_controls": {arm_id: list(matched_control_ids(arm_id)) for arm_id in SELECTABLE_ARM_IDS},
+        "stage_work_eps_by_depth": policy_dict()["construction"]["stage_work_eps_by_depth"],
         "test_115_authorized": TEST_115_AUTHORIZED,
     }
     atomic_write_json(args.output, report)
@@ -1254,12 +1290,14 @@ def prepare_stage(args: argparse.Namespace) -> int:
         source_c4_heavy_root=args.source_c4_heavy_root,
         physical_gpus=physical_gpus,
     )
+    stage_margin = _load_json(run_root / "decision_contract.json")["stage_initial_margin_preflight"]
     print(
         json.dumps(
             {
                 "source_contract_sha256": source_sha,
                 "decision_contract_sha256": decision_sha,
                 "n_cases": EXPECTED_CASE_COUNT,
+                "stage_initial_margin_preflight": stage_margin,
             }
         )
     )

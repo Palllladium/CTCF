@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from itertools import pairwise
 from types import MappingProxyType
 from typing import Any
 
@@ -16,14 +17,15 @@ from tools.analysis.search_gate_c3 import (
     SUPPORT_RETENTION_MIN,
 )
 
-PROTOCOL_ID = "CTCF-SEARCH-GATE-C6-V1"
-SCHEMA_VERSION = "v1"
+PROTOCOL_ID = "CTCF-SEARCH-GATE-C6-V2"
+SCHEMA_VERSION = "v2"
 EXPECTED_CASE_COUNT = 58
 DEVELOPMENT_DATASET_ID = "IXI_VALIDATION_58"
 TEST_115_AUTHORIZED = False
 
 WORK_EPS = 0.0011
 EXACT_CLAIM_EPS = 0.001
+STAGE_WORK_EPS_DECREMENT = 0.000025
 COMMON_EVIDENCE_COLLAR = 7
 STANDARDIZATION_FLOOR = 1e-6
 IMAGE_NORMALIZATION_STD_FLOOR = 1e-6
@@ -50,6 +52,8 @@ FROZEN_CONSTRUCTION: Mapping[str, Any] = MappingProxyType(
     {
         "full_collar": COMMON_EVIDENCE_COLLAR,
         "work_eps": WORK_EPS,
+        "stage_work_eps_decrement": STAGE_WORK_EPS_DECREMENT,
+        "exact_claim_eps": EXACT_CLAIM_EPS,
         "standardization_floor": STANDARDIZATION_FLOOR,
         "image_std_floor": IMAGE_NORMALIZATION_STD_FLOOR,
         "proposal_multiplier": PROPOSAL_MULTIPLIER,
@@ -66,6 +70,8 @@ PUBLISHED_CONSTRUCTION_KEYS: Mapping[str, str] = MappingProxyType(
     {
         "full_collar": "collar",
         "work_eps": "work_eps",
+        "stage_work_eps_decrement": "stage_work_eps_decrement",
+        "exact_claim_eps": "exact_claim_eps",
         "standardization_floor": "standardization_floor",
         "image_std_floor": "image_normalization_std_floor",
         "proposal_multiplier": "proposal_multiplier",
@@ -82,6 +88,17 @@ def frozen_construction_kwargs() -> dict[str, Any]:
     """The exact build_pyramid_direction settings the frozen C6 policy owns."""
 
     return dict(FROZEN_CONSTRUCTION)
+
+
+def stage_work_eps_schedule(stage_count: int) -> tuple[float, ...]:
+    """Frozen descending margins for fields reused by a later C6 stage."""
+
+    if isinstance(stage_count, bool) or not isinstance(stage_count, int) or stage_count < 1:
+        raise ValueError("stage_count must be a positive integer")
+    schedule = tuple(round(WORK_EPS - index * STAGE_WORK_EPS_DECREMENT, 9) for index in range(stage_count))
+    if schedule[-1] <= EXACT_CLAIM_EPS or any(left <= right for left, right in pairwise(schedule)):
+        raise RuntimeError("invalid C6 stage work-margin schedule")
+    return schedule
 
 
 REFERENCE_ARM_ID = "c4_intensity_s2"
@@ -350,6 +367,11 @@ def policy_dict() -> dict[str, Any]:
             "image_normalization_std_floor": IMAGE_NORMALIZATION_STD_FLOOR,
             "require_all_candidates_valid": REQUIRE_ALL_CANDIDATES_VALID,
             "work_eps": WORK_EPS,
+            "stage_work_eps_decrement": STAGE_WORK_EPS_DECREMENT,
+            "stage_work_eps_by_depth": {
+                "2": list(stage_work_eps_schedule(2)),
+                "3": list(stage_work_eps_schedule(3)),
+            },
             "stage_local_clip_sweeps": STAGE_LOCAL_CLIP_SWEEPS,
             "final_local_clip_sweeps": FINAL_LOCAL_CLIP_SWEEPS,
             "exact_claim_eps": EXACT_CLAIM_EPS,
@@ -387,7 +409,7 @@ def policy_sha256() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-C6_POLICY_SHA256 = "72128551dab911171f628370704b0d219b0bb4f7d98aba571ceaede4dc8372b6"
+C6_POLICY_SHA256 = "d0337e60ac0c7d271ae506acd009b439091bc723afa142c81b250529e6c4807b"
 
 
 def assert_frozen_policy() -> None:
@@ -410,6 +432,9 @@ def assert_frozen_policy() -> None:
         raise RuntimeError("C6 published NCC contract disagrees with its search_gate_c3 owner")
     if any(construction[key] != FROZEN_CONSTRUCTION[builder] for builder, key in PUBLISHED_CONSTRUCTION_KEYS.items()):
         raise RuntimeError("C6 published construction disagrees with the settings passed to the builder")
+    expected_schedules = {"2": list(stage_work_eps_schedule(2)), "3": list(stage_work_eps_schedule(3))}
+    if construction.get("stage_work_eps_by_depth") != expected_schedules:
+        raise RuntimeError("C6 published stage work-margin schedules changed")
     observed = policy_sha256()
     if observed != C6_POLICY_SHA256:
         raise RuntimeError(f"C6 policy changed: {observed} != {C6_POLICY_SHA256}")

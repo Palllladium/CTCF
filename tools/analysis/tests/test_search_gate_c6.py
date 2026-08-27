@@ -3,19 +3,27 @@ from __future__ import annotations
 import copy
 import json
 import math
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
 import torch
 
 import tools.analysis.search_gate_c6 as search_gate_c6
+from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.run_search_gate_c6 import (
     DIRECTION_DIAGNOSTIC_FIELDS,
     _assert_decision_label_free,
     _direction_diagnostics,
+    _load_barrier,
+    _stage_initial_margin_preflight,
+    build_decision_barrier,
     build_parser,
+    run_decision_case,
+    run_evaluation_case,
 )
 from tools.analysis.search_gate_c3 import (
     NCC7_WINDOW,
@@ -40,6 +48,7 @@ from tools.analysis.search_gate_c6 import (
     CAUSAL_MEAN_VS_CONTROL_MIN,
     CONTROL_ARM_IDS,
     DIAGNOSTIC_ARM_IDS,
+    EXACT_CLAIM_EPS,
     EXPECTED_CASE_COUNT,
     FROZEN_CONSTRUCTION,
     PUBLISHED_CONSTRUCTION_KEYS,
@@ -49,6 +58,7 @@ from tools.analysis.search_gate_c6 import (
     RISK_LABEL_IDS,
     SDLOGJ_CI_HIGH_VS_C4_MAX,
     SELECTABLE_ARM_IDS,
+    WORK_EPS,
     ArmAssessment,
     PairedSummary,
     arm_ids_for_role,
@@ -60,8 +70,10 @@ from tools.analysis.search_gate_c6 import (
     policy_sha256,
     select_branch,
     simultaneous_paired_summaries,
+    stage_work_eps_schedule,
 )
 from tools.analysis.search_gate_pyramid import (
+    array_sha256,
     binomial_blur3d,
     blurred_full_resolution_image,
     build_pyramid_direction,
@@ -69,6 +81,7 @@ from tools.analysis.search_gate_pyramid import (
     lift_level_vector,
     project_psi_to_level,
 )
+from utils import dice_per_label
 from utils.field import boundary_nonzero_count, identity_collar
 
 LABEL_IDS = tuple(range(1, 31))
@@ -339,6 +352,10 @@ class FrozenContractTest(unittest.TestCase):
             "posterior_temperature",
             "centre_beta",
             "require_all_candidates_valid",
+            "work_eps",
+            "stage_work_eps_decrement",
+            "stage_work_eps_by_depth",
+            "exact_claim_eps",
             "stage_local_clip_sweeps",
             "final_local_clip_sweeps",
             "primary_ncc_window",
@@ -363,6 +380,35 @@ class FrozenContractTest(unittest.TestCase):
         self.assertEqual(construction["primary_ncc_improvement_min"], PRIMARY_NCC_IMPROVEMENT_MIN)
         self.assertEqual(construction["ncc_denominator_eps"], NCC_DENOMINATOR_EPS)
         self.assertFalse(hasattr(search_gate_c6, "PRIMARY_NCC_WINDOW"), "C6 must not shadow the NCC window owner")
+
+    def test_stage_work_margins_descend_but_remain_above_the_exact_claim(self) -> None:
+        self.assertEqual(stage_work_eps_schedule(2), (0.0011, 0.001075))
+        self.assertEqual(stage_work_eps_schedule(3), (0.0011, 0.001075, 0.00105))
+        self.assertGreater(stage_work_eps_schedule(3)[-1], EXACT_CLAIM_EPS)
+        self.assertEqual(
+            policy_dict()["construction"]["stage_work_eps_by_depth"]["3"], list(stage_work_eps_schedule(3))
+        )
+        failed_v1_continuation_bound = 0.001098990539567836
+        self.assertLess(failed_v1_continuation_bound, stage_work_eps_schedule(3)[0])
+        self.assertGreater(failed_v1_continuation_bound, stage_work_eps_schedule(3)[1])
+
+    def test_initial_margin_preflight_covers_all_cases_and_fails_closed(self) -> None:
+        case_ids = [f"subject_{index:03d}" for index in range(EXPECTED_CASE_COUNT)]
+        snapshot = {
+            "case_ids": case_ids,
+            "source_initial": {
+                case_id: {"exact": {"certified": True, "interval_lo_min": WORK_EPS + (index + 1) * 1e-9}}
+                for index, case_id in enumerate(case_ids)
+            },
+        }
+        profile = _stage_initial_margin_preflight(snapshot)
+        self.assertEqual(profile["n_cases"], EXPECTED_CASE_COUNT)
+        self.assertEqual(profile["below_required_count"], 0)
+        self.assertEqual(profile["minimum_case_id"], case_ids[0])
+        broken = copy.deepcopy(snapshot)
+        broken["source_initial"][case_ids[-1]]["exact"]["interval_lo_min"] = WORK_EPS - 1e-9
+        with self.assertRaisesRegex(RuntimeError, "do not support first-stage"):
+            _stage_initial_margin_preflight(broken)
 
     def test_assert_frozen_policy_rejects_a_drifted_ncc_window(self) -> None:
         original = search_gate_c6.NCC7_WINDOW
@@ -636,6 +682,24 @@ class PyramidDirectionTest(unittest.TestCase):
                 if not rewarp:
                     self.assertAlmostEqual(stage.realized_stage_rms, share, places=5, msg=str(family))
 
+    def test_rewarped_stages_publish_a_safe_descending_continuation_contract(self) -> None:
+        for (family, factors, rewarp), direction in self.directions.items():
+            if not rewarp:
+                for stage in direction.stages:
+                    self.assertIsNone(stage.clip_work_eps)
+                    self.assertIsNone(stage.continuation_eps)
+                    self.assertIsNone(stage.output_fast_cert_bound)
+                continue
+            schedule = stage_work_eps_schedule(len(factors))
+            self.assertEqual(tuple(stage.clip_work_eps for stage in direction.stages), schedule, family)
+            self.assertEqual(
+                tuple(stage.continuation_eps for stage in direction.stages),
+                (*schedule[1:], EXACT_CLAIM_EPS),
+                family,
+            )
+            for stage in direction.stages:
+                self.assertGreaterEqual(stage.output_fast_cert_bound, stage.continuation_eps, family)
+
     def test_rewarp_and_no_rewarp_produce_different_fields(self) -> None:
         rewarped = self.directions[("true_pyramid", (4, 2, 1), True)].displacement
         plain = self.directions[("true_pyramid", (4, 2, 1), False)].displacement
@@ -649,6 +713,124 @@ class PyramidDirectionTest(unittest.TestCase):
             for family in ("full_resolution", "blurred_full_resolution"):
                 control = self.directions[(family, factors, True)].displacement
                 self.assertFalse(torch.equal(pyramid, control), f"{family}{factors}")
+
+
+class C6DecisionPilotSmokeTest(unittest.TestCase):
+    def test_one_case_crosses_the_real_decision_pilot_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_c3 = root / "source_c3"
+            source_c4 = root / "source_c4"
+            target_c6 = root / "target_c6"
+            run_root = root / "run"
+            for directory in (source_c3, source_c4, target_c6, run_root):
+                directory.mkdir()
+
+            size = 32
+            case_id = "subject_smoke"
+            generator = torch.Generator().manual_seed(29)
+            atlas = torch.rand((1, size, size, size), generator=generator).numpy().astype(np.float32)
+            fixed = np.roll(atlas, shift=1, axis=-1).copy()
+            initial = torch.zeros((1, 3, size, size, size), dtype=torch.float32)
+            reference = torch.zeros_like(initial)
+            reference[:, 2] = 0.2
+            reference = identity_collar(reference, width=7)
+
+            def image_record(name: str, array: np.ndarray) -> dict:
+                path = source_c3 / f"{name}.npy"
+                np.save(path, array, allow_pickle=False)
+                return {
+                    "root_id": "source_c3_heavy",
+                    "relative_path": path.relative_to(source_c3).as_posix(),
+                    "sha256": sha256_file(path),
+                    "array_sha256": array_sha256(torch.from_numpy(array)),
+                    "shape": list(array.shape),
+                }
+
+            def flow_record(root_id: str, base: Path, name: str, field: torch.Tensor) -> dict:
+                path = base / f"{name}.npz"
+                np.savez_compressed(path, flow=field.numpy())
+                return {
+                    "root_id": root_id,
+                    "relative_path": path.relative_to(base).as_posix(),
+                    "npz_sha256": sha256_file(path),
+                    "array_sha256": array_sha256(field),
+                }
+
+            decision = {
+                "roots": {
+                    "source_c3_heavy": str(source_c3),
+                    "source_c4_heavy": str(source_c4),
+                    "target_c6_heavy": str(target_c6),
+                },
+                "shards": {"0": [case_id]},
+                "case_ids": [case_id],
+                "shard_to_physical_gpu": {"0": "0"},
+                "image_inputs": {"atlas": image_record("atlas", atlas), case_id: image_record(case_id, fixed)},
+                "source_initial": {case_id: {"field": flow_record("source_c3_heavy", source_c3, "initial", initial)}},
+                "source_historical": {
+                    case_id: {
+                        "raw_conf_requested_field": flow_record("source_c3_heavy", source_c3, "historical", reference)
+                    }
+                },
+                "source_c4_anchors": {
+                    case_id: {"intensity_s2": {"field": flow_record("source_c4_heavy", source_c4, "anchor", initial)}}
+                },
+            }
+            decision_contract = run_root / "decision_contract.json"
+            atomic_write_json(decision_contract, decision)
+            decision_sha = sha256_file(decision_contract)
+            marker = run_decision_case(
+                case_id=case_id,
+                shard_index=0,
+                physical_gpu="0",
+                run_root=run_root,
+                decision=decision,
+                decision_sha256=decision_sha,
+                device=torch.device("cpu"),
+                execution={"synthetic_smoke": True},
+            )
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "COMPLETE")
+            self.assertEqual(len(payload["arms"]), len(ARM_SPECS))
+            self.assertFalse(payload["labels_loaded_to_device"])
+            self.assertTrue(all(row["exact"]["certified"] for row in payload["arms"][1:]))
+
+            barrier_sha = build_decision_barrier(run_root, decision, decision_sha, "synthetic_attempt")
+            barrier = _load_barrier(run_root, barrier_sha, decision_sha)
+            moving_seg = torch.ones((1, size, size, size), dtype=torch.long)
+            fixed_seg = moving_seg.clone()
+            identity_dice = float(dice_per_label(moving_seg.unsqueeze(0), fixed_seg.unsqueeze(0), [1]).mean())
+            evaluation = {
+                "evaluation_label_ids": [1],
+                "evaluation_baseline_dice": {case_id: identity_dice},
+                "evaluation_c4_anchor_dice": {
+                    case_id: {
+                        "intensity_s2": {
+                            "aggregate_dice": identity_dice,
+                            "per_label": [{"label": 1, "dice": identity_dice}],
+                        }
+                    }
+                },
+            }
+            evaluation_marker = run_evaluation_case(
+                case_id=case_id,
+                dataset_item=(torch.from_numpy(atlas), torch.from_numpy(fixed), moving_seg, fixed_seg),
+                labels=[1],
+                run_root=run_root,
+                decision=decision,
+                decision_sha=decision_sha,
+                barrier=barrier,
+                barrier_sha=barrier_sha,
+                evaluation=evaluation,
+                evaluation_sha="b" * 64,
+                device=torch.device("cpu"),
+                execution={"synthetic_smoke": True},
+            )
+            evaluated = json.loads(evaluation_marker.read_text(encoding="utf-8"))
+            self.assertEqual(evaluated["status"], "COMPLETE")
+            self.assertTrue(evaluated["labels_loaded_after_barrier"])
+            self.assertEqual(len(evaluated["arms"]), len(ARM_SPECS))
 
 
 if __name__ == "__main__":

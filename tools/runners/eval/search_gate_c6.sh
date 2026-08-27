@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate C6 V1: true intensity pyramid versus matched full-grid controls on IXI validation-58.
+# Gate C6 V2: true intensity pyramid versus matched full-grid controls on IXI validation-58.
 set -euo pipefail
 
 # shellcheck source=tools/runners/eval/_search_gate_common.sh
@@ -77,7 +77,7 @@ mkdir -p "$ATTEMPT_ROOT"
 
 {
   printf 'gpu_list=%s\n' "$GPU_CANONICAL"
-  printf 'protocol_id=%s\n' 'CTCF-SEARCH-GATE-C6-V1'
+  printf 'protocol_id=%s\n' 'CTCF-SEARCH-GATE-C6-V2'
   printf 'git_head=%s\n' "$HEAD"
   printf 'paths_profile=%s\n' "$PATHS_PROFILE"
   printf 'compact_run_root=%s\n' "$RUN_ROOT_ABS"
