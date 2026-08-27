@@ -175,8 +175,8 @@ def evidence(
 
 class FrozenProtocolTest(unittest.TestCase):
     def test_exact_arms_and_roles_are_frozen(self):
-        self.assertEqual(PROTOCOL_ID, "CTCF-SEARCH-GATE-C5B-V2")
-        self.assertEqual(SCHEMA_VERSION, "v2")
+        self.assertEqual(PROTOCOL_ID, "CTCF-SEARCH-GATE-C5B-V3")
+        self.assertEqual(SCHEMA_VERSION, "v3")
         self.assertEqual(
             ANCHOR_ARM_IDS,
             ("c4_int_s2_a10_b0", "c5_int_s4_a10_b0_w1", "c5_int_s4_a20_b0_w1"),
@@ -215,9 +215,14 @@ class FrozenProtocolTest(unittest.TestCase):
 
     def test_policy_hash_and_bytes_are_stable(self):
         self.assertEqual(policy_sha256(), C5B_POLICY_SHA256)
-        self.assertEqual(C5B_POLICY_SHA256, "50fb2f75a640e695eda30c4dff74c8eb72ebcfb6cd54974f26e9142c493ec2bd")
+        self.assertEqual(C5B_POLICY_SHA256, "4fa7a24c75a0558ddb8255ed8115d6d50c0396d31eb0fb691a9ef4668eb5958a")
         policy = dict(C5B_POLICY)
-        self.assertEqual(policy["protocol_id"], "CTCF-SEARCH-GATE-C5B-V2")
+        self.assertEqual(policy["protocol_id"], "CTCF-SEARCH-GATE-C5B-V3")
+        self.assertEqual(policy["clip_current_fast_bound_role"], "HARD_PRECONDITION_AT_WORK_EPS")
+        self.assertEqual(
+            policy["clip_output_fast_bound_role"],
+            "FINITE_DIAGNOSTIC_EXACT_SAVED_FP32_CERTIFICATE_IS_AUTHORITATIVE",
+        )
         self.assertTrue(policy["digital_corner_union_required_zero"])
         self.assertEqual(policy["digital_ten_union_role"], DIGITAL_TEN_UNION_ROLE)
         self.assertNotIn("digital_ten_union_required_zero", policy)

@@ -43,6 +43,7 @@ from tools.analysis.search_gate_c5b import (
     regional_zero_family_id,
     select_next_branch,
     simultaneous_paired_summaries,
+    validate_c5b_clip_operator,
     validate_c5b_geometry_bundle,
 )
 from tools.analysis.search_gate_c5b_contracts import (
@@ -176,6 +177,12 @@ def _anchor_row(
         raise RuntimeError(f"C5b source anchor array differs: {case_id}/{arm_id}")
     geometry = _geometry_bundle(field, mask)
     diagnostics = validate_c5b_geometry_bundle(geometry, f"{case_id}/{arm_id}")
+    if proposal is not None:
+        validate_c5b_clip_operator(
+            proposal.get("operator"),
+            expected_sweeps=spec.local_clip_sweeps,
+            label=f"producer replay/{case_id}/{arm_id}",
+        )
     return {
         "arm_index": spec.arm_index,
         "arm_id": arm_id,
@@ -237,6 +244,11 @@ def _new_arm_row(
         "preclip_direction_array_sha256": direction_sha256,
         "postprocessed_direction_array_sha256": postprocessed_sha256,
     }
+    validate_c5b_clip_operator(
+        proposal["operator"],
+        expected_sweeps=spec.local_clip_sweeps,
+        label=f"producer candidate/{case_id}/{arm_id}",
+    )
     return {
         "arm_index": spec.arm_index,
         "arm_id": arm_id,

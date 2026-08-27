@@ -18,14 +18,16 @@ from tools.analysis.search_gate_metrics import (
     METRIC_SPECS,
 )
 
-PROTOCOL_ID = "CTCF-SEARCH-GATE-C5B-V2"
-SCHEMA_VERSION = "v2"
+PROTOCOL_ID = "CTCF-SEARCH-GATE-C5B-V3"
+SCHEMA_VERSION = "v3"
 EXPECTED_CASE_COUNT = 58
 DEVELOPMENT_DATASET_ID = "IXI_VALIDATION_58"
 TEST_115_AUTHORIZED = False
 
 WORK_EPS = 0.0011
 EXACT_CLAIM_EPS = 0.001
+CLIP_CURRENT_FAST_BOUND_ROLE = "HARD_PRECONDITION_AT_WORK_EPS"
+CLIP_OUTPUT_FAST_BOUND_ROLE = "FINITE_DIAGNOSTIC_EXACT_SAVED_FP32_CERTIFICATE_IS_AUTHORITATIVE"
 DESCRIPTOR_ID = "ZSCORED_INTENSITY"
 IMAGE_NORMALIZATION_MODE = "independent_masked_zscore"
 IMAGE_NORMALIZATION_STD_FLOOR = 1e-6
@@ -68,6 +70,40 @@ class C5BGeometryDiagnostics:
     digital_ten_union_violation_count: int
     digital_ten_union_violation_fraction: float
     digital_ten_union_percent: float
+
+
+@dataclass(frozen=True, slots=True)
+class C5BClipOperatorDiagnostics:
+    current_fast_cert_bound: float
+    output_fast_cert_bound: float
+
+
+def validate_c5b_clip_operator(
+    operator: Any,
+    *,
+    expected_sweeps: int,
+    label: str,
+) -> C5BClipOperatorDiagnostics:
+    """Validate operator identity while leaving the post-cast fast bound diagnostic-only."""
+    if not isinstance(operator, Mapping):
+        raise RuntimeError(f"C5b clip operator is absent: {label}")
+    if (
+        operator.get("operator") != "CERTIFIED_LOCAL_CLIP"
+        or operator.get("sweeps") != expected_sweeps
+        or not math.isclose(float(operator.get("work_eps", math.nan)), WORK_EPS, rel_tol=0.0, abs_tol=0.0)
+    ):
+        raise RuntimeError(f"C5b clip operator identity changed: {label}")
+    current_bound = _geometry_finite(
+        operator.get("current_fast_cert_bound"),
+        f"C5b current fast certificate {label}",
+    )
+    output_bound = _geometry_finite(
+        operator.get("output_fast_cert_bound"),
+        f"C5b output fast certificate {label}",
+    )
+    if current_bound < WORK_EPS:
+        raise RuntimeError(f"C5b current fast certificate is below work_eps: {label}")
+    return C5BClipOperatorDiagnostics(current_bound, output_bound)
 
 
 def _geometry_finite(value: Any, label: str) -> float:
@@ -732,6 +768,8 @@ def _policy_items() -> tuple[tuple[str, Any], ...]:
         ("test_115_authorized", TEST_115_AUTHORIZED),
         ("work_eps", WORK_EPS),
         ("exact_claim_eps", EXACT_CLAIM_EPS),
+        ("clip_current_fast_bound_role", CLIP_CURRENT_FAST_BOUND_ROLE),
+        ("clip_output_fast_bound_role", CLIP_OUTPUT_FAST_BOUND_ROLE),
         ("descriptor_id", DESCRIPTOR_ID),
         ("image_normalization_mode", IMAGE_NORMALIZATION_MODE),
         ("image_normalization_std_floor", IMAGE_NORMALIZATION_STD_FLOOR),
@@ -806,7 +844,7 @@ def policy_sha256() -> str:
     return hashlib.sha256(canonical_policy_bytes()).hexdigest()
 
 
-C5B_POLICY_SHA256 = "50fb2f75a640e695eda30c4dff74c8eb72ebcfb6cd54974f26e9142c493ec2bd"
+C5B_POLICY_SHA256 = "4fa7a24c75a0558ddb8255ed8115d6d50c0396d31eb0fb691a9ef4668eb5958a"
 
 
 def assert_frozen_policy() -> None:

@@ -261,14 +261,30 @@ class IsolatedDecisionLoaderTest(unittest.TestCase):
             "corner_union_violation_count": 0,
             "digital_ten_nonzero_anchor_count": 3 * EXPECTED_CASE_COUNT,
         }
-        for mutation in (None, "missing", "corner"):
+        expected_operator_preflight = {
+            "validated_anchor_count": 3 * EXPECTED_CASE_COUNT,
+            "current_fast_below_work_eps_count": 0,
+            "output_fast_below_work_eps_count": 3 * EXPECTED_CASE_COUNT,
+            "output_fast_below_exact_claim_eps_count": 0,
+            "output_fast_cert_bound_min": 0.0010979427340438719,
+            "output_fast_cert_bound_max": 0.0010994449669079753,
+        }
+        for mutation in (None, "missing", "corner", "operator_missing", "operator_count"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                projection = {"case_ids": case_ids, "anchor_geometry_preflight": dict(expected_preflight)}
+                projection = {
+                    "case_ids": case_ids,
+                    "anchor_geometry_preflight": dict(expected_preflight),
+                    "anchor_clip_operator_preflight": dict(expected_operator_preflight),
+                }
                 if mutation == "missing":
                     projection.pop("anchor_geometry_preflight")
                 elif mutation == "corner":
                     projection["anchor_geometry_preflight"]["corner_union_violation_count"] = 1
+                elif mutation == "operator_missing":
+                    projection.pop("anchor_clip_operator_preflight")
+                elif mutation == "operator_count":
+                    projection["anchor_clip_operator_preflight"]["output_fast_below_work_eps_count"] = 0
                 source = {
                     "schema": SOURCE_SCHEMA,
                     "protocol_id": PROTOCOL_ID,
@@ -295,7 +311,7 @@ class IsolatedDecisionLoaderTest(unittest.TestCase):
                 if mutation is None:
                     load_contracts(root, source_sha, decision_sha)
                 else:
-                    with self.assertRaisesRegex(RuntimeError, "anchor geometry preflight"):
+                    with self.assertRaisesRegex(RuntimeError, "anchor (?:geometry|clip-operator) preflight"):
                         load_contracts(root, source_sha, decision_sha)
 
 
@@ -330,6 +346,24 @@ class DecisionMarkerContractTest(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
                 validate_decision_case_marker(mutation, contract, SHA_B, verify_heavy_bytes=False)
+
+    def test_output_fast_bound_is_diagnostic_but_current_bound_is_a_hard_precondition(self) -> None:
+        contract = decision_contract()
+        historical_rounding = decision_marker()
+        for row in historical_rounding["arms"]:
+            if row["proposal"]:
+                row["proposal"]["operator"]["output_fast_cert_bound"] = 0.001098948511791615
+        validate_decision_case_marker(historical_rounding, contract, SHA_B, verify_heavy_bytes=False)
+
+        bad_current = decision_marker()
+        bad_current["arms"][1]["proposal"]["operator"]["current_fast_cert_bound"] = 0.001099
+        with self.assertRaisesRegex(RuntimeError, "current fast certificate is below work_eps"):
+            validate_decision_case_marker(bad_current, contract, SHA_B, verify_heavy_bytes=False)
+
+        nonfinite_output = decision_marker()
+        nonfinite_output["arms"][1]["proposal"]["operator"]["output_fast_cert_bound"] = float("nan")
+        with self.assertRaisesRegex(RuntimeError, "output fast certificate .* must be a finite"):
+            validate_decision_case_marker(nonfinite_output, contract, SHA_B, verify_heavy_bytes=False)
 
     def test_corrupt_metric_envelopes_and_fold_witness_fail_closed(self) -> None:
         contract = decision_contract()
@@ -676,7 +710,7 @@ class FinalizerWiringTest(unittest.TestCase):
             self.assertEqual(branch["selected_arm_id"], SELECTABLE_ARM_IDS[0])
             self.assertNotEqual(branch["selected_arm_id"], DIAGNOSTIC_ARM_ID)
             summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
-            self.assertEqual(summary["schema"], "ctcf-search-c5b-summary-v2")
+            self.assertEqual(summary["schema"], "ctcf-search-c5b-summary-v3")
             self.assertAlmostEqual(summary["reference_c4"]["dice_mean"], 0.76)
             self.assertAlmostEqual(summary["reference_c4"]["digital_ten_union_percent_mean"], 2.0)
             self.assertEqual(len(summary["arms"]), 7)
@@ -687,7 +721,7 @@ class FinalizerWiringTest(unittest.TestCase):
             )
             self.assertAlmostEqual(summary["diagnostic_w2_vs_w1"]["digital_ten_union_percent_delta_mean"], 0.0)
             manifest = json.loads((root / "c5b_manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema"], "ctcf-search-c5b-run-manifest-v2")
+            self.assertEqual(manifest["schema"], "ctcf-search-c5b-run-manifest-v3")
             with (root / "per_arm.csv").open(encoding="utf-8", newline="") as stream:
                 per_arm = list(csv.DictReader(stream))
             self.assertEqual(len(per_arm), EXPECTED_CASE_COUNT * len(ARM_SPECS))
@@ -699,6 +733,7 @@ class RunnerSourceTest(unittest.TestCase):
         text = Path("tools/runners/eval/search_gate_c5b.sh").read_text(encoding="utf-8")
         self.assertIn("/tmp/search_gate_c5b.log", text)
         self.assertLess(text.index("decision-pilot"), text.index("decision-worker"))
+        self.assertIn(f"protocol_id=%s\\n' '{PROTOCOL_ID}'", text)
         self.assertIn("${RUN_ID}__${ATTEMPT_ID}__FAILED", text)
         self.assertIn("Test-115 was not accessed", text)
 

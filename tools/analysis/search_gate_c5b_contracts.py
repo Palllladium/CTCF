@@ -22,6 +22,7 @@ from tools.analysis.search_gate_c5b import (
     REFERENCE_ARM_ID,
     SCHEMA_VERSION,
     SELECTABLE_ARM_IDS,
+    validate_c5b_clip_operator,
     validate_c5b_geometry_bundle,
 )
 from tools.analysis.search_gate_c5b_source import (
@@ -49,6 +50,14 @@ _EXPECTED_ANCHOR_GEOMETRY_PREFLIGHT = {
     "central_invalid_count": 0,
     "corner_union_violation_count": 0,
     "digital_ten_nonzero_anchor_count": EXPECTED_CASE_COUNT * len(_SOURCE_ANCHOR_NAMES),
+}
+_EXPECTED_ANCHOR_CLIP_OPERATOR_PREFLIGHT = {
+    "validated_anchor_count": EXPECTED_CASE_COUNT * len(_SOURCE_ANCHOR_NAMES),
+    "current_fast_below_work_eps_count": 0,
+    "output_fast_below_work_eps_count": EXPECTED_CASE_COUNT * len(_SOURCE_ANCHOR_NAMES),
+    "output_fast_below_exact_claim_eps_count": 0,
+    "output_fast_cert_bound_min": 0.0010979427340438719,
+    "output_fast_cert_bound_max": 0.0010994449669079753,
 }
 
 
@@ -100,6 +109,15 @@ def _validate_anchor_geometry_preflight(projection: Mapping[str, Any]) -> None:
     if not isinstance(observed, Mapping) or dict(observed) != _EXPECTED_ANCHOR_GEOMETRY_PREFLIGHT:
         raise RuntimeError(
             f"C5b historical anchor geometry preflight changed: {observed!r} != {_EXPECTED_ANCHOR_GEOMETRY_PREFLIGHT!r}"
+        )
+
+
+def _validate_anchor_clip_operator_preflight(projection: Mapping[str, Any]) -> None:
+    observed = projection.get("anchor_clip_operator_preflight")
+    if not isinstance(observed, Mapping) or dict(observed) != _EXPECTED_ANCHOR_CLIP_OPERATOR_PREFLIGHT:
+        raise RuntimeError(
+            "C5b historical anchor clip-operator preflight changed: "
+            f"{observed!r} != {_EXPECTED_ANCHOR_CLIP_OPERATOR_PREFLIGHT!r}"
         )
 
 
@@ -219,6 +237,7 @@ def prepare_contracts(
 ) -> tuple[dict[str, Any], dict[str, Any], str, str]:
     projection = authenticate_c5_source(source_c5_dir, source_c5_heavy_root, verify_heavy_bytes=True)
     _validate_anchor_geometry_preflight(projection)
+    _validate_anchor_clip_operator_preflight(projection)
     case_ids = list(projection["case_ids"])
     if len(case_ids) != EXPECTED_CASE_COUNT:
         raise RuntimeError("C5b source is not the frozen validation-58 inventory")
@@ -329,6 +348,7 @@ def load_contracts(run_root: Path, source_sha256: str, decision_sha256: str) -> 
     if decision.get("case_ids") != source.get("source_projection", {}).get("case_ids"):
         raise RuntimeError("C5b source/decision case inventories disagree")
     _validate_anchor_geometry_preflight(source["source_projection"])
+    _validate_anchor_clip_operator_preflight(source["source_projection"])
     return source, decision
 
 
@@ -493,21 +513,11 @@ def validate_decision_case_marker(
                 for left, right in zip(shared_s4_proposal, shared, strict=True)
             ):
                 raise RuntimeError(f"C5b S4 postprocessing differs across amplitudes: {case_id}/{spec.arm_id}")
-            operator = proposal.get("operator") or {}
-            current_bound = _finite(
-                operator.get("current_fast_cert_bound"), f"{case_id}/{spec.arm_id} current certificate"
+            validate_c5b_clip_operator(
+                proposal.get("operator"),
+                expected_sweeps=spec.local_clip_sweeps,
+                label=f"{case_id}/{spec.arm_id}",
             )
-            output_bound = _finite(
-                operator.get("output_fast_cert_bound"), f"{case_id}/{spec.arm_id} output certificate"
-            )
-            if (
-                operator.get("operator") != "CERTIFIED_LOCAL_CLIP"
-                or operator.get("sweeps") != spec.local_clip_sweeps
-                or not math.isclose(float(operator.get("work_eps", math.nan)), 0.0011)
-                or current_bound < 0.0011
-                or output_bound < 0.0011
-            ):
-                raise RuntimeError(f"C5b clip operator changed: {case_id}/{spec.arm_id}")
         if spec.arm_id in (*SELECTABLE_ARM_IDS, DIAGNOSTIC_ARM_ID):
             proposal = row.get("proposal") or {}
             for key in ("clip_rms_retention", "rms_requested", "rms_realized"):

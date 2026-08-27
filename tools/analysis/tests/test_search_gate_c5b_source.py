@@ -71,6 +71,13 @@ class SuccessfulC5GoldenTest(unittest.TestCase):
         self.assertEqual(preflight["central_invalid_count"], 0)
         self.assertEqual(preflight["corner_union_violation_count"], 0)
         self.assertGreater(preflight["digital_ten_nonzero_anchor_count"], 0)
+        operator_preflight = projection["anchor_clip_operator_preflight"]
+        self.assertEqual(operator_preflight["validated_anchor_count"], 3 * 58)
+        self.assertEqual(operator_preflight["current_fast_below_work_eps_count"], 0)
+        self.assertEqual(operator_preflight["output_fast_below_work_eps_count"], 3 * 58)
+        self.assertEqual(operator_preflight["output_fast_below_exact_claim_eps_count"], 0)
+        self.assertAlmostEqual(operator_preflight["output_fast_cert_bound_min"], 0.0010979427340438719)
+        self.assertAlmostEqual(operator_preflight["output_fast_cert_bound_max"], 0.0010994449669079753)
         source_auth.assert_c5b_decision_projection_is_label_free(projection)
         serialized = json.dumps(projection, sort_keys=True).lower()
         self.assertNotIn(str(HISTORICAL_PRODUCT.resolve()).lower(), serialized)

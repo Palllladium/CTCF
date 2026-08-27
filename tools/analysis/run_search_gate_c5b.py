@@ -211,6 +211,9 @@ def prepare_stage(args: argparse.Namespace) -> int:
                 "n_cases": len(decision["case_ids"]),
                 "new_heavy_field_count": 4 * len(decision["case_ids"]),
                 "historical_anchor_geometry_preflight": source["source_projection"]["anchor_geometry_preflight"],
+                "historical_anchor_clip_operator_preflight": source["source_projection"][
+                    "anchor_clip_operator_preflight"
+                ],
             }
         )
     )

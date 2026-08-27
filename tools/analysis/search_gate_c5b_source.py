@@ -12,7 +12,13 @@ from typing import Any
 
 import numpy as np
 
-from tools.analysis.search_gate_c5b import SCHEMA_VERSION, validate_c5b_geometry_bundle
+from tools.analysis.search_gate_c5b import (
+    EXACT_CLAIM_EPS,
+    SCHEMA_VERSION,
+    WORK_EPS,
+    validate_c5b_clip_operator,
+    validate_c5b_geometry_bundle,
+)
 
 FROZEN_C5_RUN_ID = "C5_DEVELOPMENT_20260825T175112Z_242dde3281d2"
 FROZEN_C5_PROTOCOL_ID = "CTCF-SEARCH-GATE-C5-V1"
@@ -372,7 +378,7 @@ def _anchor_from_marker(
     expected_root: str,
     stride: int,
     amplitude: float,
-) -> tuple[dict[str, Any], Any]:
+) -> tuple[dict[str, Any], Any, Any]:
     arms = marker.get("arms")
     if not isinstance(arms, list):
         raise RuntimeError("Frozen C5 decision marker lacks its arm inventory")
@@ -392,9 +398,6 @@ def _anchor_from_marker(
         or proposal.get("stride_voxels") != stride
         or not math.isclose(float(proposal.get("post_rms_amplitude", math.nan)), amplitude)
         or not math.isclose(float(proposal.get("centre_beta", math.nan)), 0.0)
-        or operator.get("operator") != "CERTIFIED_LOCAL_CLIP"
-        or operator.get("sweeps") != 1
-        or not math.isclose(float(operator.get("work_eps", math.nan)), 0.0011)
         or exact.get("status") != "CERTIFIED"
         or exact.get("certified") is not True
         or exact.get("sha256") != field.get("array_sha256")
@@ -403,8 +406,13 @@ def _anchor_from_marker(
         or persistence.get("reloaded_array_sha256") != field.get("array_sha256")
     ):
         raise RuntimeError(f"Frozen C5 anchor provenance changed: {case_id}/{arm_id}")
+    operator_diagnostics = validate_c5b_clip_operator(
+        operator,
+        expected_sweeps=1,
+        label=f"frozen C5/{case_id}/{arm_id}",
+    )
     diagnostics = validate_c5b_geometry_bundle(row.get("geometry"), f"frozen C5/{case_id}/{arm_id}")
-    return _retag_record(field, expected_root), diagnostics
+    return _retag_record(field, expected_root), diagnostics, operator_diagnostics
 
 
 def assert_c5b_decision_projection_is_label_free(payload: Mapping[str, Any]) -> None:
@@ -456,6 +464,7 @@ def authenticate_c5_source(
     source_rms: dict[str, dict[str, Any]] = {}
     source_anchors: dict[str, dict[str, Any]] = {}
     anchor_geometry = []
+    anchor_operators = []
     unique_fields: set[tuple[str, str]] = set()
     for case_id in case_ids:
         initial_payload = decision["source_initial"][case_id] or {}
@@ -482,8 +491,11 @@ def authenticate_c5_source(
         }
         anchors = {}
         for name, (arm_id, owner, stride, amplitude) in _ANCHORS.items():
-            field, diagnostics = _anchor_from_marker(markers[case_id], case_id, arm_id, owner, stride, amplitude)
+            field, diagnostics, operator_diagnostics = _anchor_from_marker(
+                markers[case_id], case_id, arm_id, owner, stride, amplitude
+            )
             anchor_geometry.append(diagnostics)
+            anchor_operators.append(operator_diagnostics)
             anchors[name] = {
                 "field": field,
                 "parent_marker_sha256": _require_sha(
@@ -536,6 +548,18 @@ def authenticate_c5_source(
             "digital_ten_nonzero_anchor_count": sum(
                 row.digital_ten_union_violation_count > 0 for row in anchor_geometry
             ),
+        },
+        "anchor_clip_operator_preflight": {
+            "validated_anchor_count": len(anchor_operators),
+            "current_fast_below_work_eps_count": sum(
+                row.current_fast_cert_bound < WORK_EPS for row in anchor_operators
+            ),
+            "output_fast_below_work_eps_count": sum(row.output_fast_cert_bound < WORK_EPS for row in anchor_operators),
+            "output_fast_below_exact_claim_eps_count": sum(
+                row.output_fast_cert_bound < EXACT_CLAIM_EPS for row in anchor_operators
+            ),
+            "output_fast_cert_bound_min": min(row.output_fast_cert_bound for row in anchor_operators),
+            "output_fast_cert_bound_max": max(row.output_fast_cert_bound for row in anchor_operators),
         },
         "test_115_authorized": False,
         "test_split_accessed": False,
