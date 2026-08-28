@@ -20,6 +20,7 @@ from tools.analysis.run_search_gate_c7 import (
     _padding_support_mask,
     _validate_decision_case_marker,
     _validate_evaluation_case_marker,
+    _validate_zero_field_local_cost_parity,
     build_decision_barrier,
     build_parser,
 )
@@ -32,6 +33,8 @@ from tools.analysis.search_gate_c7 import (
     PROTOCOL_ID,
     REFERENCE_ARM_ID,
     SOURCE_CONTEXT_ARM_ID,
+    ZERO_FIELD_LOCAL_COST_PARITY_ATOL,
+    ZERO_FIELD_LOCAL_COST_PARITY_RTOL,
 )
 from tools.analysis.search_gate_c7_source import (
     BARRIER_SCHEMA,
@@ -117,6 +120,42 @@ class ParserContractTest(unittest.TestCase):
             torch.backends.cuda.matmul.allow_tf32 = prior_matmul
             torch.backends.cudnn.allow_tf32 = prior_cudnn
             torch.set_float32_matmul_precision(prior_precision)
+
+
+class DescriptorPilotParityTest(unittest.TestCase):
+    @staticmethod
+    def _volume(delta: float, *, sign_flip: bool = False) -> tuple[RawCandidateCostVolume, torch.Tensor]:
+        upstream = torch.linspace(-1.3, 1.3, 27, dtype=torch.float32).reshape(1, 27, 1, 1, 1)
+        runner_correlation = upstream + delta
+        costs = runner_correlation if sign_flip else -runner_correlation
+        valid = torch.ones_like(costs, dtype=torch.bool)
+        raw = RawCandidateCostVolume(
+            cost_id="pilot",
+            costs=costs,
+            valid=valid,
+            valid_count=valid.sum(dim=1, keepdim=True),
+            offsets=corrmlp_x1_offsets(1),
+        )
+        return raw, upstream
+
+    def test_observed_h100_grid_sample_roundoff_is_accepted(self) -> None:
+        raw, upstream = self._volume(5.042552947998047e-05)
+        maximum, count = _validate_zero_field_local_cost_parity(raw, upstream)
+        self.assertLessEqual(maximum, ZERO_FIELD_LOCAL_COST_PARITY_ATOL)
+        self.assertEqual(count, 27)
+
+    def test_larger_mismatch_and_wrong_sign_are_rejected(self) -> None:
+        raw, upstream = self._volume(ZERO_FIELD_LOCAL_COST_PARITY_ATOL * 1.01)
+        with self.assertRaisesRegex(RuntimeError, "parity failed"):
+            _validate_zero_field_local_cost_parity(raw, upstream)
+        raw, upstream = self._volume(0.0, sign_flip=True)
+        with self.assertRaisesRegex(RuntimeError, "parity failed"):
+            _validate_zero_field_local_cost_parity(raw, upstream)
+
+    def test_offset_reordering_is_rejected(self) -> None:
+        raw, upstream = self._volume(0.0)
+        with self.assertRaisesRegex(RuntimeError, "parity failed"):
+            _validate_zero_field_local_cost_parity(raw, upstream.flip(1))
 
 
 class C6AuthenticationTest(unittest.TestCase):
@@ -223,7 +262,7 @@ class DecisionBarrierTest(unittest.TestCase):
         }
         case_path.write_text(json.dumps({"status": "COMPLETE", "execution": execution}), encoding="utf-8")
         pilot = {
-            "schema": "ctcf-search-c7-descriptor-pilot-v1",
+            "schema": "ctcf-search-c7-descriptor-pilot-v2",
             "protocol_id": PROTOCOL_ID,
             "status": "PASS",
             "strict": True,
@@ -238,7 +277,10 @@ class DecisionBarrierTest(unittest.TestCase):
             "feature_nonconstant": True,
             "feature_deterministic": True,
             "feature_requires_grad": False,
-            "zero_field_local_cost_parity_max_abs": 0.0,
+            "zero_field_local_cost_parity_max_abs": 5.042552947998047e-05,
+            "zero_field_local_cost_parity_atol": ZERO_FIELD_LOCAL_COST_PARITY_ATOL,
+            "zero_field_local_cost_parity_rtol": ZERO_FIELD_LOCAL_COST_PARITY_RTOL,
+            "zero_field_local_cost_parity_basis": "ctcf_align_false_grid_sample_vs_corrmlp_integer_slices",
             "zero_field_local_cost_parity_support_count": 1,
             "zero_field_local_cost_sign_mapping": "negative_runner_cost_equals_positive_upstream_correlation",
             "zero_field_local_cost_offset_order_mapping": "identity_lexicographic_zyx_stride1",
@@ -312,6 +354,46 @@ class DecisionBarrierTest(unittest.TestCase):
             pilot_path = root / "descriptor_pilot.json"
             pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
             pilot["zero_field_local_cost_offset_order_mapping"] = "unverified_native_order"
+            pilot_path.write_text(json.dumps(pilot), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "pilot"):
+                build_decision_barrier(root, decision, decision_sha, "attempt")
+
+    def test_barrier_accepts_observed_h100_roundoff_but_rejects_a_larger_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            decision, decision_sha, _ = self._fixture(root)
+            with mock.patch(
+                "tools.analysis.run_search_gate_c7._validate_decision_case_marker",
+                return_value={
+                    "execution": {
+                        "attempt_id": "attempt",
+                        "shard_index": 0,
+                        "physical_gpu": "0",
+                        "host": "host",
+                        "device": "cuda:0",
+                        "gpu_name": "gpu",
+                    }
+                },
+            ):
+                build_decision_barrier(root, decision, decision_sha, "attempt")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            decision, decision_sha, _ = self._fixture(root)
+            pilot_path = root / "descriptor_pilot.json"
+            pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
+            pilot["zero_field_local_cost_parity_max_abs"] = ZERO_FIELD_LOCAL_COST_PARITY_ATOL * 1.01
+            pilot_path.write_text(json.dumps(pilot), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "pilot"):
+                build_decision_barrier(root, decision, decision_sha, "attempt")
+
+    def test_barrier_rejects_a_tampered_parity_tolerance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            decision, decision_sha, _ = self._fixture(root)
+            pilot_path = root / "descriptor_pilot.json"
+            pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
+            pilot["zero_field_local_cost_parity_atol"] *= 10.0
             pilot_path.write_text(json.dumps(pilot), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "pilot"):
                 build_decision_barrier(root, decision, decision_sha, "attempt")

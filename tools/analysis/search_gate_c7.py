@@ -47,6 +47,8 @@ DESCRIPTOR_CONV_PADDING_MARGIN = 2
 DESCRIPTOR_EXTRACTION = "same_frozen_encoder_convblock1_called_separately_for_fixed_and_moving"
 DESCRIPTOR_PREPROCESSING = "raw_dataset_volume_float32_no_ctcf_masked_zscore"
 DESCRIPTOR_DTYPE = "float32_no_autocast_no_tf32"
+ZERO_FIELD_LOCAL_COST_PARITY_ATOL = 1e-4
+ZERO_FIELD_LOCAL_COST_PARITY_RTOL = 0.0
 FLOAT32_BACKEND_CONTRACT = {
     "cuda_matmul_allow_tf32": False,
     "cudnn_allow_tf32": False,
@@ -383,9 +385,20 @@ def policy_dict() -> dict[str, Any]:
             "cost": DESCRIPTOR_COST,
             "tested_unit": "corrmlp_x1_representation_plus_native_negative_product_cost_bundle",
             "sampling_semantics": (
-                "ctcf_sample_at_psi; pilot proves only zero-field local-cost parity with CorrMLP Correlation, "
-                "not native CorrMLP warp-path parity"
+                "ctcf_sample_at_psi; pilot bounds zero-field local-cost agreement with CorrMLP Correlation "
+                "under the expected FP32 difference between normalized-coordinate trilinear sampling and "
+                "native integer slicing; it does not claim native CorrMLP warp-path parity"
             ),
+            "zero_field_local_cost_parity": {
+                "absolute_tolerance": ZERO_FIELD_LOCAL_COST_PARITY_ATOL,
+                "relative_tolerance": ZERO_FIELD_LOCAL_COST_PARITY_RTOL,
+                "scope": "all_27_offsets_on_the_frozen_interior_support",
+                "rationale": (
+                    "CorrMLP Correlation uses integer tensor slices while C7 must use align_corners_false "
+                    "grid_sample for subsequent noninteger Psi; normalized FP32 coordinates are not bit-exact "
+                    "integer indices"
+                ),
+            },
             "cost_standardization": COST_STANDARDIZATION,
             "hybrid_fusion": HYBRID_FUSION,
             "weights_trainable": False,
@@ -480,7 +493,7 @@ def policy_sha256() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-C7_POLICY_SHA256 = "4cb19d2b3e080691d7408d611123c72fb501e10f0f64520dfe4ce3f9d5007481"
+C7_POLICY_SHA256 = "daca934f080c0b5b46d428183914b6bbfc81d422322e74c4a65fb55e60cd95ea"
 
 
 def assert_frozen_policy() -> None:
@@ -534,6 +547,8 @@ __all__ = [
     "RISK_LABEL_CI_LOW_VS_C4_MIN_STRICT",
     "RISK_LABEL_IDS",
     "SELECTABLE_ARM_IDS",
+    "ZERO_FIELD_LOCAL_COST_PARITY_ATOL",
+    "ZERO_FIELD_LOCAL_COST_PARITY_RTOL",
     "ArmAssessment",
     "ArmSpec",
     "assert_frozen_policy",

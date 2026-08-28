@@ -60,6 +60,8 @@ from tools.analysis.search_gate_c7 import (
     STANDARDIZATION_FLOOR,
     TEST_115_AUTHORIZED,
     WORK_EPS,
+    ZERO_FIELD_LOCAL_COST_PARITY_ATOL,
+    ZERO_FIELD_LOCAL_COST_PARITY_RTOL,
     assert_frozen_policy,
     assess_arm,
     policy_dict,
@@ -1098,6 +1100,9 @@ def _load_descriptor_pilot(run_root: Path, decision_sha: str, expected_sha: str 
         "feature_deterministic",
         "feature_requires_grad",
         "zero_field_local_cost_parity_max_abs",
+        "zero_field_local_cost_parity_atol",
+        "zero_field_local_cost_parity_rtol",
+        "zero_field_local_cost_parity_basis",
         "zero_field_local_cost_parity_support_count",
         "zero_field_local_cost_sign_mapping",
         "zero_field_local_cost_offset_order_mapping",
@@ -1110,7 +1115,7 @@ def _load_descriptor_pilot(run_root: Path, decision_sha: str, expected_sha: str 
     }
     if (
         set(payload) != expected_keys
-        or payload.get("schema") != "ctcf-search-c7-descriptor-pilot-v1"
+        or payload.get("schema") != "ctcf-search-c7-descriptor-pilot-v2"
         or payload.get("protocol_id") != PROTOCOL_ID
         or payload.get("status") != "PASS"
         or payload.get("strict") is not True
@@ -1145,7 +1150,10 @@ def _load_descriptor_pilot(run_root: Path, decision_sha: str, expected_sha: str 
         or isinstance(maximum, bool)
         or not isinstance(maximum, (int, float))
         or not math.isfinite(float(maximum))
-        or float(maximum) > 2e-6
+        or payload.get("zero_field_local_cost_parity_atol") != ZERO_FIELD_LOCAL_COST_PARITY_ATOL
+        or payload.get("zero_field_local_cost_parity_rtol") != ZERO_FIELD_LOCAL_COST_PARITY_RTOL
+        or payload.get("zero_field_local_cost_parity_basis") != "ctcf_align_false_grid_sample_vs_corrmlp_integer_slices"
+        or float(maximum) > ZERO_FIELD_LOCAL_COST_PARITY_ATOL
         or payload.get("labels_loaded_to_device") is not False
         or payload.get("test_115_authorized") is not False
         or payload.get("test_split_accessed") is not False
@@ -1181,6 +1189,32 @@ def _write_descriptor_preflight(
             },
         },
     )
+
+
+def _validate_zero_field_local_cost_parity(
+    raw: RawCandidateCostVolume,
+    upstream: torch.Tensor,
+) -> tuple[float, int]:
+    if upstream.shape != raw.costs.shape or upstream.dtype != raw.costs.dtype or upstream.device != raw.costs.device:
+        raise RuntimeError("C7 CorrMLP upstream Correlation parity tensors are incompatible")
+    runner_values = -raw.costs.masked_select(raw.valid)
+    upstream_values = upstream.masked_select(raw.valid)
+    comparison = (runner_values - upstream_values).abs()
+    if comparison.numel() == 0 or not bool(torch.isfinite(comparison).all()):
+        raise RuntimeError("C7 CorrMLP upstream parity support is empty or non-finite")
+    maximum = float(comparison.max())
+    if not torch.allclose(
+        runner_values,
+        upstream_values,
+        atol=ZERO_FIELD_LOCAL_COST_PARITY_ATOL,
+        rtol=ZERO_FIELD_LOCAL_COST_PARITY_RTOL,
+    ):
+        raise RuntimeError(
+            "C7 CorrMLP upstream Correlation parity failed: "
+            f"max_abs={maximum}, atol={ZERO_FIELD_LOCAL_COST_PARITY_ATOL}, "
+            f"rtol={ZERO_FIELD_LOCAL_COST_PARITY_RTOL}"
+        )
+    return maximum, int(comparison.numel())
 
 
 def build_decision_barrier(run_root: Path, decision: Mapping[str, Any], decision_sha: str, attempt_id: str) -> str:
@@ -2200,14 +2234,9 @@ def _descriptor_pilot_checks(
     mask = geometry_mask(tuple(zero.shape[-3:]), COMMON_EVIDENCE_COLLAR, device)
     raw = _common_padding_support(fixed_first, moving, zero, mask, 1)
     upstream = Correlation(max_disp=1, use_checkpoint=False).to(device).eval()(fixed_first, moving)
-    comparison = (-raw.costs - upstream).abs().masked_select(raw.valid)
-    if comparison.numel() == 0 or not bool(torch.isfinite(comparison).all()):
-        raise RuntimeError("C7 CorrMLP upstream parity support is empty or non-finite")
-    maximum = float(comparison.max())
-    if maximum > 2e-6:
-        raise RuntimeError(f"C7 CorrMLP upstream Correlation parity failed: max_abs={maximum}")
+    maximum, support_count = _validate_zero_field_local_cost_parity(raw, upstream)
     payload = {
-        "schema": "ctcf-search-c7-descriptor-pilot-v1",
+        "schema": "ctcf-search-c7-descriptor-pilot-v2",
         "protocol_id": PROTOCOL_ID,
         "status": "PASS",
         "strict": True,
@@ -2223,7 +2252,10 @@ def _descriptor_pilot_checks(
         "feature_deterministic": True,
         "feature_requires_grad": False,
         "zero_field_local_cost_parity_max_abs": maximum,
-        "zero_field_local_cost_parity_support_count": int(comparison.numel()),
+        "zero_field_local_cost_parity_atol": ZERO_FIELD_LOCAL_COST_PARITY_ATOL,
+        "zero_field_local_cost_parity_rtol": ZERO_FIELD_LOCAL_COST_PARITY_RTOL,
+        "zero_field_local_cost_parity_basis": "ctcf_align_false_grid_sample_vs_corrmlp_integer_slices",
+        "zero_field_local_cost_parity_support_count": support_count,
         "zero_field_local_cost_sign_mapping": "negative_runner_cost_equals_positive_upstream_correlation",
         "zero_field_local_cost_offset_order_mapping": "identity_lexicographic_zyx_stride1",
         "sampling_scope": "zero_field_local_cost_only",

@@ -108,7 +108,7 @@ def assessment(arm_id: str = SELECTABLE_ARM_IDS[0], **overrides) -> ArmAssessmen
 
 class C7PolicyTest(unittest.TestCase):
     def test_policy_is_frozen(self) -> None:
-        self.assertEqual(policy_sha256(), "4cb19d2b3e080691d7408d611123c72fb501e10f0f64520dfe4ce3f9d5007481")
+        self.assertEqual(policy_sha256(), "daca934f080c0b5b46d428183914b6bbfc81d422322e74c4a65fb55e60cd95ea")
         assert_frozen_policy()
 
     def test_arm_inventory_separates_historical_context_from_matched_control(self) -> None:
