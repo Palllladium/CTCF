@@ -246,14 +246,19 @@ def authenticate_c6_source(
         or decision.get("policy_sha256") != SOURCE_C6_POLICY_SHA256
     ):
         raise RuntimeError("C6 source contracts or case inventory changed")
-    supplied_roots = {
+    frozen_c6_roots = {
         "source_c3_heavy": source_c3_heavy.resolve(),
         "source_c4_heavy": source_c4_heavy.resolve(),
         "target_c6_heavy": source_c6_heavy.resolve(),
     }
     observed_roots = {key: Path(str(value)).resolve() for key, value in (decision.get("roots") or {}).items()}
-    if supplied_roots != observed_roots:
-        raise RuntimeError(f"C6 heavy roots differ from its frozen contract: {supplied_roots} != {observed_roots}")
+    if frozen_c6_roots != observed_roots:
+        raise RuntimeError(f"C6 heavy roots differ from its frozen contract: {frozen_c6_roots} != {observed_roots}")
+    projected_roots = {
+        "source_c3_heavy": source_c3_heavy.resolve(),
+        "source_c4_heavy": source_c4_heavy.resolve(),
+        "source_c6_heavy": source_c6_heavy.resolve(),
+    }
 
     c4_anchors: dict[str, Any] = {}
     c6_context: dict[str, Any] = {}
@@ -277,18 +282,18 @@ def authenticate_c6_source(
             "utility": context["utility"],
         }
         if verify_heavy_bytes:
-            _verify_source_record(reference_record, supplied_roots, array=True)
-            _verify_source_record(context_record, supplied_roots, array=True)
+            _verify_source_record(reference_record, projected_roots, array=True)
+            _verify_source_record(context_record, projected_roots, array=True)
 
     image_inputs = decision["image_inputs"]
     source_initial = decision["source_initial"]
     source_historical = decision["source_historical"]
     if verify_heavy_bytes:
         for record in image_inputs.values():
-            _verify_source_record(record, supplied_roots, array=False)
+            _verify_source_record(record, projected_roots, array=False)
         for case_id in case_ids:
-            _verify_source_record(source_initial[case_id]["field"], supplied_roots, array=True)
-            _verify_source_record(source_historical[case_id]["raw_conf_requested_field"], supplied_roots, array=True)
+            _verify_source_record(source_initial[case_id]["field"], projected_roots, array=True)
+            _verify_source_record(source_historical[case_id]["raw_conf_requested_field"], projected_roots, array=True)
 
     return {
         "schema": "ctcf-search-c7-authenticated-c6-projection-v1",

@@ -169,6 +169,38 @@ class C6AuthenticationTest(unittest.TestCase):
         self.assertFalse(any("dice" in key for key in observed))
         self.assertFalse(any("evaluation" in key and key != "evaluation_device" for key in observed))
 
+    def test_historical_c6_target_root_is_projected_as_a_c7_source_root(self) -> None:
+        root = Path("results/search_gate_c6/C6_DEVELOPMENT_20260827T211512Z_c0a59d1c04af")
+        if not root.is_dir():
+            self.skipTest("historical C6 compact product is absent")
+        decision = json.loads((root / "decision_contract.json").read_text(encoding="utf-8"))
+        owner_roots = {key: Path(value).resolve() for key, value in decision["roots"].items()}
+        observed_root_ids: set[str] = set()
+
+        def verify_owner(record, projected_roots, *, array):
+            del array
+            root_id = str(record["root_id"])
+            self.assertIn(root_id, projected_roots)
+            observed_root_ids.add(root_id)
+            if root_id == "source_c6_heavy":
+                self.assertEqual(projected_roots[root_id], owner_roots["target_c6_heavy"])
+
+        with mock.patch.object(c7_source, "_verify_source_record", side_effect=verify_owner):
+            snapshot = authenticate_c6_source(
+                root,
+                owner_roots["source_c3_heavy"],
+                owner_roots["source_c4_heavy"],
+                owner_roots["target_c6_heavy"],
+                verify_heavy_bytes=True,
+            )
+
+        self.assertEqual(
+            set(snapshot["roots"]),
+            {"source_c3_heavy", "source_c4_heavy", "source_c6_heavy"},
+        )
+        self.assertIn("source_c6_heavy", observed_root_ids)
+        self.assertNotIn("target_c6_heavy", observed_root_ids)
+
 
 class DecisionBarrierTest(unittest.TestCase):
     def _fixture(self, root: Path) -> tuple[dict[str, object], str, Path]:
