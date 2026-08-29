@@ -14,7 +14,7 @@ from experiments.stage5.safety import COLLAR_WIDTH
 from models.CTCF.controller import Stage5SpatialController
 from tools.analysis.stage5.primitives import canonical_sha256, require_finite, require_int
 
-STAGE5_U0_FIXED_EPOCH = 500
+STAGE5_U0_FIXED_EPOCH = 400
 STAGE5_CONTROLLER_FIXED_EPOCH = 100
 STAGE5_SEEDS = (0, 1, 2)
 

@@ -13,7 +13,7 @@ import torch
 
 import experiments.stage5.config as stage5_config
 import experiments.stage5.runtime as runtime
-from experiments.stage5.losses import ControllerLossConfig
+from experiments.stage5.losses import ControllerLossConfig, controller_objective
 from experiments.stage5.safety import prepare_initial_field
 from models.CTCF.controller import Stage5SpatialController
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
@@ -27,16 +27,16 @@ GIT_SHA = "d" * 40
 
 class RuntimeConfigTest(unittest.TestCase):
     def test_frozen_horizons_and_mamba_contract(self) -> None:
-        self.assertEqual(runtime.U0TrainingConfig().fixed_epoch, 500)
+        self.assertEqual(runtime.U0TrainingConfig().fixed_epoch, 400)
         self.assertEqual(runtime.ControllerTrainingConfig().fixed_epoch, 100)
-        with self.assertRaisesRegex(ValueError, "500-epoch"):
-            runtime.U0TrainingConfig(fixed_epoch=499)
+        with self.assertRaisesRegex(ValueError, "400-epoch"):
+            runtime.U0TrainingConfig(fixed_epoch=399)
         with self.assertRaisesRegex(ValueError, "Mamba"):
             runtime.U0TrainingConfig(config_key="CTCF-CascadeA-VM")
         with self.assertRaisesRegex(ValueError, "100-epoch"):
             runtime.ControllerTrainingConfig(fixed_epoch=99)
-        with self.assertRaisesRegex(ValueError, "500-epoch"):
-            runtime.U0TrainingConfig(fixed_epoch=500.0)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "400-epoch"):
+            runtime.U0TrainingConfig(fixed_epoch=400.0)  # type: ignore[arg-type]
         with self.assertRaisesRegex(ValueError, "Mamba"):
             runtime.U0TrainingConfig(time_steps=6.0)  # type: ignore[arg-type]
         with self.assertRaisesRegex(ValueError, "100-epoch"):
@@ -97,6 +97,58 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("commit_controller_delta", source)
         self.assertGreaterEqual(source.count("load_training_state"), 2)
         self.assertGreaterEqual(source.count("_write_checkpoint_with_sidecar"), 2)
+
+    def test_controller_objective_stays_fp32_inside_outer_autocast(self) -> None:
+        image_shape = (1, 1, 9, 9, 9)
+        flow_shape = (1, 3, 9, 9, 9)
+        fixed = torch.rand(image_shape)
+        moving = torch.rand(image_shape)
+        psi = torch.zeros(flow_shape)
+        delta_forward = torch.zeros(flow_shape, requires_grad=True)
+        delta_reverse = torch.zeros(flow_shape, requires_grad=True)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            loss, logs = controller_objective(
+                fixed,
+                moving,
+                moving,
+                fixed,
+                psi,
+                psi,
+                delta_forward,
+                delta_reverse,
+                config=ControllerLossConfig(),
+            )
+        self.assertEqual(loss.dtype, torch.float32)
+        self.assertTrue(all(__import__("math").isfinite(value) for value in logs.values()))
+        loss.backward()
+        self.assertEqual(delta_forward.grad.dtype, torch.float32)
+        self.assertTrue(bool(torch.isfinite(delta_forward.grad).all()))
+
+    def test_controller_objective_names_the_nonfinite_component(self) -> None:
+        class NonfiniteNcc:
+            def __init__(self, *, win: tuple[int, int, int]) -> None:
+                self.win = win
+
+            def __call__(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+                return first.new_tensor(float("nan"))
+
+        image = torch.zeros(1, 1, 5, 5, 5)
+        flow = torch.zeros(1, 3, 5, 5, 5)
+        with (
+            mock.patch("experiments.stage5.losses.NCCVxm", NonfiniteNcc),
+            self.assertRaisesRegex(FloatingPointError, "term ncc"),
+        ):
+            controller_objective(
+                image,
+                image,
+                image,
+                image,
+                flow,
+                flow,
+                flow,
+                flow,
+                config=ControllerLossConfig(),
+            )
 
     def test_cuda_entrypoints_fail_before_touching_data(self) -> None:
         common = {
@@ -248,7 +300,7 @@ class RuntimeIntegrityTest(unittest.TestCase):
             "epochs": [{"epoch": 1, "pair_schedule_sha256": SHA_A, "pairs": 294, "metrics": {"ncc": 1.0}}],
         }
         payload = {
-            "fixed_epoch": 500,
+            "fixed_epoch": 400,
             "git_head": GIT_SHA,
             "epoch_completed": 1,
             "pair_schedule_sha256": SHA_A,

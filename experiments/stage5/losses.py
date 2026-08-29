@@ -49,6 +49,12 @@ def _composition_residual(first: torch.Tensor, second: torch.Tensor) -> torch.Te
     return first + sample_at_psi(second, first)
 
 
+def _require_finite(name: str, value: torch.Tensor) -> torch.Tensor:
+    if value.numel() != 1 or not bool(torch.isfinite(value).all()):
+        raise FloatingPointError(f"Stage5 controller objective term {name} became non-finite")
+    return value
+
+
 def controller_objective(
     fixed_forward: torch.Tensor,
     moving_forward: torch.Tensor,
@@ -73,26 +79,42 @@ def controller_objective(
     )
     if any(not bool(torch.isfinite(value).all()) for value in tensors):
         raise FloatingPointError("Stage5 objective received a non-finite tensor")
-    requested_forward = psi_forward + delta_forward
-    requested_reverse = psi_reverse + delta_reverse
-    warped_forward = sample_at_psi(moving_forward, requested_forward)
-    warped_reverse = sample_at_psi(moving_reverse, requested_reverse)
-    ncc = NCCVxm(win=(config.ncc_window,) * 3)
-    similarity = 0.5 * (ncc(warped_forward, fixed_forward) + ncc(warped_reverse, fixed_reverse))
-    diffusion = 0.5 * (_diffusion(delta_forward) + _diffusion(delta_reverse))
-    inverse = 0.5 * (
-        _composition_residual(requested_forward, requested_reverse).square().mean()
-        + _composition_residual(requested_reverse, requested_forward).square().mean()
-    )
-    magnitude = 0.5 * (delta_forward.square().mean() + delta_reverse.square().mean())
-    loss = (
-        config.ncc_weight * similarity
-        + config.diffusion_weight * diffusion
-        + config.inverse_consistency_weight * inverse
-        + config.magnitude_weight * magnitude
-    )
-    if not bool(torch.isfinite(loss)):
-        raise FloatingPointError("Stage5 controller loss became non-finite")
+    # The controller itself may run under CUDA FP16 autocast, but the objective must
+    # not. NCCVxm squares local window sums; for the frozen 7^3 window even ordinary
+    # normalized inputs can produce intermediates above the FP16 maximum (65504).
+    # Casting here keeps one numerical contract for smoke and full training while
+    # preserving gradients from the FP32 objective back through the AMP controller.
+    with torch.autocast(device_type=fixed_forward.device.type, enabled=False):
+        (
+            fixed_forward,
+            moving_forward,
+            fixed_reverse,
+            moving_reverse,
+            psi_forward,
+            psi_reverse,
+            delta_forward,
+            delta_reverse,
+        ) = (value.float() for value in tensors)
+        requested_forward = psi_forward + delta_forward
+        requested_reverse = psi_reverse + delta_reverse
+        warped_forward = sample_at_psi(moving_forward, requested_forward)
+        warped_reverse = sample_at_psi(moving_reverse, requested_reverse)
+        ncc = NCCVxm(win=(config.ncc_window,) * 3)
+        ncc_forward = ncc(warped_forward, fixed_forward)
+        ncc_reverse = ncc(warped_reverse, fixed_reverse)
+        similarity = _require_finite("ncc", 0.5 * (ncc_forward + ncc_reverse))
+        diffusion = _require_finite("diffusion", 0.5 * (_diffusion(delta_forward) + _diffusion(delta_reverse)))
+        forward_composition_err = _composition_residual(requested_forward, requested_reverse).square().mean()
+        reverse_composition_err = _composition_residual(requested_reverse, requested_forward).square().mean()
+        inverse = _require_finite("inverse_consistency", 0.5 * (forward_composition_err + reverse_composition_err))
+        magnitude = _require_finite("magnitude", 0.5 * (delta_forward.square().mean() + delta_reverse.square().mean()))
+        loss = _require_finite(
+            "loss",
+            config.ncc_weight * similarity
+            + config.diffusion_weight * diffusion
+            + config.inverse_consistency_weight * inverse
+            + config.magnitude_weight * magnitude,
+        )
     logs = {
         "loss": float(loss.detach().item()),
         "ncc": float(similarity.detach().item()),

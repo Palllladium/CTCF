@@ -20,7 +20,7 @@ class Stage5FrozenSubcontractTest(unittest.TestCase):
     def test_training_contracts_are_label_free_fixed_endpoints(self) -> None:
         u0 = u0_training_contract(U0TrainingConfig())
         controller = controller_training_contract(ControllerTrainingConfig())
-        self.assertEqual(u0["fixed_endpoint_epoch"], 500)
+        self.assertEqual(u0["fixed_endpoint_epoch"], 400)
         self.assertEqual(controller["fixed_endpoint_epoch"], 100)
         self.assertFalse(u0["labels_reachable"])
         self.assertFalse(controller["labels_reachable"])
