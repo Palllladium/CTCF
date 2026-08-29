@@ -258,6 +258,43 @@ def _fail_closed_raw_events(source: Path, relative_path: str) -> Iterable[bytes]
         yield raw_event
 
 
+def _update_tag_stats(
+    tag_stats: dict[str, dict[str, Any]],
+    tag: str,
+    step: int,
+    wall_time: float,
+    numeric: float,
+) -> None:
+    """Fold one scalar point into its tag's running record for this event file."""
+    stats = tag_stats.setdefault(
+        tag,
+        {
+            "count": 0,
+            "min_step": None,
+            "max_step": None,
+            "first_wall_time": None,
+            "last_wall_time": None,
+            "finite_points": 0,
+            "nonfinite_points": 0,
+            "min_value": None,
+            "max_value": None,
+        },
+    )
+    stats["count"] += 1
+    stats["min_step"] = step if stats["min_step"] is None else min(stats["min_step"], step)
+    stats["max_step"] = step if stats["max_step"] is None else max(stats["max_step"], step)
+    stats["first_wall_time"] = (
+        wall_time if stats["first_wall_time"] is None else min(stats["first_wall_time"], wall_time)
+    )
+    stats["last_wall_time"] = wall_time if stats["last_wall_time"] is None else max(stats["last_wall_time"], wall_time)
+    if math.isfinite(numeric):
+        stats["finite_points"] += 1
+        stats["min_value"] = numeric if stats["min_value"] is None else min(stats["min_value"], numeric)
+        stats["max_value"] = numeric if stats["max_value"] is None else max(stats["max_value"], numeric)
+    else:
+        stats["nonfinite_points"] += 1
+
+
 def _scan_source(task: tuple[str, str, int, str | None]) -> dict[str, Any]:
     """Hash and stream one event file; optionally write a headerless gzip member."""
     source_text, repo_root_text, ordinal, fragment_text = task
@@ -342,52 +379,22 @@ def _scan_source(task: tuple[str, str, int, str | None]) -> dict[str, Any]:
                         wall_time_hex,
                         value_hex,
                     )
-                    if writer is not None:
-                        writer.writerow(
-                            (
-                                event_file_id,
-                                ordinal,
-                                record_index,
-                                value_index,
-                                relative_path,
-                                value.tag,
-                                step,
-                                wall_time_utc,
-                                wall_time_hex,
-                                value_decimal,
-                                value_hex,
-                            ),
-                        )
-
-                    stats = tag_stats.setdefault(
+                    scalar_row = (
+                        event_file_id,
+                        ordinal,
+                        record_index,
+                        value_index,
+                        relative_path,
                         value.tag,
-                        {
-                            "count": 0,
-                            "min_step": None,
-                            "max_step": None,
-                            "first_wall_time": None,
-                            "last_wall_time": None,
-                            "finite_points": 0,
-                            "nonfinite_points": 0,
-                            "min_value": None,
-                            "max_value": None,
-                        },
+                        step,
+                        wall_time_utc,
+                        wall_time_hex,
+                        value_decimal,
+                        value_hex,
                     )
-                    stats["count"] += 1
-                    stats["min_step"] = step if stats["min_step"] is None else min(stats["min_step"], step)
-                    stats["max_step"] = step if stats["max_step"] is None else max(stats["max_step"], step)
-                    stats["first_wall_time"] = (
-                        wall_time if stats["first_wall_time"] is None else min(stats["first_wall_time"], wall_time)
-                    )
-                    stats["last_wall_time"] = (
-                        wall_time if stats["last_wall_time"] is None else max(stats["last_wall_time"], wall_time)
-                    )
-                    if math.isfinite(numeric):
-                        stats["finite_points"] += 1
-                        stats["min_value"] = numeric if stats["min_value"] is None else min(stats["min_value"], numeric)
-                        stats["max_value"] = numeric if stats["max_value"] is None else max(stats["max_value"], numeric)
-                    else:
-                        stats["nonfinite_points"] += 1
+                    if writer is not None:
+                        writer.writerow(scalar_row)
+                    _update_tag_stats(tag_stats, value.tag, step, wall_time, numeric)
                 elif value_kind == "image":
                     image_points += 1
                     image_tags[value.tag] += 1
@@ -477,41 +484,52 @@ def _inventory_rows(results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
+def _merge_tag_stats(
+    aggregate: dict[str, dict[str, Any]],
+    tag: str,
+    local: Mapping[str, Any],
+    source: str,
+    run_dir: str,
+) -> None:
+    """Fold one file's record for one tag into the corpus-wide record for that tag."""
+    stats = aggregate.setdefault(
+        tag,
+        {
+            "scalar_points": 0,
+            "source_files": set(),
+            "run_directories": set(),
+            "min_step": None,
+            "max_step": None,
+            "first_wall_time": None,
+            "last_wall_time": None,
+            "finite_points": 0,
+            "nonfinite_points": 0,
+            "min_value": None,
+            "max_value": None,
+        },
+    )
+    stats["scalar_points"] += int(local["count"])
+    stats["source_files"].add(source)
+    stats["run_directories"].add(run_dir)
+    for key in ("min_step", "first_wall_time", "min_value"):
+        value = local[key]
+        if value is not None:
+            stats[key] = value if stats[key] is None else min(stats[key], value)
+    for key in ("max_step", "last_wall_time", "max_value"):
+        value = local[key]
+        if value is not None:
+            stats[key] = value if stats[key] is None else max(stats[key], value)
+    stats["finite_points"] += int(local["finite_points"])
+    stats["nonfinite_points"] += int(local["nonfinite_points"])
+
+
 def _tag_summary_rows(results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     aggregate: dict[str, dict[str, Any]] = {}
     for item in results:
         source = str(item["source_relative_path"])
         run_dir = str(Path(source).parent.as_posix())
         for tag, local in item["tag_stats"].items():
-            stats = aggregate.setdefault(
-                tag,
-                {
-                    "scalar_points": 0,
-                    "source_files": set(),
-                    "run_directories": set(),
-                    "min_step": None,
-                    "max_step": None,
-                    "first_wall_time": None,
-                    "last_wall_time": None,
-                    "finite_points": 0,
-                    "nonfinite_points": 0,
-                    "min_value": None,
-                    "max_value": None,
-                },
-            )
-            stats["scalar_points"] += int(local["count"])
-            stats["source_files"].add(source)
-            stats["run_directories"].add(run_dir)
-            for key in ("min_step", "first_wall_time", "min_value"):
-                value = local[key]
-                if value is not None:
-                    stats[key] = value if stats[key] is None else min(stats[key], value)
-            for key in ("max_step", "last_wall_time", "max_value"):
-                value = local[key]
-                if value is not None:
-                    stats[key] = value if stats[key] is None else max(stats[key], value)
-            stats["finite_points"] += int(local["finite_points"])
-            stats["nonfinite_points"] += int(local["nonfinite_points"])
+            _merge_tag_stats(aggregate, tag, local, source, run_dir)
 
     rows = []
     for tag, stats in sorted(aggregate.items()):
@@ -636,6 +654,41 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
         raise
 
 
+def _validate_scalar_row(
+    row: Mapping[str, str],
+    item: Mapping[str, Any],
+    source_path: str,
+    previous_key: tuple[int, int, int] | None,
+) -> tuple[int, int, int]:
+    """Check one exported scalar row against its source record; return its ordering key."""
+    if row["event_file_id"] != item["event_file_id"]:
+        raise ExportError(f"event_file_id mismatch for {source_path}")
+    ordinal = int(row["event_file_ordinal"])
+    record_index = int(row["event_record_index"])
+    value_index = int(row["summary_value_index"])
+    if ordinal != int(item["event_file_ordinal"]):
+        raise ExportError(f"event_file_ordinal mismatch for {source_path}")
+    key = (ordinal, record_index, value_index)
+    if previous_key is not None and key <= previous_key:
+        raise ExportError(f"Scalar row order is not strictly increasing at {key}")
+
+    wall_time = struct.unpack(">d", bytes.fromhex(row["wall_time_ieee754_hex"]))[0]
+    if row["wall_time_utc"] != _wall_time_utc(wall_time):
+        raise ExportError(f"wall_time representation mismatch for {source_path} at {key}")
+    value_bytes = bytes.fromhex(row["value_ieee754_hex"])
+    if len(value_bytes) != 4:
+        raise ExportError(f"Invalid float32 hex for {source_path} at {key}")
+    exact_value = struct.unpack(">f", value_bytes)[0]
+    decimal_value = float(row["value_float32"])
+    # The hex column is authoritative; NaN is compared by predicate because it never equals itself.
+    if math.isnan(exact_value):
+        if not math.isnan(decimal_value):
+            raise ExportError(f"NaN decimal mismatch for {source_path} at {key}")
+    elif struct.pack(">f", decimal_value) != value_bytes:
+        raise ExportError(f"float32 decimal mismatch for {source_path} at {key}")
+    return key
+
+
 def _validate_scalar_csv(path: Path, results: Sequence[Mapping[str, Any]]) -> int:
     expected = {str(item["source_relative_path"]): item for item in results}
     seen_paths: list[str] = []
@@ -678,36 +731,11 @@ def _validate_scalar_csv(path: Path, results: Sequence[Mapping[str, Any]]) -> in
             item = expected.get(source_path)
             if item is None:
                 raise ExportError(f"Unknown scalar source path: {source_path}")
-            if row["event_file_id"] != item["event_file_id"]:
-                raise ExportError(f"event_file_id mismatch for {source_path}")
-            ordinal = int(row["event_file_ordinal"])
-            record_index = int(row["event_record_index"])
-            value_index = int(row["summary_value_index"])
-            if ordinal != int(item["event_file_ordinal"]):
-                raise ExportError(f"event_file_ordinal mismatch for {source_path}")
-            key = (ordinal, record_index, value_index)
-            if previous_key is not None and key <= previous_key:
-                raise ExportError(f"Scalar row order is not strictly increasing at {key}")
-            previous_key = key
-
-            wall_time = struct.unpack(">d", bytes.fromhex(row["wall_time_ieee754_hex"]))[0]
-            if row["wall_time_utc"] != _wall_time_utc(wall_time):
-                raise ExportError(f"wall_time representation mismatch for {source_path} at {key}")
-            value_bytes = bytes.fromhex(row["value_ieee754_hex"])
-            if len(value_bytes) != 4:
-                raise ExportError(f"Invalid float32 hex for {source_path} at {key}")
-            exact_value = struct.unpack(">f", value_bytes)[0]
-            decimal_value = float(row["value_float32"])
-            if math.isnan(exact_value):
-                if not math.isnan(decimal_value):
-                    raise ExportError(f"NaN decimal mismatch for {source_path} at {key}")
-            elif struct.pack(">f", decimal_value) != value_bytes:
-                raise ExportError(f"float32 decimal mismatch for {source_path} at {key}")
-
+            previous_key = _validate_scalar_row(row, item, source_path, previous_key)
             _canonical_scalar_digest_update(
                 current_digest,
-                record_index,
-                value_index,
+                previous_key[1],
+                previous_key[2],
                 row["tag"],
                 int(row["step"]),
                 row["wall_time_ieee754_hex"],

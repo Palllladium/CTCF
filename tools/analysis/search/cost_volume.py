@@ -154,6 +154,52 @@ def _require_candidate_tensor(tensor: torch.Tensor, name: str) -> None:
         raise ValueError(f"{name} must have shape [1,{len(OFFSETS)},D,H,W], got {tuple(tensor.shape)}")
 
 
+def _candidate_moments(
+    costs: torch.Tensor,
+    valid: torch.Tensor,
+    count: torch.Tensor,
+    *,
+    mode: MomentReductionMode,
+    map_shape: tuple[int, ...],
+    accumulator_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Masked mean and unclamped variance over the candidate axis, in this mode's frozen order."""
+    # The arms are not algebraic rearrangements of one another and each order is part of a
+    # published product: do not merge them.
+    if mode == "vectorized_second_moment_fp32":
+        safe_costs = torch.where(valid, costs, torch.zeros_like(costs))
+        mean = safe_costs.sum(dim=1, keepdim=True) / count
+        return mean, safe_costs.square().sum(dim=1, keepdim=True) / count - mean.square()
+
+    sum_cost = torch.zeros(map_shape, dtype=accumulator_dtype, device=costs.device)
+    for index in range(len(OFFSETS)):
+        candidate = costs[:, index : index + 1].to(accumulator_dtype)
+        candidate_valid = valid[:, index : index + 1]
+        sum_cost += torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
+    mean = sum_cost / count
+
+    if mode == "legacy_sequential_fp32":
+        sum_square = costs.new_zeros(map_shape)
+        for index in range(len(OFFSETS)):
+            candidate = costs[:, index : index + 1]
+            candidate_valid = valid[:, index : index + 1]
+            safe = torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
+            sum_square += safe.square()
+        return mean, sum_square / count - mean.square()
+
+    centered_square_sum = torch.zeros(map_shape, dtype=accumulator_dtype, device=costs.device)
+    for index in range(len(OFFSETS)):
+        candidate = costs[:, index : index + 1].to(accumulator_dtype)
+        candidate_valid = valid[:, index : index + 1]
+        centered = candidate - mean
+        centered_square_sum += torch.where(
+            candidate_valid,
+            centered.square(),
+            torch.zeros_like(centered),
+        )
+    return mean, centered_square_sum / count
+
+
 def standardize_candidate_costs(
     costs: torch.Tensor,
     valid: torch.Tensor,
@@ -187,38 +233,14 @@ def standardize_candidate_costs(
     accumulator_dtype = torch.float64 if mode == "centered_two_pass_fp64" else costs.dtype
     count = valid_count.to(accumulator_dtype).clamp_min(1.0)
 
-    if mode == "vectorized_second_moment_fp32":
-        safe_costs = torch.where(valid, costs, torch.zeros_like(costs))
-        mean = safe_costs.sum(dim=1, keepdim=True) / count
-        variance_unclamped = safe_costs.square().sum(dim=1, keepdim=True) / count - mean.square()
-    else:
-        sum_cost = torch.zeros(map_shape, dtype=accumulator_dtype, device=costs.device)
-        for index in range(len(OFFSETS)):
-            candidate = costs[:, index : index + 1].to(accumulator_dtype)
-            candidate_valid = valid[:, index : index + 1]
-            sum_cost += torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
-        mean = sum_cost / count
-
-        if mode == "legacy_sequential_fp32":
-            sum_square = costs.new_zeros(map_shape)
-            for index in range(len(OFFSETS)):
-                candidate = costs[:, index : index + 1]
-                candidate_valid = valid[:, index : index + 1]
-                safe = torch.where(candidate_valid, candidate, torch.zeros_like(candidate))
-                sum_square += safe.square()
-            variance_unclamped = sum_square / count - mean.square()
-        else:
-            centered_square_sum = torch.zeros(map_shape, dtype=accumulator_dtype, device=costs.device)
-            for index in range(len(OFFSETS)):
-                candidate = costs[:, index : index + 1].to(accumulator_dtype)
-                candidate_valid = valid[:, index : index + 1]
-                centered = candidate - mean
-                centered_square_sum += torch.where(
-                    candidate_valid,
-                    centered.square(),
-                    torch.zeros_like(centered),
-                )
-            variance_unclamped = centered_square_sum / count
+    mean, variance_unclamped = _candidate_moments(
+        costs,
+        valid,
+        count,
+        mode=mode,
+        map_shape=map_shape,
+        accumulator_dtype=accumulator_dtype,
+    )
 
     variance_negative = variance_unclamped < 0.0
     variance = variance_unclamped.clamp_min(0.0)
@@ -328,6 +350,74 @@ def build_standardized_mind_cost_volume(
     )
 
 
+def _vectorized_posterior_terms(
+    logits: torch.Tensor,
+    scaled_logits: torch.Tensor,
+    valid: torch.Tensor,
+    active: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Whole-volume softmax and its entropy, reduced over the candidate axis in one pass."""
+    tiny = torch.finfo(logits.dtype).tiny
+    negative_inf = torch.full_like(logits, -torch.inf)
+    scaled_maximum = torch.where(valid, scaled_logits, negative_inf).amax(dim=1, keepdim=True)
+    scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
+    weights = torch.where(valid, torch.exp(scaled_logits - scaled_maximum), torch.zeros_like(logits))
+    normalizer = weights.sum(dim=1, keepdim=True)
+    probabilities = torch.where(active, weights / normalizer.clamp_min(tiny), 0.0)
+    log_probabilities = torch.where(
+        probabilities > 0.0,
+        torch.log(probabilities.clamp_min(tiny)),
+        torch.zeros_like(probabilities),
+    )
+    entropy = -(probabilities * log_probabilities).sum(dim=1, keepdim=True)
+    return probabilities, entropy
+
+
+def _legacy_sequential_posterior_terms(
+    logits: torch.Tensor,
+    scaled_logits: torch.Tensor,
+    valid: torch.Tensor,
+    active: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The historical candidate-by-candidate reduction, kept because its summation order is frozen."""
+    # Entropy comes from the log-normalizer and the weighted shift sum, not from the
+    # probabilities, so this is not interchangeable with the vectorized path at the last bits.
+    tiny = torch.finfo(logits.dtype).tiny
+    scaled_maximum = torch.full(
+        (1, 1, *logits.shape[-3:]),
+        -torch.inf,
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+    for index in range(len(OFFSETS)):
+        candidate = scaled_logits[:, index : index + 1]
+        candidate_valid = valid[:, index : index + 1]
+        scaled_maximum = torch.where(
+            candidate_valid & (candidate > scaled_maximum),
+            candidate,
+            scaled_maximum,
+        )
+    scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
+    weights = torch.zeros_like(logits)
+    normalizer = torch.zeros_like(scaled_maximum)
+    weighted_shift_sum = torch.zeros_like(scaled_maximum)
+    for index in range(len(OFFSETS)):
+        candidate_valid = valid[:, index : index + 1]
+        shifted = scaled_logits[:, index : index + 1] - scaled_maximum
+        safe_shifted = torch.where(candidate_valid, shifted, torch.zeros_like(shifted))
+        weight = torch.exp(safe_shifted) * candidate_valid.to(logits.dtype)
+        weights[:, index : index + 1].copy_(weight)
+        normalizer += weight
+        weighted_shift_sum += weight * safe_shifted
+    probabilities = torch.where(active, weights / normalizer.clamp_min(tiny), 0.0)
+    entropy = torch.where(
+        active,
+        torch.log(normalizer.clamp_min(tiny)) - weighted_shift_sum / normalizer.clamp_min(tiny),
+        torch.zeros_like(normalizer),
+    )
+    return probabilities, entropy
+
+
 def posterior_from_logits(
     logits: torch.Tensor,
     valid: torch.Tensor,
@@ -356,61 +446,10 @@ def posterior_from_logits(
         valid_count = valid.sum(dim=1, keepdim=True)
         active = valid_count > 0
         scaled_logits = logits / float(temperature)
-        if reduction_mode == "vectorized_e54":
-            negative_inf = torch.full_like(logits, -torch.inf)
-            scaled_maximum = torch.where(valid, scaled_logits, negative_inf).amax(dim=1, keepdim=True)
-            scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
-            weights = torch.where(valid, torch.exp(scaled_logits - scaled_maximum), torch.zeros_like(logits))
-            normalizer = weights.sum(dim=1, keepdim=True)
-            probabilities = torch.where(
-                active,
-                weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
-                0.0,
-            )
-            log_probabilities = torch.where(
-                probabilities > 0.0,
-                torch.log(probabilities.clamp_min(torch.finfo(logits.dtype).tiny)),
-                torch.zeros_like(probabilities),
-            )
-            entropy = -(probabilities * log_probabilities).sum(dim=1, keepdim=True)
-        else:
-            scaled_maximum = torch.full(
-                (1, 1, *logits.shape[-3:]),
-                -torch.inf,
-                dtype=logits.dtype,
-                device=logits.device,
-            )
-            for index in range(len(OFFSETS)):
-                candidate = scaled_logits[:, index : index + 1]
-                candidate_valid = valid[:, index : index + 1]
-                scaled_maximum = torch.where(
-                    candidate_valid & (candidate > scaled_maximum),
-                    candidate,
-                    scaled_maximum,
-                )
-            scaled_maximum = torch.where(active, scaled_maximum, torch.zeros_like(scaled_maximum))
-            weights = torch.zeros_like(logits)
-            normalizer = torch.zeros_like(scaled_maximum)
-            weighted_shift_sum = torch.zeros_like(scaled_maximum)
-            for index in range(len(OFFSETS)):
-                candidate_valid = valid[:, index : index + 1]
-                shifted = scaled_logits[:, index : index + 1] - scaled_maximum
-                safe_shifted = torch.where(candidate_valid, shifted, torch.zeros_like(shifted))
-                weight = torch.exp(safe_shifted) * candidate_valid.to(logits.dtype)
-                weights[:, index : index + 1].copy_(weight)
-                normalizer += weight
-                weighted_shift_sum += weight * safe_shifted
-            probabilities = torch.where(
-                active,
-                weights / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
-                0.0,
-            )
-            entropy = torch.where(
-                active,
-                torch.log(normalizer.clamp_min(torch.finfo(logits.dtype).tiny))
-                - weighted_shift_sum / normalizer.clamp_min(torch.finfo(logits.dtype).tiny),
-                torch.zeros_like(normalizer),
-            )
+        reduce = (
+            _vectorized_posterior_terms if reduction_mode == "vectorized_e54" else _legacy_sequential_posterior_terms
+        )
+        probabilities, entropy = reduce(logits, scaled_logits, valid, active)
         log_k = torch.log(valid_count.to(logits.dtype).clamp_min(1.0))
         normalized_entropy = torch.where(valid_count > 1, entropy / log_k, torch.zeros_like(entropy))
         normalized_entropy = normalized_entropy.clamp(0.0, 1.0)
@@ -570,45 +609,17 @@ def decode_posterior(
     )
 
 
-def posterior_diagnostics(
+def _require_consistent_posterior(
     logits: torch.Tensor,
     valid: torch.Tensor,
     posterior: PosteriorResult,
-    geometry_mask: torch.Tensor,
     *,
-    temperature: float = 1.0,
-) -> PosteriorDiagnostics:
-    """Summarize a masked offset posterior without labels or deformation metrics.
-
-    All scalar means use target voxels in ``geometry_mask``. The logit gap is
-    ``largest(valid logits) - second_largest(valid logits)``; for logits ``-z``
-    it is equivalently the second-smallest minus smallest standardized cost.
-    Invalid-offset fraction uses ``|G| * 27`` as its denominator. Vector norms
-    are voxelwise Euclidean norms averaged over ``G``. Their ratio is the ratio
-    of those two means and is ``None`` when the unweighted mean norm is exactly
-    zero. At least two valid candidates are required at every voxel in ``G``.
-
-    The function fails closed if the supplied ``PosteriorResult`` is not the
-    normalized masked posterior described by ``valid``. Invalid logits may be
-    arbitrary because they are not evidence; valid logits must be finite.
-    """
-
-    _require_candidate_tensor(logits, "logits")
-    _require_candidate_tensor(valid, "valid mask")
+    temperature: float,
+    tolerance: float,
+) -> torch.Tensor:
+    """Refuse a PosteriorResult these logits do not induce; return the valid count it verified."""
+    map_shape = (1, 1, *logits.shape[-3:])
     probabilities = posterior.probabilities
-    _require_candidate_tensor(probabilities, "posterior probabilities")
-    spatial = tuple(logits.shape[-3:])
-    _require_geometry_mask(geometry_mask, spatial, logits.device)
-    if valid.dtype != torch.bool or valid.shape != logits.shape or valid.device != logits.device:
-        raise ValueError("valid must be a boolean tensor sharing logits shape and device")
-    if probabilities.shape != logits.shape or probabilities.device != logits.device:
-        raise ValueError("posterior probabilities must share logits shape and device")
-    if not logits.is_floating_point() or probabilities.dtype != logits.dtype:
-        raise TypeError("logits and posterior probabilities must share a floating-point dtype")
-    if not bool(torch.isfinite(logits.masked_select(valid)).all()):
-        raise ValueError("valid candidate logits must be finite")
-
-    map_shape = (1, 1, *spatial)
     for name, value in (
         ("entropy", posterior.entropy),
         ("normalized entropy", posterior.normalized_entropy),
@@ -619,7 +630,6 @@ def posterior_diagnostics(
     if posterior.valid_count.shape != map_shape or posterior.valid_count.device != logits.device:
         raise ValueError(f"posterior valid_count must have shape {map_shape} on the logits device")
 
-    tolerance = max(1e-6, 16.0 * torch.finfo(logits.dtype).eps)
     expected_count = valid.sum(dim=1, keepdim=True)
     if not torch.equal(posterior.valid_count, expected_count):
         raise ValueError("posterior valid_count does not match the candidate mask")
@@ -665,6 +675,55 @@ def posterior_diagnostics(
     ):
         if not torch.allclose(observed, expected, atol=tolerance, rtol=tolerance):
             raise ValueError(f"posterior {name} is inconsistent with its probabilities")
+    return expected_count
+
+
+def posterior_diagnostics(
+    logits: torch.Tensor,
+    valid: torch.Tensor,
+    posterior: PosteriorResult,
+    geometry_mask: torch.Tensor,
+    *,
+    temperature: float = 1.0,
+) -> PosteriorDiagnostics:
+    """Summarize a masked offset posterior without labels or deformation metrics.
+
+    All scalar means use target voxels in ``geometry_mask``. The logit gap is
+    ``largest(valid logits) - second_largest(valid logits)``; for logits ``-z``
+    it is equivalently the second-smallest minus smallest standardized cost.
+    Invalid-offset fraction uses ``|G| * 27`` as its denominator. Vector norms
+    are voxelwise Euclidean norms averaged over ``G``. Their ratio is the ratio
+    of those two means and is ``None`` when the unweighted mean norm is exactly
+    zero. At least two valid candidates are required at every voxel in ``G``.
+
+    The function fails closed if the supplied ``PosteriorResult`` is not the
+    normalized masked posterior described by ``valid``. Invalid logits may be
+    arbitrary because they are not evidence; valid logits must be finite.
+    """
+
+    _require_candidate_tensor(logits, "logits")
+    _require_candidate_tensor(valid, "valid mask")
+    probabilities = posterior.probabilities
+    _require_candidate_tensor(probabilities, "posterior probabilities")
+    spatial = tuple(logits.shape[-3:])
+    _require_geometry_mask(geometry_mask, spatial, logits.device)
+    if valid.dtype != torch.bool or valid.shape != logits.shape or valid.device != logits.device:
+        raise ValueError("valid must be a boolean tensor sharing logits shape and device")
+    if probabilities.shape != logits.shape or probabilities.device != logits.device:
+        raise ValueError("posterior probabilities must share logits shape and device")
+    if not logits.is_floating_point() or probabilities.dtype != logits.dtype:
+        raise TypeError("logits and posterior probabilities must share a floating-point dtype")
+    if not bool(torch.isfinite(logits.masked_select(valid)).all()):
+        raise ValueError("valid candidate logits must be finite")
+
+    tolerance = max(1e-6, 16.0 * torch.finfo(logits.dtype).eps)
+    expected_count = _require_consistent_posterior(
+        logits,
+        valid,
+        posterior,
+        temperature=temperature,
+        tolerance=tolerance,
+    )
 
     geometry_count = expected_count.masked_select(geometry_mask)
     if bool((geometry_count < 2).any()):

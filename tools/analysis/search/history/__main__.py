@@ -100,24 +100,26 @@ def _locate(registry: Mapping[str, Any], entry: Mapping[str, Any], results_root:
     return {"status": "MATCHED", "candidates": [hint], "root": root}
 
 
+def _listing_row(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """One registered product as the read-only listing reports it."""
+    return {
+        "id": entry["id"],
+        "role": entry["role"],
+        "gate": entry["gate"],
+        "run_id": entry["run_id"],
+        "summary": entry["summary"],
+        "relative_hints": list(entry["relative_hints"]),
+        "manifest_sha256": entry["manifest"]["sha256"],
+        "code_git_head": entry["manifest"]["code_git_head"],
+        "code_heads": [{"role": head["role"], "git_head": head["git_head"]} for head in entry["code_heads"]],
+        "entrypoints": [f"{item['git_head']}:{item['path']}" for item in entry["entrypoints"]],
+        "assertion_count": sum(len(entry[group]) for group in EVIDENCE_GROUPS),
+    }
+
+
 def command_list(args: argparse.Namespace) -> int:
     registry = load_registry(Path(args.registry))
-    products = [
-        {
-            "id": entry["id"],
-            "role": entry["role"],
-            "gate": entry["gate"],
-            "run_id": entry["run_id"],
-            "summary": entry["summary"],
-            "relative_hints": list(entry["relative_hints"]),
-            "manifest_sha256": entry["manifest"]["sha256"],
-            "code_git_head": entry["manifest"]["code_git_head"],
-            "code_heads": [{"role": head["role"], "git_head": head["git_head"]} for head in entry["code_heads"]],
-            "entrypoints": [f"{item['git_head']}:{item['path']}" for item in entry["entrypoints"]],
-            "assertion_count": sum(len(entry[group]) for group in EVIDENCE_GROUPS),
-        }
-        for entry in registry["products"]
-    ]
+    products = [_listing_row(entry) for entry in registry["products"]]
     _emit(
         {
             "command": "list",
@@ -165,13 +167,15 @@ def _totals(registry: Mapping[str, Any], passed: Sequence[Mapping[str, Any]], ro
     }
 
 
-def command_verify_known(args: argparse.Namespace) -> int:
-    registry = load_registry(Path(args.registry))
-    results_root = Path(args.results_root)
+def _verify_registered_products(
+    registry: Mapping[str, Any],
+    results_root: Path,
+    repo_root: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Path], list[str]]:
+    """Place and verify every registered product; return its rows, the roots that passed, and failures."""
     located: dict[str, Path] = {}
     products: list[dict[str, Any]] = []
     categories: list[str] = []
-
     for entry in registry["products"]:
         try:
             placement = _locate(registry, entry, results_root)
@@ -196,18 +200,23 @@ def command_verify_known(args: argparse.Namespace) -> int:
             continue
         root = placement["root"]
         try:
-            report = verify_product(
-                registry,
-                entry["id"],
-                root,
-                repo_root=Path(args.repo_root),
-            )
+            report = verify_product(registry, entry["id"], root, repo_root=repo_root)
         except VerifierError as error:
             products.append({"id": entry["id"], "role": entry["role"], "placement": "MATCHED", **_failure(error)})
             categories.append(error.category)
             continue
         located[entry["id"]] = root
         products.append({**report, "placement": "MATCHED"})
+    return products, located, categories
+
+
+def command_verify_known(args: argparse.Namespace) -> int:
+    registry = load_registry(Path(args.registry))
+    products, located, categories = _verify_registered_products(
+        registry,
+        Path(args.results_root),
+        Path(args.repo_root),
+    )
 
     links: list[dict[str, Any]] = []
     for entry in registry["products"]:

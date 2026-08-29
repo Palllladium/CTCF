@@ -513,29 +513,23 @@ def _checkpoint_index(
     if len(counts) > 1:
         raise RuntimeError("Controller variants do not have an identical parameter count")
     for seed in BASE_SEEDS:
-        initial = {
-            item["initial_controller_state_sha256"]
-            for (item_seed, variant), item in index.items()
-            if item_seed == seed and variant != "U0"
-        }
-        if len(initial) > 1:
-            raise RuntimeError(f"Controller initial states differ within seed {seed}")
-        sources = {
-            item["source_contract_sha256"]
-            for (item_seed, variant), item in index.items()
-            if item_seed == seed and variant != "U0"
-        }
-        if len(sources) > 1:
-            raise RuntimeError(f"Controller training-source contracts differ within seed {seed}")
-        base = index.get((seed, "U0"))
-        for (item_seed, variant), item in index.items():
-            if (
-                item_seed == seed
-                and variant != "U0"
-                and (base is None or item["base_checkpoint_sha256"] != base["checkpoint_file"]["sha256"])
-            ):
-                raise RuntimeError(f"Controller {variant}/seed {seed} is bound to another U0 checkpoint")
+        _require_shared_seed_bindings(index, seed)
     return index
+
+
+def _require_shared_seed_bindings(index: Mapping[tuple[int, str], Mapping[str, Any]], seed: int) -> None:
+    """Within one seed, every controller must start from the same state, source and U0 checkpoint."""
+    controllers = {
+        variant: item for (item_seed, variant), item in index.items() if item_seed == seed and variant != "U0"
+    }
+    if len({item["initial_controller_state_sha256"] for item in controllers.values()}) > 1:
+        raise RuntimeError(f"Controller initial states differ within seed {seed}")
+    if len({item["source_contract_sha256"] for item in controllers.values()}) > 1:
+        raise RuntimeError(f"Controller training-source contracts differ within seed {seed}")
+    base = index.get((seed, "U0"))
+    for variant, item in controllers.items():
+        if base is None or item["base_checkpoint_sha256"] != base["checkpoint_file"]["sha256"]:
+            raise RuntimeError(f"Controller {variant}/seed {seed} is bound to another U0 checkpoint")
 
 
 def build_training_barrier(
@@ -584,37 +578,8 @@ def validate_training_barrier(
         raise RuntimeError("Stage 5 training barrier is incomplete")
 
 
-def _validate_decision_record(
-    payload: Mapping[str, Any],
-    protocol: Mapping[str, Any],
-    checkpoint_map: Mapping[tuple[int, str], Mapping[str, Any]],
-) -> None:
-    require_exact_fields(payload, DECISION_RECORD_FIELDS, "Stage 5 decision record")
-    if payload["schema"] != DECISION_RECORD_SCHEMA:
-        raise RuntimeError("Stage 5 decision record schema changed")
-    case_id = require_nonempty(payload["case_id"], "decision case_id")
-    seed = require_int(payload["seed"], "decision seed")
-    variant = require_nonempty(payload["variant_id"], "decision variant")
-    if case_id not in protocol["directed_case_ids"] or (seed, variant) not in checkpoint_map:
-        raise RuntimeError("Decision record is outside the frozen inventory")
-    expected_id = f"{case_id}__S{seed}__{variant}"
-    if payload["decision_id"] != expected_id:
-        raise RuntimeError("Decision identifier changed")
-    if payload["checkpoint_sha256"] != checkpoint_map[(seed, variant)]["checkpoint_file"]["sha256"]:
-        raise RuntimeError("Decision record is bound to another checkpoint")
-    for key in ("certified_source_field", "requested_field", "candidate_field", "returned_field"):
-        validate_file_record(payload[key], field=True, label=key)
-    for key in ("requested", "candidate", "returned"):
-        validate_save_reload_attestation(
-            payload[f"{key}_save_reload"],
-            payload[f"{key}_field"],
-            label=f"{key}_save_reload",
-        )
-    validate_file_record(payload["exact_report"], label="exact_report")
-    if payload["certified_source_field"]["root_id"] != "source_field_root":
-        raise RuntimeError("Certified source field has the wrong Stage 5 root role")
-    if payload["exact_report"]["root_id"] != "decision_output_root":
-        raise RuntimeError("Decision exact report has the wrong Stage 5 root role")
+def _require_consistent_transaction(payload: Mapping[str, Any], variant: str) -> str:
+    """Bind the transaction status to the bytes, roots and certificates it implies; return it."""
     candidate_status = require_nonempty(payload["candidate_exact_status"], "candidate_exact_status")
     candidate_certified = payload["candidate_exact_certified"]
     if not isinstance(candidate_certified, bool):
@@ -653,24 +618,26 @@ def _validate_decision_record(
             or payload["returned_field"]["root_id"] != "source_field_root"
         ):
             raise RuntimeError("Rolled-back Stage 5 transaction must return source bytes with equal SHA-256")
-    else:
-        if (
-            not candidate_certified
-            or rollback_equal is not False
-            or not _same_field_bytes(candidate, source)
-            or not _same_field_bytes(returned, source)
-            or any(
-                payload[key]["root_id"] != "source_field_root"
-                for key in ("requested_field", "candidate_field", "returned_field")
-            )
-        ):
-            raise RuntimeError("Baseline/degraded identity record must return its exactly certified source bytes")
+    elif (
+        not candidate_certified
+        or rollback_equal is not False
+        or not _same_field_bytes(candidate, source)
+        or not _same_field_bytes(returned, source)
+        or any(
+            payload[key]["root_id"] != "source_field_root"
+            for key in ("requested_field", "candidate_field", "returned_field")
+        )
+    ):
+        raise RuntimeError("Baseline/degraded identity record must return its exactly certified source bytes")
     if variant == "U0" and status not in {"BASELINE_CERTIFIED", "CERTIFIED_DEGRADED_IDENTITY"}:
         raise RuntimeError("U0 decision record has a controller transaction status")
     if variant != "U0" and status == "BASELINE_CERTIFIED":
         raise RuntimeError("Controller decision record cannot claim the U0 baseline status")
-    if payload["labels_loaded"] is not False:
-        raise RuntimeError("Decision record accessed labels before the barrier")
+    return status
+
+
+def _require_consistent_retention(payload: Mapping[str, Any], status: str) -> None:
+    """The delta amplitudes and the retention ratios must describe the same measurement."""
     require_finite(payload["runtime_seconds"], "runtime_seconds", minimum=0.0)
     require_int(payload["peak_memory_bytes"], "peak_memory_bytes")
     requested_rms = require_finite(payload["requested_delta_rms"], "requested_delta_rms", minimum=0.0)
@@ -687,16 +654,53 @@ def _validate_decision_record(
             value is not None for value in (candidate_ratio, returned_ratio)
         ):
             raise RuntimeError("Zero-request decision has inconsistent retention diagnostics")
-    else:
-        if candidate_ratio is None or returned_ratio is None:
-            raise RuntimeError("Non-zero Stage 5 request requires explicit retention ratios")
-        tolerance = 1e-6 * max(1.0, requested_rms, candidate_rms, returned_rms)
-        if abs(candidate_rms / requested_rms - candidate_ratio) > tolerance:
-            raise RuntimeError("Candidate retention ratio is arithmetically inconsistent")
-        if abs(returned_rms / requested_rms - returned_ratio) > tolerance:
-            raise RuntimeError("Returned retention ratio is arithmetically inconsistent")
-        if status == "ROLLED_BACK" and (returned_rms != 0.0 or returned_ratio != 0.0):
-            raise RuntimeError("Rolled-back Stage 5 request must retain zero applied amplitude")
+        return
+    if candidate_ratio is None or returned_ratio is None:
+        raise RuntimeError("Non-zero Stage 5 request requires explicit retention ratios")
+    tolerance = 1e-6 * max(1.0, requested_rms, candidate_rms, returned_rms)
+    if abs(candidate_rms / requested_rms - candidate_ratio) > tolerance:
+        raise RuntimeError("Candidate retention ratio is arithmetically inconsistent")
+    if abs(returned_rms / requested_rms - returned_ratio) > tolerance:
+        raise RuntimeError("Returned retention ratio is arithmetically inconsistent")
+    if status == "ROLLED_BACK" and (returned_rms != 0.0 or returned_ratio != 0.0):
+        raise RuntimeError("Rolled-back Stage 5 request must retain zero applied amplitude")
+
+
+def _validate_decision_record(
+    payload: Mapping[str, Any],
+    protocol: Mapping[str, Any],
+    checkpoint_map: Mapping[tuple[int, str], Mapping[str, Any]],
+) -> None:
+    require_exact_fields(payload, DECISION_RECORD_FIELDS, "Stage 5 decision record")
+    if payload["schema"] != DECISION_RECORD_SCHEMA:
+        raise RuntimeError("Stage 5 decision record schema changed")
+    case_id = require_nonempty(payload["case_id"], "decision case_id")
+    seed = require_int(payload["seed"], "decision seed")
+    variant = require_nonempty(payload["variant_id"], "decision variant")
+    if case_id not in protocol["directed_case_ids"] or (seed, variant) not in checkpoint_map:
+        raise RuntimeError("Decision record is outside the frozen inventory")
+    expected_id = f"{case_id}__S{seed}__{variant}"
+    if payload["decision_id"] != expected_id:
+        raise RuntimeError("Decision identifier changed")
+    if payload["checkpoint_sha256"] != checkpoint_map[(seed, variant)]["checkpoint_file"]["sha256"]:
+        raise RuntimeError("Decision record is bound to another checkpoint")
+    for key in ("certified_source_field", "requested_field", "candidate_field", "returned_field"):
+        validate_file_record(payload[key], field=True, label=key)
+    for key in ("requested", "candidate", "returned"):
+        validate_save_reload_attestation(
+            payload[f"{key}_save_reload"],
+            payload[f"{key}_field"],
+            label=f"{key}_save_reload",
+        )
+    validate_file_record(payload["exact_report"], label="exact_report")
+    if payload["certified_source_field"]["root_id"] != "source_field_root":
+        raise RuntimeError("Certified source field has the wrong Stage 5 root role")
+    if payload["exact_report"]["root_id"] != "decision_output_root":
+        raise RuntimeError("Decision exact report has the wrong Stage 5 root role")
+    status = _require_consistent_transaction(payload, variant)
+    if payload["labels_loaded"] is not False:
+        raise RuntimeError("Decision record accessed labels before the barrier")
+    _require_consistent_retention(payload, status)
     require_sha256(payload["execution_sha256"], "decision execution_sha256")
 
 

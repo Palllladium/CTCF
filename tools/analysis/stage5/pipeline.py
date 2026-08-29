@@ -3,6 +3,7 @@ from __future__ import annotations
 import platform
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +172,256 @@ def _delta_rms(field: torch.Tensor, source: torch.Tensor) -> float:
     return float(torch.sqrt(difference.square().mean()).item())
 
 
+@dataclass(frozen=True, slots=True)
+class _DecisionContext:
+    """What stays fixed for one (seed, variant) shard while its decisions are produced."""
+
+    protocol: Mapping[str, Any]
+    training: Mapping[str, Any]
+    store: Stage5OasisImageStore
+    metadata: Mapping[str, Any]
+    u0_sha: str
+    bootstrap_policy: str
+    degraded_identity: bool
+    controller: Stage5SpatialController | None
+    source_root: Path
+    decision_root: Path
+    seed: int
+    variant: str
+    device: torch.device
+
+
+@dataclass(frozen=True, slots=True)
+class _StageOutcome:
+    """The three field stages of one decision, however that decision was produced.
+
+    A baseline row and a degraded-identity row return the source bytes untouched, so all
+    three stages are the same file; a controller row has its own requested and candidate
+    files and returns whichever of candidate or source the transaction accepted.
+    """
+
+    requested_path: Path
+    candidate_path: Path
+    requested_record: Mapping[str, Any]
+    candidate_record: Mapping[str, Any]
+    returned_record: Mapping[str, Any]
+    requested_array_sha256: str
+    candidate_array_sha256: str
+    returned_array_sha256: str
+    candidate_exact: Mapping[str, Any]
+    returned_exact: Mapping[str, Any]
+    transaction_status: str
+    rollback_source_sha256_equal: bool
+    clip_report: Mapping[str, Any] | None
+
+
+def _source_only_outcome(
+    source: torch.Tensor,
+    source_path: Path,
+    source_record: Mapping[str, Any],
+    source_array_sha: str,
+    *,
+    degraded_identity: bool,
+) -> _StageOutcome:
+    """Certify the untouched source as all three stages of a baseline or degraded-identity row."""
+    exact = certify_flow_exact(source, eps="0.001")
+    return _StageOutcome(
+        requested_path=source_path,
+        candidate_path=source_path,
+        requested_record=source_record,
+        candidate_record=source_record,
+        returned_record=source_record,
+        requested_array_sha256=source_array_sha,
+        candidate_array_sha256=source_array_sha,
+        returned_array_sha256=source_array_sha,
+        candidate_exact=exact,
+        returned_exact=exact,
+        transaction_status="CERTIFIED_DEGRADED_IDENTITY" if degraded_identity else "BASELINE_CERTIFIED",
+        rollback_source_sha256_equal=False,
+        clip_report=None,
+    )
+
+
+def _controller_outcome(
+    context: _DecisionContext,
+    case: Mapping[str, str],
+    source: torch.Tensor,
+    source_path: Path,
+    source_record: Mapping[str, Any],
+    decision_case_root: Path,
+) -> _StageOutcome:
+    """Request a delta from the trained controller and commit it through the safety transaction."""
+    controller = context.controller
+    if controller is None:
+        raise RuntimeError("Stage5 controller decision requested without a loaded controller")
+    moving, fixed = _case_images(context.store, case, context.device)
+    source_device = source.to(device=context.device, dtype=torch.float32)
+    # The frozen S2/S4 feature contract is FP32.  Controller convolutions may use AMP, but
+    # constructing the search posterior under autocast would make deployment consume different
+    # inputs from controller training.
+    with torch.inference_mode():
+        features = build_stage5_features(fixed, moving, source_device)
+    with (
+        torch.inference_mode(),
+        torch.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+            enabled=context.device.type == "cuda",
+        ),
+    ):
+        output = controller(
+            features.controller_input,
+            context.variant,
+            s2_proposal=features.s2.proposal,
+            s4_proposal=features.s4.proposal,
+        )
+    transaction = commit_controller_delta(source_path, output.requested_delta.float(), decision_case_root)
+    candidate_record = field_record("decision_output_root", context.decision_root, transaction.candidate_path)
+    return _StageOutcome(
+        requested_path=decision_case_root / "requested.npz",
+        candidate_path=decision_case_root / "post_safety_candidate.npz",
+        requested_record=field_record("decision_output_root", context.decision_root, transaction.requested_path),
+        candidate_record=candidate_record,
+        returned_record=candidate_record if transaction.status == "ACCEPTED" else source_record,
+        requested_array_sha256=transaction.requested_array_sha256,
+        candidate_array_sha256=transaction.candidate_array_sha256,
+        returned_array_sha256=transaction.returned_array_sha256,
+        candidate_exact=transaction.candidate_exact_report,
+        returned_exact=transaction.returned_exact_report,
+        transaction_status=transaction.status,
+        rollback_source_sha256_equal=transaction.rollback_byte_identical,
+        clip_report=transaction.clip_report,
+    )
+
+
+def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str], decision_id: str) -> None:
+    """Produce, certify and write the immutable record for a single decision."""
+    if context.device.type == "cuda":
+        torch.cuda.synchronize(context.device)
+        torch.cuda.reset_peak_memory_stats(context.device)
+    started = time.perf_counter()
+    source_path, _, source = _source_artifact(
+        context.source_root,
+        seed=context.seed,
+        case=case,
+        expected_u0_sha256=context.u0_sha,
+        bootstrap_policy=context.bootstrap_policy,
+        image_shape=context.store.image_shape,
+    )
+    source_record = field_record("source_field_root", context.source_root, source_path)
+    decision_case_root = (
+        context.decision_root / "fields" / f"seed_{context.seed}" / context.variant / str(case["case_id"])
+    )
+    if context.variant == "U0" or context.degraded_identity:
+        stages = _source_only_outcome(
+            source,
+            source_path,
+            source_record,
+            array_sha256(source),
+            degraded_identity=context.degraded_identity,
+        )
+    else:
+        stages = _controller_outcome(context, case, source, source_path, source_record, decision_case_root)
+
+    requested_loaded = load_flow_npz(stages.requested_path)
+    candidate_loaded = load_flow_npz(stages.candidate_path)
+    accepted = stages.transaction_status == "ACCEPTED"
+    returned_loaded = candidate_loaded if accepted else source
+    requested_delta_rms = _delta_rms(requested_loaded, source)
+    candidate_delta_rms = _delta_rms(candidate_loaded, source)
+    returned_delta_rms = _delta_rms(returned_loaded, source)
+    if requested_delta_rms == 0.0:
+        candidate_retained_ratio = None
+        returned_retained_ratio = None
+    else:
+        candidate_retained_ratio = candidate_delta_rms / requested_delta_rms
+        returned_retained_ratio = returned_delta_rms / requested_delta_rms
+    if context.device.type == "cuda":
+        torch.cuda.synchronize(context.device)
+        peak_memory_bytes = int(torch.cuda.max_memory_allocated(context.device))
+    else:
+        peak_memory_bytes = 0
+    runtime_seconds = time.perf_counter() - started
+
+    exact_payload = {
+        "schema": "ctcf-stage5-decision-exact-report-v1",
+        "decision_id": decision_id,
+        "source_field": source_record,
+        "candidate_exact": stages.candidate_exact,
+        "returned_exact": stages.returned_exact,
+        "clip_report": stages.clip_report,
+        "execution": {
+            "protocol_sha256": canonical_sha256(context.protocol),
+            "training_barrier_sha256": canonical_sha256(context.training),
+            "checkpoint_sha256": context.metadata["checkpoint_file"]["sha256"],
+            "device_type": context.device.type,
+            "torch_version": torch.__version__,
+            "python_version": platform.python_version(),
+            "labels_loaded": False,
+        },
+    }
+    exact_path = context.decision_root / "exact_reports" / f"{decision_id}.json"
+    write_immutable_json(exact_path, exact_payload)
+    returned_path = stages.candidate_path if accepted else source_path
+    record = {
+        "schema": DECISION_RECORD_SCHEMA,
+        "decision_id": decision_id,
+        "case_id": case["case_id"],
+        "seed": context.seed,
+        "variant_id": context.variant,
+        "checkpoint_sha256": context.metadata["checkpoint_file"]["sha256"],
+        "certified_source_field": source_record,
+        "requested_field": stages.requested_record,
+        "candidate_field": stages.candidate_record,
+        "returned_field": stages.returned_record,
+        "requested_save_reload": save_reload_attestation(
+            stages.requested_record,
+            in_memory_array_sha256=stages.requested_array_sha256,
+            reloaded_path=stages.requested_path,
+        ),
+        "candidate_save_reload": save_reload_attestation(
+            stages.candidate_record,
+            in_memory_array_sha256=stages.candidate_array_sha256,
+            reloaded_path=stages.candidate_path,
+        ),
+        "returned_save_reload": save_reload_attestation(
+            stages.returned_record,
+            in_memory_array_sha256=stages.returned_array_sha256,
+            reloaded_path=returned_path,
+        ),
+        "exact_report": file_record("decision_output_root", context.decision_root, exact_path),
+        "candidate_exact_status": stages.candidate_exact["status"],
+        "candidate_exact_certified": stages.candidate_exact["certified"],
+        "returned_exact_status": stages.returned_exact["status"],
+        "returned_certified": stages.returned_exact["certified"],
+        "transaction_status": stages.transaction_status,
+        "rollback_source_sha256_equal": stages.rollback_source_sha256_equal,
+        "runtime_seconds": runtime_seconds,
+        "peak_memory_bytes": peak_memory_bytes,
+        "requested_delta_rms": requested_delta_rms,
+        "candidate_delta_rms": candidate_delta_rms,
+        "returned_delta_rms": returned_delta_rms,
+        "candidate_retained_ratio": candidate_retained_ratio,
+        "returned_retained_ratio": returned_retained_ratio,
+        "labels_loaded": False,
+        "execution_sha256": execution_sha256(
+            {
+                "environment": exact_payload["execution"],
+                "performance": {
+                    "runtime_seconds": runtime_seconds,
+                    "peak_memory_bytes": peak_memory_bytes,
+                    "requested_delta_rms": requested_delta_rms,
+                    "candidate_delta_rms": candidate_delta_rms,
+                    "returned_delta_rms": returned_delta_rms,
+                    "candidate_retained_ratio": candidate_retained_ratio,
+                    "returned_retained_ratio": returned_retained_ratio,
+                },
+            }
+        ),
+    }
+    write_immutable_json(context.decision_root / "records" / f"{decision_id}.json", record)
+
+
 def materialize_decisions(
     *,
     protocol_path: Path,
@@ -202,11 +453,9 @@ def materialize_decisions(
         raise RuntimeError("Stage5 decision cases differ from the protocol")
     checkpoints = _checkpoint_index(training)
     metadata = checkpoints[(seed, variant)]
-    u0_metadata = checkpoints[(seed, "U0")]
-    u0_sha = str(u0_metadata["checkpoint_file"]["sha256"])
     bootstrap_policy = str(protocol["bootstrap"]["policy"])
-    controller = None
     degraded_identity = bootstrap_policy == "identity"
+    controller = None
     if variant != "U0" and not degraded_identity:
         controller = _load_controller(
             checkpoint_path(checkpoint_root, seed=seed, variant=variant),
@@ -215,6 +464,21 @@ def materialize_decisions(
             device=device,
             config=controller_config or ControllerTrainingConfig(),
         )
+    context = _DecisionContext(
+        protocol=protocol,
+        training=training,
+        store=store,
+        metadata=metadata,
+        u0_sha=str(checkpoints[(seed, "U0")]["checkpoint_file"]["sha256"]),
+        bootstrap_policy=bootstrap_policy,
+        degraded_identity=degraded_identity,
+        controller=controller,
+        source_root=source_root,
+        decision_root=decision_root,
+        seed=seed,
+        variant=variant,
+        device=device,
+    )
 
     completed = 0
     for index, case in enumerate(case_inventory):
@@ -227,177 +491,8 @@ def materialize_decisions(
             build_decision_barrier(protocol, training, [existing])
             if existing.get("decision_id") != decision_id:
                 raise RuntimeError("existing Stage5 decision has another identity")
-            completed += 1
-            continue
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-            torch.cuda.reset_peak_memory_stats(device)
-        started = time.perf_counter()
-        source_path, _, source = _source_artifact(
-            source_root,
-            seed=seed,
-            case=case,
-            expected_u0_sha256=u0_sha,
-            bootstrap_policy=bootstrap_policy,
-            image_shape=store.image_shape,
-        )
-        source_record = field_record("source_field_root", source_root, source_path)
-        source_array_sha = array_sha256(source)
-
-        decision_case_root = decision_root / "fields" / f"seed_{seed}" / variant / str(case["case_id"])
-        # A baseline row and a degraded-identity row both return the source bytes untouched,
-        # so every field path below is the source path.
-        source_only = variant == "U0" or degraded_identity
-        requested_path = source_path if source_only else decision_case_root / "requested.npz"
-        candidate_path = source_path if source_only else decision_case_root / "post_safety_candidate.npz"
-        if source_only:
-            requested_record = source_record
-            candidate_record = source_record
-            returned_record = source_record
-            requested_array_sha = source_array_sha
-            candidate_array_sha = source_array_sha
-            returned_array_sha = source_array_sha
-            candidate_exact = certify_flow_exact(source, eps="0.001")
-            returned_exact = candidate_exact
-            transaction_status = "CERTIFIED_DEGRADED_IDENTITY" if degraded_identity else "BASELINE_CERTIFIED"
-            rollback_equal = False
-            clip_report: Mapping[str, Any] | None = None
         else:
-            assert controller is not None
-            moving, fixed = _case_images(store, case, device)
-            source_device = source.to(device=device, dtype=torch.float32)
-            # The frozen S2/S4 feature contract is FP32.  Controller convolutions may
-            # use AMP, but constructing the search posterior under autocast would make
-            # deployment consume different inputs from controller training.
-            with torch.inference_mode():
-                features = build_stage5_features(fixed, moving, source_device)
-            with (
-                torch.inference_mode(),
-                torch.autocast(
-                    device_type="cuda",
-                    dtype=torch.float16,
-                    enabled=device.type == "cuda",
-                ),
-            ):
-                output = controller(
-                    features.controller_input,
-                    variant,
-                    s2_proposal=features.s2.proposal,
-                    s4_proposal=features.s4.proposal,
-                )
-            transaction = commit_controller_delta(
-                source_path,
-                output.requested_delta.float(),
-                decision_case_root,
-            )
-            requested_record = field_record("decision_output_root", decision_root, transaction.requested_path)
-            candidate_record = field_record("decision_output_root", decision_root, transaction.candidate_path)
-            returned_record = candidate_record if transaction.status == "ACCEPTED" else source_record
-            requested_array_sha = transaction.requested_array_sha256
-            candidate_array_sha = transaction.candidate_array_sha256
-            returned_array_sha = transaction.returned_array_sha256
-            candidate_exact = transaction.candidate_exact_report
-            returned_exact = transaction.returned_exact_report
-            transaction_status = transaction.status
-            rollback_equal = transaction.rollback_byte_identical
-            clip_report = transaction.clip_report
-
-        requested_loaded = load_flow_npz(requested_path)
-        candidate_loaded = load_flow_npz(candidate_path)
-        returned_loaded = candidate_loaded if transaction_status == "ACCEPTED" else source
-        requested_delta_rms = _delta_rms(requested_loaded, source)
-        candidate_delta_rms = _delta_rms(candidate_loaded, source)
-        returned_delta_rms = _delta_rms(returned_loaded, source)
-        if requested_delta_rms == 0.0:
-            candidate_retained_ratio = None
-            returned_retained_ratio = None
-        else:
-            candidate_retained_ratio = candidate_delta_rms / requested_delta_rms
-            returned_retained_ratio = returned_delta_rms / requested_delta_rms
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-            peak_memory_bytes = int(torch.cuda.max_memory_allocated(device))
-        else:
-            peak_memory_bytes = 0
-        runtime_seconds = time.perf_counter() - started
-
-        exact_payload = {
-            "schema": "ctcf-stage5-decision-exact-report-v1",
-            "decision_id": decision_id,
-            "source_field": source_record,
-            "candidate_exact": candidate_exact,
-            "returned_exact": returned_exact,
-            "clip_report": clip_report,
-            "execution": {
-                "protocol_sha256": canonical_sha256(protocol),
-                "training_barrier_sha256": canonical_sha256(training),
-                "checkpoint_sha256": metadata["checkpoint_file"]["sha256"],
-                "device_type": device.type,
-                "torch_version": torch.__version__,
-                "python_version": platform.python_version(),
-                "labels_loaded": False,
-            },
-        }
-        exact_path = decision_root / "exact_reports" / f"{decision_id}.json"
-        write_immutable_json(exact_path, exact_payload)
-        returned_path = candidate_path if transaction_status == "ACCEPTED" else source_path
-        record = {
-            "schema": DECISION_RECORD_SCHEMA,
-            "decision_id": decision_id,
-            "case_id": case["case_id"],
-            "seed": seed,
-            "variant_id": variant,
-            "checkpoint_sha256": metadata["checkpoint_file"]["sha256"],
-            "certified_source_field": source_record,
-            "requested_field": requested_record,
-            "candidate_field": candidate_record,
-            "returned_field": returned_record,
-            "requested_save_reload": save_reload_attestation(
-                requested_record,
-                in_memory_array_sha256=requested_array_sha,
-                reloaded_path=requested_path,
-            ),
-            "candidate_save_reload": save_reload_attestation(
-                candidate_record,
-                in_memory_array_sha256=candidate_array_sha,
-                reloaded_path=candidate_path,
-            ),
-            "returned_save_reload": save_reload_attestation(
-                returned_record,
-                in_memory_array_sha256=returned_array_sha,
-                reloaded_path=returned_path,
-            ),
-            "exact_report": file_record("decision_output_root", decision_root, exact_path),
-            "candidate_exact_status": candidate_exact["status"],
-            "candidate_exact_certified": candidate_exact["certified"],
-            "returned_exact_status": returned_exact["status"],
-            "returned_certified": returned_exact["certified"],
-            "transaction_status": transaction_status,
-            "rollback_source_sha256_equal": rollback_equal,
-            "runtime_seconds": runtime_seconds,
-            "peak_memory_bytes": peak_memory_bytes,
-            "requested_delta_rms": requested_delta_rms,
-            "candidate_delta_rms": candidate_delta_rms,
-            "returned_delta_rms": returned_delta_rms,
-            "candidate_retained_ratio": candidate_retained_ratio,
-            "returned_retained_ratio": returned_retained_ratio,
-            "labels_loaded": False,
-            "execution_sha256": execution_sha256(
-                {
-                    "environment": exact_payload["execution"],
-                    "performance": {
-                        "runtime_seconds": runtime_seconds,
-                        "peak_memory_bytes": peak_memory_bytes,
-                        "requested_delta_rms": requested_delta_rms,
-                        "candidate_delta_rms": candidate_delta_rms,
-                        "returned_delta_rms": returned_delta_rms,
-                        "candidate_retained_ratio": candidate_retained_ratio,
-                        "returned_retained_ratio": returned_retained_ratio,
-                    },
-                }
-            ),
-        }
-        write_immutable_json(record_path, record)
+            _materialize_one_decision(context, case, decision_id)
         completed += 1
     return completed
 

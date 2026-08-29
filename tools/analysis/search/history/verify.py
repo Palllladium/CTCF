@@ -708,6 +708,125 @@ def _evaluate_assertion(
     )
 
 
+def _verify_run_manifest(root: Path, entry: Mapping[str, Any]) -> tuple[Mapping[str, Any], str, Mapping[str, Any]]:
+    """Check run_manifest.json against its registry declaration; return it, its digest and its files block."""
+    declaration = entry["manifest"]
+    if not (root / "run_manifest.json").is_file():
+        raise MissingProductError("run_manifest_present", f"{root / 'run_manifest.json'} is absent")
+    manifest_bytes = _read_product_bytes(
+        root, "run_manifest.json", check="run_manifest_read", error=MissingProductError
+    )
+    manifest = parse_strict_json(manifest_bytes, check="run_manifest_json", error=InvalidProductError)
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    _require(
+        manifest_digest == declaration["sha256"],
+        "run_manifest_sha256",
+        f"run_manifest.json hashes to {manifest_digest}",
+        InvalidProductError,
+    )
+    _require(
+        isinstance(manifest, Mapping), "run_manifest_object", "run_manifest.json is not an object", InvalidProductError
+    )
+    _require(
+        manifest.get("schema") == declaration["schema"],
+        "manifest_schema",
+        f"schema is {manifest.get('schema')!r}",
+        InvalidProductError,
+    )
+    _require(
+        manifest.get("run_id") == entry["run_id"],
+        "manifest_run_id",
+        f"run_id is {manifest.get('run_id')!r}",
+        InvalidProductError,
+    )
+    _require(
+        manifest.get("status") == declaration["status"],
+        "manifest_status",
+        f"status is {manifest.get('status')!r}",
+        InvalidProductError,
+    )
+    _require(
+        # `0.0 == 0` and `True == 1` in Python, so the type must be checked before the value.
+        type(manifest.get("exit_code")) is int and manifest["exit_code"] == declaration["exit_code"],
+        "manifest_exit_code",
+        f"exit_code is {manifest.get('exit_code')!r}",
+        InvalidProductError,
+    )
+    code = manifest.get("code")
+    _require(isinstance(code, Mapping), "manifest_code_block", "manifest has no code object", InvalidProductError)
+    _require(
+        code.get("git_head") == declaration["code_git_head"],
+        "manifest_code_git_head",
+        f"code.git_head is {code.get('git_head')!r}",
+        InvalidProductError,
+    )
+    _require(
+        code.get("tracked_tree_clean_at_start") is True,
+        "manifest_tracked_tree_clean",
+        f"tracked_tree_clean_at_start is {code.get('tracked_tree_clean_at_start')!r}",
+        InvalidProductError,
+    )
+    files_block = manifest.get("files")
+    _require(
+        isinstance(files_block, Mapping), "manifest_files_block", "manifest has no files object", InvalidProductError
+    )
+    return manifest, manifest_digest, files_block
+
+
+def _verify_outputs_index(root: Path, files_block: Mapping[str, Any]) -> dict[str, tuple[int, str]]:
+    """Check outputs.tsv against the manifest and demand an empty, indexed git_status.txt."""
+    if not (root / "outputs.tsv").is_file():
+        raise MissingProductError("outputs_index_present", f"{root / 'outputs.tsv'} is absent")
+    index_bytes = _read_product_bytes(root, "outputs.tsv", check="outputs_index_read", error=MissingProductError)
+    index = parse_outputs_index(index_bytes, check="outputs_index_format")
+    index_digest = hashlib.sha256(index_bytes).hexdigest()
+    _require(
+        index_digest == files_block.get("outputs_sha256"),
+        "outputs_index_sha256",
+        f"outputs.tsv hashes to {index_digest} but the manifest records {files_block.get('outputs_sha256')!r}",
+        InvalidProductError,
+    )
+    _require(GIT_STATUS_FILE in index, "git_status_indexed", "git_status.txt is not indexed", InvalidProductError)
+    status_size, status_digest = index[GIT_STATUS_FILE]
+    _require(
+        status_size == 0 and status_digest == EMPTY_FILE_SHA256,
+        "git_status_empty",
+        f"git_status.txt is indexed as {status_size} bytes / {status_digest}",
+        InvalidProductError,
+    )
+    _require(
+        files_block.get("git_status_sha256") == EMPTY_FILE_SHA256,
+        "manifest_git_status_sha256",
+        f"manifest records git_status_sha256 {files_block.get('git_status_sha256')!r}",
+        InvalidProductError,
+    )
+    return index
+
+
+def _verify_tree_closure(
+    root: Path,
+    index: Mapping[str, tuple[int, str]],
+    unindexed: Mapping[str, str],
+) -> dict[str, Path]:
+    """Demand the tree hold exactly the declared files and no two that collide when casefolded."""
+    present = enumerate_tree(root, check="tree_closure")
+    expected_names = set(index) | set(unindexed)
+    missing = sorted(expected_names - set(present))
+    _require(not missing, "tree_closure_missing", f"absent files: {missing[:8]}", InvalidProductError)
+    extra = sorted(set(present) - expected_names)
+    _require(not extra, "tree_closure_extra", f"unregistered files: {extra[:8]}", InvalidProductError)
+    folded: dict[str, str] = {}
+    # On a case-insensitive filesystem two declared names would silently become one file.
+    for name in sorted(present):
+        key = name.casefold()
+        if key in folded:
+            raise InvalidProductError(
+                "tree_casefold_collision", f"{name!r} collides with {folded[key]!r} after casefold"
+            )
+        folded[key] = name
+    return present
+
+
 def verify_product(
     registry: Mapping[str, Any],
     product_id: str,
@@ -726,109 +845,10 @@ def verify_product(
         raise MissingProductError("product_root", f"{root} is not a directory")
     assert_plain_directory(root, check="product_root_is_plain", error=InvalidProductError)
 
-    manifest_declaration = entry["manifest"]
-    if not (root / "run_manifest.json").is_file():
-        raise MissingProductError("run_manifest_present", f"{root / 'run_manifest.json'} is absent")
-    manifest_bytes = _read_product_bytes(
-        root, "run_manifest.json", check="run_manifest_read", error=MissingProductError
-    )
-    manifest = parse_strict_json(manifest_bytes, check="run_manifest_json", error=InvalidProductError)
-    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
-    _require(
-        manifest_digest == manifest_declaration["sha256"],
-        "run_manifest_sha256",
-        f"run_manifest.json hashes to {manifest_digest}",
-        InvalidProductError,
-    )
-    _require(
-        isinstance(manifest, Mapping), "run_manifest_object", "run_manifest.json is not an object", InvalidProductError
-    )
-    _require(
-        manifest.get("schema") == manifest_declaration["schema"],
-        "manifest_schema",
-        f"schema is {manifest.get('schema')!r}",
-        InvalidProductError,
-    )
-    _require(
-        manifest.get("run_id") == entry["run_id"],
-        "manifest_run_id",
-        f"run_id is {manifest.get('run_id')!r}",
-        InvalidProductError,
-    )
-    _require(
-        manifest.get("status") == manifest_declaration["status"],
-        "manifest_status",
-        f"status is {manifest.get('status')!r}",
-        InvalidProductError,
-    )
-    _require(
-        # `0.0 == 0` and `True == 1` in Python, so the type must be checked before the value.
-        type(manifest.get("exit_code")) is int and manifest["exit_code"] == manifest_declaration["exit_code"],
-        "manifest_exit_code",
-        f"exit_code is {manifest.get('exit_code')!r}",
-        InvalidProductError,
-    )
-    code = manifest.get("code")
-    _require(isinstance(code, Mapping), "manifest_code_block", "manifest has no code object", InvalidProductError)
-    _require(
-        code.get("git_head") == manifest_declaration["code_git_head"],
-        "manifest_code_git_head",
-        f"code.git_head is {code.get('git_head')!r}",
-        InvalidProductError,
-    )
-    _require(
-        code.get("tracked_tree_clean_at_start") is True,
-        "manifest_tracked_tree_clean",
-        f"tracked_tree_clean_at_start is {code.get('tracked_tree_clean_at_start')!r}",
-        InvalidProductError,
-    )
-    files_block = manifest.get("files")
-    _require(
-        isinstance(files_block, Mapping), "manifest_files_block", "manifest has no files object", InvalidProductError
-    )
-
-    if not (root / "outputs.tsv").is_file():
-        raise MissingProductError("outputs_index_present", f"{root / 'outputs.tsv'} is absent")
-    index_bytes = _read_product_bytes(root, "outputs.tsv", check="outputs_index_read", error=MissingProductError)
-    index = parse_outputs_index(index_bytes, check="outputs_index_format")
-    index_digest = hashlib.sha256(index_bytes).hexdigest()
-    _require(
-        index_digest == files_block.get("outputs_sha256"),
-        "outputs_index_sha256",
-        f"outputs.tsv hashes to {index_digest} but the manifest records {files_block.get('outputs_sha256')!r}",
-        InvalidProductError,
-    )
-
-    _require(GIT_STATUS_FILE in index, "git_status_indexed", "git_status.txt is not indexed", InvalidProductError)
-    status_size, status_digest = index[GIT_STATUS_FILE]
-    _require(
-        status_size == 0 and status_digest == EMPTY_FILE_SHA256,
-        "git_status_empty",
-        f"git_status.txt is indexed as {status_size} bytes / {status_digest}",
-        InvalidProductError,
-    )
-    _require(
-        files_block.get("git_status_sha256") == EMPTY_FILE_SHA256,
-        "manifest_git_status_sha256",
-        f"manifest records git_status_sha256 {files_block.get('git_status_sha256')!r}",
-        InvalidProductError,
-    )
-
+    _manifest, manifest_digest, files_block = _verify_run_manifest(root, entry)
+    index = _verify_outputs_index(root, files_block)
     unindexed = {item["path"]: item["sha256"] for item in entry["unindexed_files"]}
-    present = enumerate_tree(root, check="tree_closure")
-    expected_names = set(index) | set(unindexed)
-    missing = sorted(expected_names - set(present))
-    _require(not missing, "tree_closure_missing", f"absent files: {missing[:8]}", InvalidProductError)
-    extra = sorted(set(present) - expected_names)
-    _require(not extra, "tree_closure_extra", f"unregistered files: {extra[:8]}", InvalidProductError)
-    folded: dict[str, str] = {}
-    for name in sorted(present):
-        key = name.casefold()
-        if key in folded:
-            raise InvalidProductError(
-                "tree_casefold_collision", f"{name!r} collides with {folded[key]!r} after casefold"
-            )
-        folded[key] = name
+    present = _verify_tree_closure(root, index, unindexed)
 
     unindexed_bytes = 0
     for name in sorted(unindexed):
@@ -879,7 +899,7 @@ def verify_product(
         "result": "PASS",
         "product_root_hint": entry["relative_hints"][0],
         "manifest_sha256": manifest_digest,
-        "code_git_head": manifest_declaration["code_git_head"],
+        "code_git_head": entry["manifest"]["code_git_head"],
         "indexed_files": len(index),
         "unindexed_files": len(unindexed),
         "total_files": len(present),

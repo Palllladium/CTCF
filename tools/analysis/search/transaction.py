@@ -4,7 +4,7 @@ import math
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
@@ -522,6 +522,58 @@ def smooth_proposal(proposal: torch.Tensor, *, passes: int = 1) -> torch.Tensor:
     return out
 
 
+def _proposal_features(
+    fixed: torch.Tensor,
+    moving: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    feature: FeatureKind,
+    mind_radius: int,
+    mind_dilation: int,
+    fixed_feature_override: torch.Tensor | None,
+    moving_feature_override: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The volumes the search compares: the caller's own features, or the ones derived here."""
+    if (fixed_feature_override is None) != (moving_feature_override is None):
+        raise ValueError("both feature overrides must be supplied together")
+    if fixed_feature_override is not None and moving_feature_override is not None:
+        fixed_feature, moving_feature = fixed_feature_override, moving_feature_override
+    elif feature == "mind":
+        fixed_feature = mind_ssc(masked_zscore(fixed, mask), radius=mind_radius, dilation=mind_dilation)
+        moving_feature = mind_ssc(masked_zscore(moving, mask), radius=mind_radius, dilation=mind_dilation)
+    else:
+        fixed_feature, moving_feature = masked_zscore(fixed, mask), masked_zscore(moving, mask)
+    expected_channels = 12 if feature == "mind" else 1
+    if fixed_feature.shape != moving_feature.shape or fixed_feature.shape[1] != expected_channels:
+        raise ValueError(f"feature overrides must have equal [1,{expected_channels},D,H,W] shapes")
+    return fixed_feature, moving_feature
+
+
+def _candidate_scan(
+    fixed_feature: torch.Tensor,
+    moving_feature: torch.Tensor,
+    psi_displacement: torch.Tensor,
+    mask: torch.Tensor,
+    feature: FeatureKind,
+    orientation: Orientation,
+    reversed_current_moving: torch.Tensor | None,
+) -> Iterator[tuple[int, tuple[int, int, int], torch.Tensor, torch.Tensor]]:
+    """Sweep the 27 offsets once, yielding each candidate's cost and its in-mask validity."""
+    # Both passes recompute rather than cache: holding all 27 candidates would materialise the
+    # [27,12,D,H,W] volume this module exists to avoid.
+    for index, offset in enumerate(OFFSETS):
+        cost, valid = _candidate_cost(
+            fixed_feature,
+            moving_feature,
+            psi_displacement,
+            offset,
+            feature,
+            orientation,
+            reversed_current_moving,
+        )
+        yield index, offset, cost, valid & mask
+
+
 def build_proposal(
     fixed: torch.Tensor,
     moving: torch.Tensor,
@@ -542,21 +594,16 @@ def build_proposal(
     if fixed.shape[-3:] != moving.shape[-3:] or fixed.shape[-3:] != psi_displacement.shape[-3:]:
         raise ValueError("fixed, moving and Psi must use the same spatial grid")
 
-    if (fixed_feature_override is None) != (moving_feature_override is None):
-        raise ValueError("both feature overrides must be supplied together")
-    if fixed_feature_override is not None and moving_feature_override is not None:
-        fixed_feature, moving_feature = fixed_feature_override, moving_feature_override
-    else:
-        fixed_norm = masked_zscore(fixed, mask)
-        moving_norm = masked_zscore(moving, mask)
-        if feature == "mind":
-            fixed_feature = mind_ssc(fixed_norm, radius=mind_radius, dilation=mind_dilation)
-            moving_feature = mind_ssc(moving_norm, radius=mind_radius, dilation=mind_dilation)
-        else:
-            fixed_feature, moving_feature = fixed_norm, moving_norm
-    expected_channels = 12 if feature == "mind" else 1
-    if fixed_feature.shape != moving_feature.shape or fixed_feature.shape[1] != expected_channels:
-        raise ValueError(f"feature overrides must have equal [1,{expected_channels},D,H,W] shapes")
+    fixed_feature, moving_feature = _proposal_features(
+        fixed,
+        moving,
+        mask,
+        feature=feature,
+        mind_radius=mind_radius,
+        mind_dilation=mind_dilation,
+        fixed_feature_override=fixed_feature_override,
+        moving_feature_override=moving_feature_override,
+    )
 
     shape = (1, 1, *fixed.shape[-3:])
     sum_cost = fixed.new_zeros(shape)
@@ -566,18 +613,17 @@ def build_proposal(
     argmin = torch.full(shape, ZERO_OFFSET_INDEX, device=fixed.device, dtype=torch.int16)
     reversed_current_moving = sample_at_psi(moving_feature, psi_displacement) if orientation == "reversed" else None
 
+    scan_arguments = (
+        fixed_feature,
+        moving_feature,
+        psi_displacement,
+        mask,
+        feature,
+        orientation,
+        reversed_current_moving,
+    )
     with torch.inference_mode():
-        for index, offset in enumerate(OFFSETS):
-            cost, valid = _candidate_cost(
-                fixed_feature,
-                moving_feature,
-                psi_displacement,
-                offset,
-                feature,
-                orientation,
-                reversed_current_moving,
-            )
-            valid = valid & mask
+        for index, _offset, cost, valid in _candidate_scan(*scan_arguments):
             safe_cost = torch.where(valid, cost, torch.zeros_like(cost))
             sum_cost += safe_cost
             sum_square += safe_cost.square()
@@ -598,17 +644,7 @@ def build_proposal(
         sum_weight = fixed.new_zeros(shape)
         sum_weight_log = fixed.new_zeros(shape)
         expected = fixed.new_zeros((1, 3, *fixed.shape[-3:]))
-        for offset in OFFSETS:
-            cost, valid = _candidate_cost(
-                fixed_feature,
-                moving_feature,
-                psi_displacement,
-                offset,
-                feature,
-                orientation,
-                reversed_current_moving,
-            )
-            valid = valid & mask
+        for _index, offset, cost, valid in _candidate_scan(*scan_arguments):
             log_weight = -((cost - mean) / std - z_min)
             safe_log_weight = torch.where(valid, log_weight, torch.zeros_like(log_weight))
             weight = torch.exp(safe_log_weight) * valid.to(cost.dtype)
@@ -721,6 +757,44 @@ def load_flow_npz(path: Path) -> torch.Tensor:
     return tensor
 
 
+def _rollback_to_initial_bytes(
+    initial_path: Path,
+    output_path: Path,
+    initial_sha: str,
+    *,
+    eps: str,
+    max_exact: int,
+    tile_shape: tuple[int, int, int],
+) -> TransactionOutcome:
+    """Restore the initial NPZ bytes and prove the restored file is that artifact, certified."""
+    fd, rollback_name = tempfile.mkstemp(prefix=f".{output_path.name}.rollback.", dir=output_path.parent)
+    os.close(fd)
+    try:
+        # Copy, never re-serialise: a fresh encode could differ bit for bit, and the claim here
+        # is byte identity with the artifact the transaction started from.
+        shutil.copyfile(initial_path, rollback_name)
+        os.replace(rollback_name, output_path)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(rollback_name)
+    output_sha = sha256_file(output_path)
+    if output_sha != initial_sha:
+        raise RuntimeError("rollback output is not byte-identical to the initial artifact")
+    rollback_report = certify_flow_exact(
+        load_flow_npz(output_path), eps=eps, max_exact=max_exact, tile_shape=tile_shape
+    )
+    if rollback_report.get("status") != "CERTIFIED" or rollback_report.get("certified") is not True:
+        raise RuntimeError("byte-exact rollback target is not exactly certified")
+    return TransactionOutcome(
+        status="ROLLED_BACK",
+        selected=None,
+        exact_report=rollback_report,
+        output_path=output_path,
+        output_sha256=output_sha,
+        rollback_byte_identical=True,
+    )
+
+
 def commit_exact_candidate(
     initial_path: Path,
     output_path: Path,
@@ -744,12 +818,6 @@ def commit_exact_candidate(
     if initial_path == output_path:
         raise ValueError("initial_path and output_path must differ so rollback can be byte-preserving")
     initial_sha = sha256_file(initial_path)
-    exact_report: dict[str, object] = {
-        "status": "NOT_ATTEMPTED",
-        "certified": False,
-        "complete": True,
-    }
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if eligible and (initial_psi is None or proposal is None):
         raise ValueError("initial_psi and proposal are required when eligible candidates are present")
@@ -779,28 +847,11 @@ def commit_exact_candidate(
             with suppress(FileNotFoundError):
                 candidate_path.unlink()
 
-    fd, rollback_name = tempfile.mkstemp(prefix=f".{output_path.name}.rollback.", dir=output_path.parent)
-    os.close(fd)
-    try:
-        shutil.copyfile(initial_path, rollback_name)
-        os.replace(rollback_name, output_path)
-    finally:
-        with suppress(FileNotFoundError):
-            os.unlink(rollback_name)
-    output_sha = sha256_file(output_path)
-    identical = output_sha == initial_sha
-    if not identical:
-        raise RuntimeError("rollback output is not byte-identical to the initial artifact")
-    rollback_report = certify_flow_exact(
-        load_flow_npz(output_path), eps=eps, max_exact=max_exact, tile_shape=tile_shape
-    )
-    if rollback_report.get("status") != "CERTIFIED" or rollback_report.get("certified") is not True:
-        raise RuntimeError("byte-exact rollback target is not exactly certified")
-    return TransactionOutcome(
-        status="ROLLED_BACK",
-        selected=None,
-        exact_report=rollback_report,
-        output_path=output_path,
-        output_sha256=output_sha,
-        rollback_byte_identical=True,
+    return _rollback_to_initial_bytes(
+        initial_path,
+        output_path,
+        initial_sha,
+        eps=eps,
+        max_exact=max_exact,
+        tile_shape=tile_shape,
     )

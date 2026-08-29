@@ -646,6 +646,44 @@ def _evaluation_context(args: argparse.Namespace) -> tuple[EvaluationContext, An
     return context, runtime
 
 
+def _accept_existing_evaluation(context: Any, decision_id: str, record_path: Path, evaluation_root: Path) -> None:
+    """Re-authenticate an evaluation an earlier run of this shard already wrote."""
+    record = load_canonical_json(record_path)
+    build_evaluation_barrier(context.protocol, context.training_barrier, context.decision_barrier, [record])
+    evaluation = _verify_evaluation_record(record, evaluation_root)
+    if evaluation.get("decision_id") != decision_id:
+        raise RuntimeError("Existing Stage5 evaluation has another identity")
+
+
+def _recover_evaluation_record(
+    context: Any,
+    decision: Mapping[str, Any],
+    decision_id: str,
+    metrics_path: Path,
+    record_path: Path,
+    evaluation_root: Path,
+) -> None:
+    """Rebuild the record for metrics that survived a crash before their record was written."""
+    evaluation = load_canonical_json(metrics_path)
+    if (
+        evaluation.get("schema") != EVALUATION_SCHEMA
+        or evaluation.get("decision_id") != decision_id
+        or evaluation.get("decision_record_sha256") != canonical_sha256(decision)
+        or evaluation.get("protocol_sha256") != context.protocol_sha256
+        or evaluation.get("training_barrier_sha256") != context.training_barrier_sha256
+        or evaluation.get("decision_barrier_sha256") != context.decision_barrier_sha256
+    ):
+        raise RuntimeError(f"Orphan Stage5 evaluation metrics are not recoverable: {decision_id}")
+    record = build_evaluation_record(
+        evaluation,
+        file_record("evaluation_output_root", evaluation_root, metrics_path),
+    )
+    build_evaluation_barrier(context.protocol, context.training_barrier, context.decision_barrier, [record])
+    write_immutable_json(record_path, record)
+    _verify_evaluation_record(record, evaluation_root)
+    print(f"[STAGE5 EVALUATION RECOVERED] {decision_id}")
+
+
 def command_evaluate(args: argparse.Namespace) -> int:
     context, _ = _evaluation_context(args)
     label_store = Stage5OasisEvaluationLabelStore(
@@ -676,32 +714,18 @@ def command_evaluate(args: argparse.Namespace) -> int:
         metrics_path = args.evaluation_root / "metrics" / f"{decision_id}.json"
         record_path = args.evaluation_root / "records" / f"{decision_id}.json"
         if metrics_path.is_file() and record_path.is_file():
-            record = load_canonical_json(record_path)
-            build_evaluation_barrier(context.protocol, context.training_barrier, context.decision_barrier, [record])
-            evaluation = _verify_evaluation_record(record, args.evaluation_root)
-            if evaluation.get("decision_id") != decision_id:
-                raise RuntimeError("Existing Stage5 evaluation has another identity")
+            _accept_existing_evaluation(context, decision_id, record_path, args.evaluation_root)
             completed += 1
             continue
         if metrics_path.is_file() and not record_path.exists():
-            evaluation = load_canonical_json(metrics_path)
-            if (
-                evaluation.get("schema") != EVALUATION_SCHEMA
-                or evaluation.get("decision_id") != decision_id
-                or evaluation.get("decision_record_sha256") != canonical_sha256(decision)
-                or evaluation.get("protocol_sha256") != context.protocol_sha256
-                or evaluation.get("training_barrier_sha256") != context.training_barrier_sha256
-                or evaluation.get("decision_barrier_sha256") != context.decision_barrier_sha256
-            ):
-                raise RuntimeError(f"Orphan Stage5 evaluation metrics are not recoverable: {decision_id}")
-            record = build_evaluation_record(
-                evaluation,
-                file_record("evaluation_output_root", args.evaluation_root, metrics_path),
+            _recover_evaluation_record(
+                context,
+                decision,
+                decision_id,
+                metrics_path,
+                record_path,
+                args.evaluation_root,
             )
-            build_evaluation_barrier(context.protocol, context.training_barrier, context.decision_barrier, [record])
-            write_immutable_json(record_path, record)
-            _verify_evaluation_record(record, args.evaluation_root)
-            print(f"[STAGE5 EVALUATION RECOVERED] {decision_id}")
             completed += 1
             continue
         if metrics_path.exists() or record_path.exists():

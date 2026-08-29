@@ -718,6 +718,42 @@ def _require_regular_source_file(path: Path, label: str) -> None:
         raise FileNotFoundError(f"missing regular Stage5 {label}: {path}")
 
 
+def _validate_identity_bootstrap_report(
+    nested: Mapping[str, Any],
+    *,
+    image_shape: tuple[int, int, int],
+    phi_array_sha256: str,
+    psi_array_sha256: str,
+) -> None:
+    """The identity bootstrap must be the authoritative zero field, not merely a field that scored well."""
+    if (
+        nested.get("scientific_degradation") != "IDENTITY_BASELINE"
+        or nested.get("digital_residual_percent") != 0.0
+        or nested.get("trilinear_repair") is not None
+    ):
+        raise RuntimeError("Stage5 identity bootstrap report changed")
+    identity_phi = torch.zeros((1, 3, *image_shape), dtype=torch.float32)
+    identity_psi = phi_to_psi_displacement(identity_phi).float()
+    if phi_array_sha256 != array_sha256(identity_phi) or psi_array_sha256 != array_sha256(identity_psi):
+        raise RuntimeError("Stage5 identity bootstrap arrays are not the authoritative identity fields")
+
+
+def _validate_collar_repair_bootstrap_report(nested: Mapping[str, Any]) -> None:
+    """The collar-repair bootstrap must carry a certified, finite trilinear bound at the work epsilon."""
+    repair = nested.get("trilinear_repair")
+    bound = repair.get("cert_bound") if isinstance(repair, dict) else None
+    certified_repair = isinstance(repair, dict) and repair.get("certified") is True
+    usable_bound = not isinstance(bound, bool) and isinstance(bound, (int, float)) and math.isfinite(bound)
+    if (
+        nested.get("scientific_degradation") is not None
+        or nested.get("digital_residual_percent") != 0.0
+        or not certified_repair
+        or not usable_bound
+        or bound < WORK_EPS
+    ):
+        raise RuntimeError("Stage5 collar-repair bootstrap report changed")
+
+
 def validate_certified_source_artifact(
     case_root: Path,
     *,
@@ -796,30 +832,14 @@ def validate_certified_source_artifact(
         "Stage5 source exact Psi array SHA-256",
     )
     if policy == "identity":
-        if (
-            nested.get("scientific_degradation") != "IDENTITY_BASELINE"
-            or nested.get("digital_residual_percent") != 0.0
-            or nested.get("trilinear_repair") is not None
-        ):
-            raise RuntimeError("Stage5 identity bootstrap report changed")
-        identity_phi = torch.zeros((1, 3, *image_shape), dtype=torch.float32)
-        identity_psi = phi_to_psi_displacement(identity_phi).float()
-        if phi_array_sha256 != array_sha256(identity_phi) or psi_array_sha256 != array_sha256(identity_psi):
-            raise RuntimeError("Stage5 identity bootstrap arrays are not the authoritative identity fields")
+        _validate_identity_bootstrap_report(
+            nested,
+            image_shape=image_shape,
+            phi_array_sha256=phi_array_sha256,
+            psi_array_sha256=psi_array_sha256,
+        )
     else:
-        repair = nested.get("trilinear_repair")
-        bound = repair.get("cert_bound") if isinstance(repair, dict) else None
-        if (
-            nested.get("scientific_degradation") is not None
-            or nested.get("digital_residual_percent") != 0.0
-            or not isinstance(repair, dict)
-            or repair.get("certified") is not True
-            or isinstance(bound, bool)
-            or not isinstance(bound, (int, float))
-            or not math.isfinite(bound)
-            or bound < WORK_EPS
-        ):
-            raise RuntimeError("Stage5 collar-repair bootstrap report changed")
+        _validate_collar_repair_bootstrap_report(nested)
     return {
         "case": dict(case),
         "seed": seed,
@@ -1057,6 +1077,60 @@ def _controller_training_tensors(features: Any) -> tuple[torch.Tensor, ...]:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _ControllerStep:
+    """The collaborators one controller training step needs, fixed for the whole run."""
+
+    store: Stage5OasisImageStore
+    base_runner: Runner
+    controller: Stage5SpatialController
+    optimizer: torch.optim.Optimizer
+    scaler: torch.amp.GradScaler
+    device: torch.device
+    variant: str
+    bootstrap_policy: str
+    config: ControllerTrainingConfig
+
+
+def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch: int) -> dict[str, float]:
+    """Take one optimizer step on one unordered pair, seen in both directions."""
+    moving_ab = _tensor_image(step.store, pair["subject_a"], step.device)
+    fixed_ab = _tensor_image(step.store, pair["subject_b"], step.device)
+    moving_ba = fixed_ab
+    fixed_ba = moving_ab
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+        _, raw_ab = step.base_runner.model(moving_ab, fixed_ab, alpha_l1=1.0, alpha_l3=1.0)
+        _, raw_ba = step.base_runner.model(moving_ba, fixed_ba, alpha_l1=1.0, alpha_l3=1.0)
+    _, psi_ab, _ = construct_initial_field(raw_ab, policy=step.bootstrap_policy)
+    _, psi_ba, _ = construct_initial_field(raw_ba, policy=step.bootstrap_policy)
+    features_ab = build_stage5_features(fixed_ab, moving_ab, psi_ab)
+    features_ba = build_stage5_features(fixed_ba, moving_ba, psi_ba)
+    input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = _controller_training_tensors(features_ab)
+    input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = _controller_training_tensors(features_ba)
+    step.optimizer.zero_grad(set_to_none=True)
+    # The controller runs under FP16 autocast while controller_objective re-enters FP32 inside.
+    # That boundary is the numerical contract of the run; do not widen or move it.
+    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+        output_ab = step.controller(input_ab, step.variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
+        output_ba = step.controller(input_ba, step.variant, s2_proposal=s2_ba, s4_proposal=s4_ba)
+        loss, logs = controller_objective(
+            fixed_norm_ab,
+            moving_norm_ab,
+            fixed_norm_ba,
+            moving_norm_ba,
+            psi_ab,
+            psi_ba,
+            output_ab.requested_delta,
+            output_ba.requested_delta,
+            config=step.config.loss,
+        )
+    if not bool(torch.isfinite(loss)):
+        raise FloatingPointError(f"non-finite Stage5 controller loss at epoch {epoch}")
+    step.scaler.scale(loss).backward()
+    _strict_scaler_step(step.scaler, step.optimizer, phase=f"controller {step.variant}")
+    return logs
+
+
 def train_controller(
     *,
     data_contract: Path,
@@ -1146,6 +1220,17 @@ def train_controller(
     if start_epoch == config.fixed_epoch:
         return checkpoint_path
 
+    step = _ControllerStep(
+        store=store,
+        base_runner=base_runner,
+        controller=controller,
+        optimizer=optimizer,
+        scaler=scaler,
+        device=device,
+        variant=variant,
+        bootstrap_policy=bootstrap_policy,
+        config=config,
+    )
     for epoch in range(start_epoch, config.fixed_epoch):
         epoch_started = time.perf_counter()
         controller.train()
@@ -1153,49 +1238,7 @@ def train_controller(
         totals: dict[str, float] = {}
         completed = 0
         for pair in ordered:
-            a, b = pair["subject_a"], pair["subject_b"]
-            moving_ab = _tensor_image(store, a, device)
-            fixed_ab = _tensor_image(store, b, device)
-            moving_ba = fixed_ab
-            fixed_ba = moving_ab
-            with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
-                _, raw_ab = base_runner.model(moving_ab, fixed_ab, alpha_l1=1.0, alpha_l3=1.0)
-                _, raw_ba = base_runner.model(moving_ba, fixed_ba, alpha_l1=1.0, alpha_l3=1.0)
-            _, psi_ab, _ = construct_initial_field(raw_ab, policy=bootstrap_policy)
-            _, psi_ba, _ = construct_initial_field(raw_ba, policy=bootstrap_policy)
-            features_ab = build_stage5_features(fixed_ab, moving_ab, psi_ab)
-            features_ba = build_stage5_features(fixed_ba, moving_ba, psi_ba)
-            input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = _controller_training_tensors(features_ab)
-            input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = _controller_training_tensors(features_ba)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
-                output_ab = controller(
-                    input_ab,
-                    variant,
-                    s2_proposal=s2_ab,
-                    s4_proposal=s4_ab,
-                )
-                output_ba = controller(
-                    input_ba,
-                    variant,
-                    s2_proposal=s2_ba,
-                    s4_proposal=s4_ba,
-                )
-                loss, logs = controller_objective(
-                    fixed_norm_ab,
-                    moving_norm_ab,
-                    fixed_norm_ba,
-                    moving_norm_ba,
-                    psi_ab,
-                    psi_ba,
-                    output_ab.requested_delta,
-                    output_ba.requested_delta,
-                    config=config.loss,
-                )
-            if not bool(torch.isfinite(loss)):
-                raise FloatingPointError(f"non-finite Stage5 controller loss at epoch {epoch}")
-            scaler.scale(loss).backward()
-            _strict_scaler_step(scaler, optimizer, phase=f"controller {variant}")
+            logs = _controller_pair_step(step, pair, epoch)
             for key, value in logs.items():
                 value = float(value)
                 if not math.isfinite(value):

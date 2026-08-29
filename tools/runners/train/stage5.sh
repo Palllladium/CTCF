@@ -169,6 +169,18 @@ terminate_active_children() {
   ACTIVE_PIDS=()
 }
 
+# Wait for one batch of background jobs. ACTIVE_PIDS is published first so the exit trap can
+# still terminate the batch, and cleared afterwards; the phase fails if any single job failed.
+wait_for_batch() {
+  local pid failed=0
+  ACTIVE_PIDS=("$@")
+  for pid in "$@"; do
+    wait "$pid" || failed=1
+  done
+  ACTIVE_PIDS=()
+  [[ "$failed" -eq 0 ]]
+}
+
 copy_compact_attestations() {
   mkdir -p \
     "$COMPACT_ROOT/data_attestations" \
@@ -327,13 +339,7 @@ train_u0_phase() {
       --device cuda:0 &
     pids+=("$!")
   done
-  ACTIVE_PIDS=("${pids[@]}")
-  local failed=0
-  for pid in "${pids[@]}"; do
-    wait "$pid" || failed=1
-  done
-  ACTIVE_PIDS=()
-  [[ "$failed" -eq 0 ]]
+  wait_for_batch "${pids[@]}"
 }
 
 materialize_source_phase() {
@@ -373,47 +379,44 @@ materialize_source_phase() {
       --device cuda:0 &
     pids+=("$!")
   done
-  ACTIVE_PIDS=("${pids[@]}")
-  local failed=0
-  for pid in "${pids[@]}"; do
-    wait "$pid" || failed=1
+  wait_for_batch "${pids[@]}"
+}
+
+# One wave: the variants at VARIANTS[start .. start+#GPUS-1], one per GPU, trained together.
+# The GPU a slot uses is rotated by the seed so a slow device is not always paired with the
+# same variant across the three seeds.
+train_controller_wave() {
+  local seed="$1" start="$2"
+  local slot index variant physical_slot
+  local -a pids=()
+  for slot in "${!GPUS[@]}"; do
+    index=$((start + slot))
+    if [[ "$index" -ge "${#VARIANTS[@]}" ]]; then
+      break
+    fi
+    variant="${VARIANTS[$index]}"
+    physical_slot=$(((slot + seed) % ${#GPUS[@]}))
+    CUDA_VISIBLE_DEVICES="${GPUS[$physical_slot]}" run_logged "$LOG_ROOT/controller_s${seed}_${variant}.log" \
+      run_cli train-controller \
+      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+      --checkpoint-root "$CHECKPOINT_ROOT" \
+      --seed "$seed" \
+      --variant "$variant" \
+      --device cuda:0 &
+    pids+=("$!")
   done
-  ACTIVE_PIDS=()
-  [[ "$failed" -eq 0 ]]
+  wait_for_batch "${pids[@]}"
 }
 
 train_controller_phase() {
-  local seed slot physical_slot variant start index
+  local seed start
   for seed in "${SEEDS[@]}"; do
     run_cli init-controller "${PROTOCOL_ARGS[@]}" --checkpoint-root "$CHECKPOINT_ROOT" --seed "$seed"
   done
   for seed in "${SEEDS[@]}"; do
     echo "[STAGE5 CONTROLLER WAVE] seed=$seed"
     for ((start = 0; start < ${#VARIANTS[@]}; start += ${#GPUS[@]})); do
-      local -a pids=()
-      for slot in "${!GPUS[@]}"; do
-        index=$((start + slot))
-        if [[ "$index" -ge "${#VARIANTS[@]}" ]]; then
-          break
-        fi
-        variant="${VARIANTS[$index]}"
-        physical_slot=$(((slot + seed) % ${#GPUS[@]}))
-        CUDA_VISIBLE_DEVICES="${GPUS[$physical_slot]}" run_logged "$LOG_ROOT/controller_s${seed}_${variant}.log" \
-          run_cli train-controller \
-          "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" "${SMOKE_ARGS[@]}" \
-          --checkpoint-root "$CHECKPOINT_ROOT" \
-          --seed "$seed" \
-          --variant "$variant" \
-          --device cuda:0 &
-        pids+=("$!")
-      done
-      ACTIVE_PIDS=("${pids[@]}")
-      local failed=0
-      for pid in "${pids[@]}"; do
-        wait "$pid" || failed=1
-      done
-      ACTIVE_PIDS=()
-      [[ "$failed" -eq 0 ]]
+      train_controller_wave "$seed" "$start"
     done
   done
   run_cli freeze-training \
@@ -475,13 +478,7 @@ decide_phase() {
     decision_worker "$slot" "$queue_root" &
     pids+=("$!")
   done
-  ACTIVE_PIDS=("${pids[@]}")
-  local failed=0
-  for pid in "${pids[@]}"; do
-    wait "$pid" || failed=1
-  done
-  ACTIVE_PIDS=()
-  [[ "$failed" -eq 0 ]]
+  wait_for_batch "${pids[@]}"
   run_cli freeze-decision \
     "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
     --training-barrier "$TRAINING_BARRIER" \
@@ -511,13 +508,7 @@ evaluate_phase() {
       --device cuda:0 &
     pids+=("$!")
   done
-  ACTIVE_PIDS=("${pids[@]}")
-  local failed=0
-  for pid in "${pids[@]}"; do
-    wait "$pid" || failed=1
-  done
-  ACTIVE_PIDS=()
-  [[ "$failed" -eq 0 ]]
+  wait_for_batch "${pids[@]}"
   run_cli freeze-evaluation \
     "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
     --training-barrier "$TRAINING_BARRIER" \

@@ -29,6 +29,7 @@ from tools.analysis.stage5.contracts import (
     EVALUATION_RECORD_SCHEMA,
     PLANNED_CONTRASTS,
     VARIANT_IDS,
+    ContrastSpec,
     canonical_json_bytes,
     canonical_sha256,
     validate_decision_barrier,
@@ -80,6 +81,13 @@ PAIR_DIAGNOSTIC_IDS = (
     PAIR_RETURNED_RETENTION_METRIC_ID,
 )
 PAIRED_DIAGNOSTIC_EFFECT_IDS = (PAIR_RUNTIME_METRIC_ID, PAIR_PEAK_MEMORY_METRIC_ID)
+
+# Every aggregate reports each seed alone and then the across-seed mean. The list is named once
+# so those two readings cannot drift apart between aggregates.
+AGGREGATION_SCOPES: tuple[tuple[str, tuple[int, ...]], ...] = (
+    *((f"seed_{seed}", (seed,)) for seed in BASE_SEEDS),
+    ("seed_mean", BASE_SEEDS),
+)
 
 WARP_CONVENTION = {
     "operator": "tools.analysis.search.transaction.sample_at_psi",
@@ -270,6 +278,40 @@ def compute_geometry_bundle(field: torch.Tensor, fixed_label: torch.Tensor) -> d
     return bundle
 
 
+def _stage_field_diagnostics(
+    stage_fields: Mapping[str, tuple[torch.Tensor, Mapping[str, Any]]],
+    *,
+    moving_tensor: torch.Tensor,
+    fixed_tensor: torch.Tensor,
+    device: torch.device,
+    dice_metadata: Mapping[str, Any],
+    scored_by_digest: dict[str, tuple[float, dict[str, dict[str, Any]]]],
+) -> dict[str, dict[str, Any]]:
+    """Score every field stage, reusing one stage's numbers when two stages are the same array."""
+    diagnostics: dict[str, dict[str, Any]] = {}
+    with torch.inference_mode():
+        for stage, (stage_cpu, record) in stage_fields.items():
+            digest = str(record["array_sha256"])
+            if digest not in scored_by_digest:
+                stage_field = stage_cpu.to(device)
+                stage_warped = sample_at_psi(moving_tensor.float(), stage_field, mode="nearest").long()
+                stage_per_label = dice_per_label(stage_warped, fixed_tensor.long(), OASIS_VOI_LABELS)
+                stage_mean = float(stage_per_label.mean())
+                if not np.isfinite(stage_per_label).all() or not math.isfinite(stage_mean):
+                    raise FloatingPointError(f"OASIS Dice produced a non-finite {stage} diagnostic")
+                scored_by_digest[digest] = (
+                    stage_mean,
+                    compute_geometry_bundle(stage_field, fixed_tensor),
+                )
+            stage_mean, stage_geometry = scored_by_digest[digest]
+            diagnostics[stage] = {
+                "field": dict(record),
+                "mean_dice": _metric_ok(DICE_MEAN_METRIC_ID, stage_mean, metadata=dice_metadata),
+                "geometry": stage_geometry,
+            }
+    return diagnostics
+
+
 def evaluate_returned_decision(
     context: EvaluationContext,
     decision_id: str,
@@ -335,35 +377,18 @@ def evaluate_returned_decision(
         }
         for label, metric_id, value in zip(OASIS_VOI_LABELS, DICE_LABEL_METRIC_IDS, per_label, strict=True)
     ]
-    stage_diagnostics: dict[str, dict[str, Any]] = {}
-    stage_fields = {
-        "requested": (requested_cpu, decision["requested_field"]),
-        "candidate": (candidate_cpu, decision["candidate_field"]),
-        "returned": (field_cpu, decision["returned_field"]),
-    }
-    cached_stage_metrics: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {
-        str(decision["returned_field"]["array_sha256"]): (mean_dice, geometry)
-    }
-    with torch.inference_mode():
-        for stage, (stage_cpu, record) in stage_fields.items():
-            digest = str(record["array_sha256"])
-            if digest not in cached_stage_metrics:
-                stage_field = stage_cpu.to(resolved_device)
-                stage_warped = sample_at_psi(moving_tensor.float(), stage_field, mode="nearest").long()
-                stage_per_label = dice_per_label(stage_warped, fixed_tensor.long(), OASIS_VOI_LABELS)
-                stage_mean = float(stage_per_label.mean())
-                if not np.isfinite(stage_per_label).all() or not math.isfinite(stage_mean):
-                    raise FloatingPointError(f"OASIS Dice produced a non-finite {stage} diagnostic")
-                cached_stage_metrics[digest] = (
-                    stage_mean,
-                    compute_geometry_bundle(stage_field, fixed_tensor),
-                )
-            stage_mean, stage_geometry = cached_stage_metrics[digest]
-            stage_diagnostics[stage] = {
-                "field": dict(record),
-                "mean_dice": _metric_ok(DICE_MEAN_METRIC_ID, stage_mean, metadata=dice_metadata),
-                "geometry": stage_geometry,
-            }
+    stage_diagnostics = _stage_field_diagnostics(
+        {
+            "requested": (requested_cpu, decision["requested_field"]),
+            "candidate": (candidate_cpu, decision["candidate_field"]),
+            "returned": (field_cpu, decision["returned_field"]),
+        },
+        moving_tensor=moving_tensor,
+        fixed_tensor=fixed_tensor,
+        device=resolved_device,
+        dice_metadata=dice_metadata,
+        scored_by_digest={str(decision["returned_field"]["array_sha256"]): (mean_dice, geometry)},
+    )
     runtime = {
         "torch_version": torch.__version__,
         "device": str(resolved_device),
@@ -697,6 +722,43 @@ def _simultaneous_family(
     return family, intervals
 
 
+def _diagnostic_vectors(
+    index: Mapping[tuple[str, int, str], Mapping[str, Any]],
+    pair_ids: Sequence[str],
+    variant_id: str,
+    seeds: Sequence[int],
+) -> tuple[dict[str, np.ndarray], dict[str, list[str]]]:
+    """One seed-averaged vector per diagnostic, plus the pair/seed cells that reported nothing."""
+    vectors: dict[str, np.ndarray] = {}
+    unavailable: dict[str, list[str]] = defaultdict(list)
+    for diagnostic_id in PAIR_DIAGNOSTIC_IDS:
+        values = np.empty(len(pair_ids), dtype=np.float64)
+        for pair_index, pair_id in enumerate(pair_ids):
+            seed_values = [index[(pair_id, seed, variant_id)]["pair_diagnostics"][diagnostic_id] for seed in seeds]
+            # A partially observed mean is not the mean, so one missing seed voids the diagnostic.
+            if any(value is None for value in seed_values):
+                unavailable[diagnostic_id].extend(f"{pair_id}/S{seed}" for seed in seeds)
+                values[pair_index] = np.nan
+            else:
+                values[pair_index] = float(np.mean(seed_values))
+        vectors[diagnostic_id] = values
+    return vectors, unavailable
+
+
+def _u0_diagnostic_column(
+    index: Mapping[tuple[str, int, str], Mapping[str, Any]],
+    pair_ids: Sequence[str],
+    diagnostic_id: str,
+    seeds: Sequence[int],
+) -> np.ndarray:
+    """The U0 reference column for one diagnostic, seed-averaged per pair."""
+    means = [
+        np.mean([index[(pair_id, seed, "U0")]["pair_diagnostics"][diagnostic_id] for seed in seeds])
+        for pair_id in pair_ids
+    ]
+    return np.asarray(means, dtype=np.float64)
+
+
 def _aggregate_decision_diagnostics(
     index: Mapping[tuple[str, int, str], Mapping[str, Any]],
     pair_ids: Sequence[str],
@@ -704,24 +766,8 @@ def _aggregate_decision_diagnostics(
     absolute: list[dict[str, Any]] = []
     effects: list[dict[str, Any]] = []
     for variant_id in VARIANT_IDS:
-        for scope, seeds in (
-            *((f"seed_{seed}", (seed,)) for seed in BASE_SEEDS),
-            ("seed_mean", BASE_SEEDS),
-        ):
-            vectors: dict[str, np.ndarray] = {}
-            unavailable: dict[str, list[str]] = defaultdict(list)
-            for diagnostic_id in PAIR_DIAGNOSTIC_IDS:
-                values = np.empty(len(pair_ids), dtype=np.float64)
-                for pair_index, pair_id in enumerate(pair_ids):
-                    seed_values = [
-                        index[(pair_id, seed, variant_id)]["pair_diagnostics"][diagnostic_id] for seed in seeds
-                    ]
-                    if any(value is None for value in seed_values):
-                        unavailable[diagnostic_id].extend(f"{pair_id}/S{seed}" for seed in seeds)
-                        values[pair_index] = np.nan
-                    else:
-                        values[pair_index] = float(np.mean(seed_values))
-                vectors[diagnostic_id] = values
+        for scope, seeds in AGGREGATION_SCOPES:
+            vectors, unavailable = _diagnostic_vectors(index, pair_ids, variant_id, seeds)
             available = [diagnostic_id for diagnostic_id in PAIR_DIAGNOSTIC_IDS if diagnostic_id not in unavailable]
             summaries = _bootstrap_matrix(
                 np.column_stack([vectors[diagnostic_id] for diagnostic_id in available]),
@@ -747,13 +793,7 @@ def _aggregate_decision_diagnostics(
             candidate = np.column_stack([vectors[value] for value in PAIRED_DIAGNOSTIC_EFFECT_IDS])
             baseline = np.column_stack(
                 [
-                    np.asarray(
-                        [
-                            np.mean([index[(pair_id, seed, "U0")]["pair_diagnostics"][diagnostic_id] for seed in seeds])
-                            for pair_id in pair_ids
-                        ],
-                        dtype=np.float64,
-                    )
+                    _u0_diagnostic_column(index, pair_ids, diagnostic_id, seeds)
                     for diagnostic_id in PAIRED_DIAGNOSTIC_EFFECT_IDS
                 ]
             )
@@ -777,31 +817,39 @@ def _aggregate_decision_diagnostics(
     return absolute, effects
 
 
+def _contrast_difference_matrix(
+    index: Mapping[tuple[str, int, str], Mapping[str, Any]],
+    pair_ids: Sequence[str],
+    contrast: ContrastSpec,
+    seeds: Sequence[int],
+) -> tuple[np.ndarray, dict[str, list[str]]]:
+    """Per-pair candidate-minus-reference differences for one planned contrast."""
+    differences = np.empty((len(pair_ids), len(EFFECT_METRIC_IDS)), dtype=np.float64)
+    unavailable: dict[str, list[str]] = defaultdict(list)
+    for pair_index, pair_id in enumerate(pair_ids):
+        for metric_index, metric_id in enumerate(EFFECT_METRIC_IDS):
+            seed_differences: list[float] = []
+            for seed in seeds:
+                candidate = index[(pair_id, seed, contrast.variant_id)]["scalar_metrics"][metric_id]
+                reference = index[(pair_id, seed, contrast.reference_variant_id)]["scalar_metrics"][metric_id]
+                if candidate["status"] != "OK" or reference["status"] != "OK":
+                    unavailable[metric_id].append(f"{pair_id}/S{seed}")
+                    continue
+                seed_differences.append(float(candidate["value"]) - float(reference["value"]))
+            differences[pair_index, metric_index] = (
+                float(np.mean(seed_differences)) if len(seed_differences) == len(seeds) else np.nan
+            )
+    return differences, unavailable
+
+
 def _aggregate_planned_contrasts(
     index: Mapping[tuple[str, int, str], Mapping[str, Any]],
     pair_ids: Sequence[str],
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for contrast in PLANNED_CONTRASTS:
-        for scope, seeds in (
-            *((f"seed_{seed}", (seed,)) for seed in BASE_SEEDS),
-            ("seed_mean", BASE_SEEDS),
-        ):
-            differences = np.empty((len(pair_ids), len(EFFECT_METRIC_IDS)), dtype=np.float64)
-            unavailable: dict[str, list[str]] = defaultdict(list)
-            for pair_index, pair_id in enumerate(pair_ids):
-                for metric_index, metric_id in enumerate(EFFECT_METRIC_IDS):
-                    seed_differences: list[float] = []
-                    for seed in seeds:
-                        candidate = index[(pair_id, seed, contrast.variant_id)]["scalar_metrics"][metric_id]
-                        reference = index[(pair_id, seed, contrast.reference_variant_id)]["scalar_metrics"][metric_id]
-                        if candidate["status"] != "OK" or reference["status"] != "OK":
-                            unavailable[metric_id].append(f"{pair_id}/S{seed}")
-                            continue
-                        seed_differences.append(float(candidate["value"]) - float(reference["value"]))
-                    differences[pair_index, metric_index] = (
-                        float(np.mean(seed_differences)) if len(seed_differences) == len(seeds) else np.nan
-                    )
+        for scope, seeds in AGGREGATION_SCOPES:
+            differences, unavailable = _contrast_difference_matrix(index, pair_ids, contrast, seeds)
             available = [metric_id for metric_id in EFFECT_METRIC_IDS if metric_id not in unavailable]
             available_indices = [EFFECT_METRIC_IDS.index(metric_id) for metric_id in available]
             summaries = _bootstrap_matrix(
@@ -836,6 +884,78 @@ def _aggregate_planned_contrasts(
     return records
 
 
+def _variant_and_baseline_matrices(
+    index: Mapping[tuple[str, int, str], Mapping[str, Any]],
+    pair_ids: Sequence[str],
+    variant_id: str,
+    seeds: Sequence[int],
+) -> tuple[np.ndarray, np.ndarray, dict[str, list[str]]]:
+    """Seed-averaged metric matrices for one variant and for the U0 it is paired against."""
+    variant_matrix = np.empty((len(pair_ids), len(EFFECT_METRIC_IDS)), dtype=np.float64)
+    baseline_matrix = np.empty_like(variant_matrix)
+    unavailable: dict[str, list[str]] = defaultdict(list)
+    for pair_index, pair_id in enumerate(pair_ids):
+        for metric_index, metric_id in enumerate(EFFECT_METRIC_IDS):
+            variant_seed_values: list[float] = []
+            baseline_seed_values: list[float] = []
+            for seed in seeds:
+                candidate = index[(pair_id, seed, variant_id)]["scalar_metrics"][metric_id]
+                baseline = index[(pair_id, seed, "U0")]["scalar_metrics"][metric_id]
+                if candidate["status"] != "OK" or baseline["status"] != "OK":
+                    unavailable[metric_id].append(f"{pair_id}/S{seed}")
+                    continue
+                variant_seed_values.append(float(candidate["value"]))
+                baseline_seed_values.append(float(baseline["value"]))
+            if len(variant_seed_values) == len(seeds):
+                variant_matrix[pair_index, metric_index] = float(np.mean(variant_seed_values))
+                baseline_matrix[pair_index, metric_index] = float(np.mean(baseline_seed_values))
+            else:
+                # Both sides are dropped together, so the paired difference stays paired.
+                variant_matrix[pair_index, metric_index] = np.nan
+                baseline_matrix[pair_index, metric_index] = np.nan
+    return variant_matrix, baseline_matrix, unavailable
+
+
+def _variant_effect_records(
+    *,
+    variant_id: str,
+    scope: str,
+    unavailable: Mapping[str, Sequence[str]],
+    absolute_summaries: Mapping[str, Any],
+    effect_summaries: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Report one variant and scope: an absolute row per metric, plus its effect row unless U0."""
+    absolute: list[dict[str, Any]] = []
+    effects: list[dict[str, Any]] = []
+    reports_effect = variant_id != "U0"
+    for metric_id in EFFECT_METRIC_IDS:
+        identity = {"variant_id": variant_id, "scope": scope, "metric_id": metric_id}
+        if metric_id in unavailable:
+            error = {
+                **identity,
+                "status": "ERROR",
+                "error": {
+                    "error_type": "FAIL_CLOSED_METRIC_UNAVAILABLE",
+                    "affected_pair_seed": sorted(set(unavailable[metric_id])),
+                },
+            }
+            absolute.append(dict(error))
+            if reports_effect:
+                effects.append(dict(error))
+            continue
+        absolute.append({**identity, "summary": absolute_summaries[metric_id]})
+        if reports_effect:
+            effects.append(
+                {
+                    **identity,
+                    "reference_variant_id": "U0",
+                    "effect": "variant_minus_U0",
+                    "summary": effect_summaries[metric_id],
+                }
+            )
+    return absolute, effects
+
+
 def _aggregate_variant_effects(
     index: Mapping[tuple[str, int, str], Mapping[str, Any]],
     pair_ids: Sequence[str],
@@ -844,31 +964,13 @@ def _aggregate_variant_effects(
     absolute: list[dict[str, Any]] = []
     effects: list[dict[str, Any]] = []
     for variant_id in VARIANT_IDS:
-        for scope, seeds in (
-            *((f"seed_{seed}", (seed,)) for seed in BASE_SEEDS),
-            ("seed_mean", BASE_SEEDS),
-        ):
-            variant_matrix = np.empty((len(pair_ids), len(EFFECT_METRIC_IDS)), dtype=np.float64)
-            baseline_matrix = np.empty_like(variant_matrix)
-            unavailable: dict[str, list[str]] = defaultdict(list)
-            for pair_index, pair_id in enumerate(pair_ids):
-                for metric_index, metric_id in enumerate(EFFECT_METRIC_IDS):
-                    variant_seed_values: list[float] = []
-                    baseline_seed_values: list[float] = []
-                    for seed in seeds:
-                        candidate = index[(pair_id, seed, variant_id)]["scalar_metrics"][metric_id]
-                        baseline = index[(pair_id, seed, "U0")]["scalar_metrics"][metric_id]
-                        if candidate["status"] != "OK" or baseline["status"] != "OK":
-                            unavailable[metric_id].append(f"{pair_id}/S{seed}")
-                            continue
-                        variant_seed_values.append(float(candidate["value"]))
-                        baseline_seed_values.append(float(baseline["value"]))
-                    if len(variant_seed_values) == len(seeds):
-                        variant_matrix[pair_index, metric_index] = float(np.mean(variant_seed_values))
-                        baseline_matrix[pair_index, metric_index] = float(np.mean(baseline_seed_values))
-                    else:
-                        variant_matrix[pair_index, metric_index] = np.nan
-                        baseline_matrix[pair_index, metric_index] = np.nan
+        for scope, seeds in AGGREGATION_SCOPES:
+            variant_matrix, baseline_matrix, unavailable = _variant_and_baseline_matrices(
+                index,
+                pair_ids,
+                variant_id,
+                seeds,
+            )
             available_metric_ids = [metric_id for metric_id in EFFECT_METRIC_IDS if metric_id not in unavailable]
             available_indices = [EFFECT_METRIC_IDS.index(metric_id) for metric_id in available_metric_ids]
             absolute_summaries = _bootstrap_matrix(
@@ -887,37 +989,37 @@ def _aggregate_variant_effects(
                 if variant_id != "U0"
                 else {}
             )
-            for metric_id in EFFECT_METRIC_IDS:
-                identity = {"variant_id": variant_id, "scope": scope, "metric_id": metric_id}
-                if metric_id in unavailable:
-                    error = {
-                        **identity,
-                        "status": "ERROR",
-                        "error": {
-                            "error_type": "FAIL_CLOSED_METRIC_UNAVAILABLE",
-                            "affected_pair_seed": sorted(set(unavailable[metric_id])),
-                        },
-                    }
-                    absolute.append(dict(error))
-                    if variant_id != "U0":
-                        effects.append(dict(error))
-                    continue
-                absolute.append(
-                    {
-                        **identity,
-                        "summary": absolute_summaries[metric_id],
-                    }
-                )
-                if variant_id != "U0":
-                    effects.append(
-                        {
-                            **identity,
-                            "reference_variant_id": "U0",
-                            "effect": "variant_minus_U0",
-                            "summary": effect_summaries[metric_id],
-                        }
-                    )
+            scope_absolute, scope_effects = _variant_effect_records(
+                variant_id=variant_id,
+                scope=scope,
+                unavailable=unavailable,
+                absolute_summaries=absolute_summaries,
+                effect_summaries=effect_summaries,
+            )
+            absolute.extend(scope_absolute)
+            effects.extend(scope_effects)
     return absolute, effects
+
+
+def _family_difference_matrix(
+    index: Mapping[tuple[str, int, str], Mapping[str, Any]],
+    pair_ids: Sequence[str],
+    columns: Sequence[tuple[str, str]],
+    seeds: Sequence[int],
+) -> np.ndarray:
+    """Per-pair contrast differences for one family; the caller has already screened every column."""
+    contrasts_by_id = {contrast.contrast_id: contrast for contrast in PLANNED_CONTRASTS}
+    values = np.empty((len(pair_ids), len(columns)), dtype=np.float64)
+    for pair_index, pair_id in enumerate(pair_ids):
+        for column_index, (contrast_id, metric_id) in enumerate(columns):
+            contrast = contrasts_by_id[contrast_id]
+            seed_deltas = []
+            for seed in seeds:
+                candidate = index[(pair_id, seed, contrast.variant_id)]["scalar_metrics"][metric_id]
+                reference = index[(pair_id, seed, contrast.reference_variant_id)]["scalar_metrics"][metric_id]
+                seed_deltas.append(float(candidate["value"]) - float(reference["value"]))
+            values[pair_index, column_index] = float(np.mean(seed_deltas))
+    return values
 
 
 def _transaction_census(
@@ -958,10 +1060,7 @@ def aggregate_pair_effects(context: EvaluationContext, pair_evaluations: Sequenc
     planned_contrasts = _aggregate_planned_contrasts(index, pair_ids)
     contrast_index = {(item["scope"], item["contrast_id"], item["metric_id"]): item for item in planned_contrasts}
     simultaneous_families: list[dict[str, Any]] = []
-    for scope, seeds in (
-        *((f"seed_{seed}", (seed,)) for seed in BASE_SEEDS),
-        ("seed_mean", BASE_SEEDS),
-    ):
+    for scope, seeds in AGGREGATION_SCOPES:
         for family_id, family_metrics in (
             (SIMULTANEOUS_FAMILY_PRIMARY, (DICE_MEAN_METRIC_ID,)),
             (SIMULTANEOUS_FAMILY_REGIONAL, DICE_LABEL_METRIC_IDS),
@@ -988,16 +1087,7 @@ def aggregate_pair_effects(context: EvaluationContext, pair_evaluations: Sequenc
                     }
                 )
                 continue
-            values = np.empty((len(pair_ids), len(columns)), dtype=np.float64)
-            for pair_index, pair_id in enumerate(pair_ids):
-                for column_index, (contrast_id, metric_id) in enumerate(columns):
-                    contrast = next(item for item in PLANNED_CONTRASTS if item.contrast_id == contrast_id)
-                    seed_deltas = []
-                    for seed in seeds:
-                        candidate = index[(pair_id, seed, contrast.variant_id)]["scalar_metrics"][metric_id]
-                        reference = index[(pair_id, seed, contrast.reference_variant_id)]["scalar_metrics"][metric_id]
-                        seed_deltas.append(float(candidate["value"]) - float(reference["value"]))
-                    values[pair_index, column_index] = float(np.mean(seed_deltas))
+            values = _family_difference_matrix(index, pair_ids, columns, seeds)
             pointwise = {column: contrast_index[(scope, column[0], column[1])]["summary"] for column in columns}
             family, intervals = _simultaneous_family(
                 values,

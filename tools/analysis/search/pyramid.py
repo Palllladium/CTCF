@@ -203,6 +203,103 @@ def _match_rms(vector: torch.Tensor, mask: torch.Tensor, target: float) -> torch
     return vector * float(target / observed)
 
 
+def _frozen_stage_schedule(
+    factors: Sequence[int],
+    *,
+    family: PyramidFamily,
+    rewarp_between_levels: bool,
+    work_eps: float,
+    stage_work_eps_decrement: float,
+    exact_claim_eps: float,
+) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    """Screen the caller's frozen settings and derive the descending per-stage work margin."""
+    frozen_factors = tuple(_require_factor(int(value)) for value in factors)
+    if not frozen_factors or tuple(sorted(frozen_factors, reverse=True)) != frozen_factors or frozen_factors[-1] != 1:
+        raise ValueError("factors must be a non-empty coarse-to-fine sequence ending at 1")
+    if len(set(frozen_factors)) != len(frozen_factors):
+        raise ValueError("pyramid factors must be unique")
+    if family not in ("full_resolution", "blurred_full_resolution", "true_pyramid"):
+        raise ValueError(f"unknown pyramid family: {family}")
+    if not isinstance(rewarp_between_levels, bool):
+        raise TypeError("rewarp_between_levels must be bool")
+    if not 0.0 < exact_claim_eps < work_eps:
+        raise ValueError("exact_claim_eps must be positive and lower than work_eps")
+    if not 0.0 < stage_work_eps_decrement < work_eps - exact_claim_eps:
+        raise ValueError("stage_work_eps_decrement must fit between exact_claim_eps and work_eps")
+    stage_work_eps = tuple(
+        round(work_eps - index * stage_work_eps_decrement, 9) for index in range(len(frozen_factors))
+    )
+    if stage_work_eps[-1] <= exact_claim_eps:
+        raise ValueError("stage work-margin schedule reaches the exact claim margin")
+    return frozen_factors, stage_work_eps
+
+
+def _level_inputs(
+    fixed: torch.Tensor,
+    moving: torch.Tensor,
+    base_current: torch.Tensor,
+    *,
+    family: PyramidFamily,
+    factor: int,
+    full_collar: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    """The images, field, search stride and collar this family uses at one pyramid factor."""
+    if family == "true_pyramid":
+        return (
+            downsample_image(fixed, factor),
+            downsample_image(moving, factor),
+            project_psi_to_level(base_current, factor),
+            1,
+            level_collar(full_collar, factor),
+        )
+    if family == "blurred_full_resolution":
+        return (
+            blurred_full_resolution_image(fixed, factor),
+            blurred_full_resolution_image(moving, factor),
+            base_current,
+            factor,
+            full_collar,
+        )
+    return fixed.clone(), moving.clone(), base_current, factor, full_collar
+
+
+def _certified_stage_update(
+    current: torch.Tensor,
+    requested: torch.Tensor,
+    full_mask: torch.Tensor,
+    *,
+    family: PyramidFamily,
+    frozen_factors: tuple[int, ...],
+    stage_index: int,
+    factor: int,
+    stage_work_eps: Sequence[float],
+    exact_claim_eps: float,
+    stage_clip_sweeps: int,
+) -> tuple[torch.Tensor, dict[str, float], float, float, float]:
+    """Clip one stage's request to a certified update, refusing a bound the next stage cannot use."""
+    clip_eps = stage_work_eps[stage_index]
+    # The next stage works at a tighter margin, so a bound below it stops the cascade even
+    # though this stage's own clip succeeded.
+    continuation_eps = stage_work_eps[stage_index + 1] if stage_index + 1 < len(stage_work_eps) else exact_claim_eps
+    stage_label = f"C6 {family} factors={frozen_factors} stage={stage_index} factor={factor}"
+    try:
+        updated, operator = certified_local_clip_candidate(
+            current,
+            requested,
+            full_mask,
+            work_eps=clip_eps,
+            sweeps=stage_clip_sweeps,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(f"{stage_label} work_eps={clip_eps}: {exc}") from exc
+    output_fast_cert_bound = float(operator["output_fast_cert_bound"])
+    if not math.isfinite(output_fast_cert_bound) or output_fast_cert_bound < continuation_eps:
+        raise RuntimeError(
+            f"{stage_label} cannot continue safely: output bound {output_fast_cert_bound} < {continuation_eps}"
+        )
+    return updated, operator, clip_eps, continuation_eps, output_fast_cert_bound
+
+
 def build_pyramid_direction(
     fixed: torch.Tensor,
     moving: torch.Tensor,
@@ -235,24 +332,14 @@ def build_pyramid_direction(
         raise ValueError("initial and RMS reference shapes differ")
     if _require_volume(fixed, 1, "fixed image") != spatial or _require_volume(moving, 1, "moving image") != spatial:
         raise ValueError("images and fields must share the full-resolution grid")
-    frozen_factors = tuple(_require_factor(int(value)) for value in factors)
-    if not frozen_factors or tuple(sorted(frozen_factors, reverse=True)) != frozen_factors or frozen_factors[-1] != 1:
-        raise ValueError("factors must be a non-empty coarse-to-fine sequence ending at 1")
-    if len(set(frozen_factors)) != len(frozen_factors):
-        raise ValueError("pyramid factors must be unique")
-    if family not in ("full_resolution", "blurred_full_resolution", "true_pyramid"):
-        raise ValueError(f"unknown pyramid family: {family}")
-    if not isinstance(rewarp_between_levels, bool):
-        raise TypeError("rewarp_between_levels must be bool")
-    if not 0.0 < exact_claim_eps < work_eps:
-        raise ValueError("exact_claim_eps must be positive and lower than work_eps")
-    if not 0.0 < stage_work_eps_decrement < work_eps - exact_claim_eps:
-        raise ValueError("stage_work_eps_decrement must fit between exact_claim_eps and work_eps")
-    stage_work_eps = tuple(
-        round(work_eps - index * stage_work_eps_decrement, 9) for index in range(len(frozen_factors))
+    frozen_factors, stage_work_eps = _frozen_stage_schedule(
+        factors,
+        family=family,
+        rewarp_between_levels=rewarp_between_levels,
+        work_eps=work_eps,
+        stage_work_eps_decrement=stage_work_eps_decrement,
+        exact_claim_eps=exact_claim_eps,
     )
-    if stage_work_eps[-1] <= exact_claim_eps:
-        raise ValueError("stage work-margin schedule reaches the exact claim margin")
 
     full_mask = geometry_mask(spatial, full_collar, initial.device)
     reference_rms = masked_vector_rms(rms_reference, full_mask)
@@ -265,22 +352,14 @@ def build_pyramid_direction(
 
     for stage_index, factor in enumerate(frozen_factors):
         base_current = current if rewarp_between_levels else initial
-        if family == "true_pyramid":
-            level_fixed = downsample_image(fixed, factor)
-            level_moving = downsample_image(moving, factor)
-            level_current = project_psi_to_level(base_current, factor)
-            stride = 1
-            collar = level_collar(full_collar, factor)
-        else:
-            level_fixed = (
-                blurred_full_resolution_image(fixed, factor) if family == "blurred_full_resolution" else fixed.clone()
-            )
-            level_moving = (
-                blurred_full_resolution_image(moving, factor) if family == "blurred_full_resolution" else moving.clone()
-            )
-            level_current = base_current
-            stride = factor
-            collar = full_collar
+        level_fixed, level_moving, level_current, stride, collar = _level_inputs(
+            fixed,
+            moving,
+            base_current,
+            family=family,
+            factor=factor,
+            full_collar=full_collar,
+        )
 
         level_mask = all_offsets_valid_mask(level_current, collar, stride)
         fixed_norm = masked_zscore(level_fixed, level_mask, std_floor=image_std_floor)
@@ -317,29 +396,18 @@ def build_pyramid_direction(
         )
         requested = processed.displacement
         if rewarp_between_levels:
-            clip_eps = stage_work_eps[stage_index]
-            continuation_eps = (
-                stage_work_eps[stage_index + 1] if stage_index + 1 < len(stage_work_eps) else exact_claim_eps
+            updated, operator, clip_eps, continuation_eps, output_fast_cert_bound = _certified_stage_update(
+                current,
+                requested,
+                full_mask,
+                family=family,
+                frozen_factors=frozen_factors,
+                stage_index=stage_index,
+                factor=factor,
+                stage_work_eps=stage_work_eps,
+                exact_claim_eps=exact_claim_eps,
+                stage_clip_sweeps=stage_clip_sweeps,
             )
-            try:
-                updated, operator = certified_local_clip_candidate(
-                    current,
-                    requested,
-                    full_mask,
-                    work_eps=clip_eps,
-                    sweeps=stage_clip_sweeps,
-                )
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"C6 {family} factors={frozen_factors} stage={stage_index} factor={factor} "
-                    f"work_eps={clip_eps}: {exc}"
-                ) from exc
-            output_fast_cert_bound = float(operator["output_fast_cert_bound"])
-            if not math.isfinite(output_fast_cert_bound) or output_fast_cert_bound < continuation_eps:
-                raise RuntimeError(
-                    f"C6 {family} factors={frozen_factors} stage={stage_index} factor={factor} "
-                    f"cannot continue safely: output bound {output_fast_cert_bound} < {continuation_eps}"
-                )
             realized = updated - current
             current = updated
         else:

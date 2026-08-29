@@ -237,27 +237,14 @@ def build_stage5_split_manifests(
     return split, pair_manifest
 
 
-def prepare_stage5_oasis_data(
+def _scan_oasis_subjects(
     source_root: Path,
-    output_root: Path,
     cache_root: Path,
     *,
-    privileged_prepare_authorization: str,
-    expected_subjects: int = STAGE5_DEFAULT_SUBJECT_COUNT,
-    train_count: int = STAGE5_DEFAULT_TRAIN_COUNT,
-    dev_count: int = STAGE5_DEFAULT_DEV_COUNT,
-    image_shape: tuple[int, int, int] = STAGE5_DEFAULT_IMAGE_SHAPE,
-) -> PreparedStage5Data:
-    """Freeze the local OASIS All inventory and create an image-only cache."""
-    if privileged_prepare_authorization != STAGE5_PREPARE_AUTHORIZATION:
-        raise Stage5DataError("Stage 5 data preparation requires explicit privileged authorization")
-    source_root = require_plain_directory(source_root, "OASIS All root", create=False, error=Stage5DataError)
-    output_root = require_plain_directory(output_root, "Stage 5 data root", create=True, error=Stage5DataError)
-    cache_root = require_plain_directory(cache_root, "Stage 5 image cache root", create=True, error=Stage5DataError)
-    if len(image_shape) != 3 or any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 2 for value in image_shape
-    ):
-        raise Stage5DataError("Stage 5 image shape must contain three dimensions >= 2")
+    expected_subjects: int,
+    image_shape: tuple[int, int, int],
+) -> list[dict[str, Any]]:
+    """Read every OASIS All pickle once, cache its image, and record what was seen."""
     candidates = sorted(source_root.glob("p_*.pkl"))
     if len(candidates) != expected_subjects:
         raise Stage5DataError(f"expected {expected_subjects} OASIS All files, found {len(candidates)}")
@@ -294,10 +281,42 @@ def prepare_stage5_oasis_data(
             }
         )
     records.sort(key=lambda item: item["numeric_id"])
+    # Refused, not deduplicated: a silent duplicate halves the effective sample while every
+    # declared count still looks right.
     if len({item["source"]["sha256"] for item in records}) != len(records):
         raise Stage5DataError("OASIS All contains duplicate source payloads")
     if len({item["image_array_sha256"] for item in records}) != len(records):
         raise Stage5DataError("OASIS All contains duplicate image arrays")
+    return records
+
+
+def prepare_stage5_oasis_data(
+    source_root: Path,
+    output_root: Path,
+    cache_root: Path,
+    *,
+    privileged_prepare_authorization: str,
+    expected_subjects: int = STAGE5_DEFAULT_SUBJECT_COUNT,
+    train_count: int = STAGE5_DEFAULT_TRAIN_COUNT,
+    dev_count: int = STAGE5_DEFAULT_DEV_COUNT,
+    image_shape: tuple[int, int, int] = STAGE5_DEFAULT_IMAGE_SHAPE,
+) -> PreparedStage5Data:
+    """Freeze the local OASIS All inventory and create an image-only cache."""
+    if privileged_prepare_authorization != STAGE5_PREPARE_AUTHORIZATION:
+        raise Stage5DataError("Stage 5 data preparation requires explicit privileged authorization")
+    source_root = require_plain_directory(source_root, "OASIS All root", create=False, error=Stage5DataError)
+    output_root = require_plain_directory(output_root, "Stage 5 data root", create=True, error=Stage5DataError)
+    cache_root = require_plain_directory(cache_root, "Stage 5 image cache root", create=True, error=Stage5DataError)
+    if len(image_shape) != 3 or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 2 for value in image_shape
+    ):
+        raise Stage5DataError("Stage 5 image shape must contain three dimensions >= 2")
+    records = _scan_oasis_subjects(
+        source_root,
+        cache_root,
+        expected_subjects=expected_subjects,
+        image_shape=image_shape,
+    )
     inventory = {
         "schema": STAGE5_SOURCE_INVENTORY_SCHEMA,
         "protocol_id": STAGE5_DATA_PROTOCOL_ID,
