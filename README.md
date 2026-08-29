@@ -1,10 +1,9 @@
 # CTCF: Cascade Transformer for Coarse-to-Fine Unsupervised Medical Image Registration
 
-> **Status (June 2026):** This is the published **v1.0.0** code for the CTCF paper; the
-> results below are stable. Active development continues on a feature branch — the cascade
-> is being generalized into a backbone-pluggable framework (VoxelMorph, LKU-Net, MambaMorph,
-> VMambaMorph, EfficientMorph) and the codebase is undergoing a refactor. Some file paths in
-> this README may differ from the current tree until the next tagged release.
+> **Status (August 2026):** The frozen source snapshot for the published CTCF paper is
+> tag **v1.0**. The current tree keeps the paper training and inference entry points while
+> adding backbone-pluggable models, exact topology checks, and reusable post-inference
+> research utilities. The metrics below refer to the published v1.0 protocol.
 
 A three-level coarse-to-fine cascade framework for unsupervised deformable 3D medical image registration.
 
@@ -103,11 +102,16 @@ If you use these data, please cite:
 ## Path Configuration
 
 All training and inference scripts read dataset locations from the `PATHS` dict
-in [experiments/core/train_runtime.py](experiments/core/train_runtime.py).
-Before running anything, open that file and edit profile `1` so that the
-`train_dir`, `val_dir`, `test_dir` (IXI only), and `atlas_path` (IXI only) keys
-point to your local OASIS / IXI data roots. Every command below uses the `--1`
-flag to select this profile.
+in [experiments/core/path_profiles.py](experiments/core/path_profiles.py).
+The portable profile `3` derives both dataset trees from `CTCF_DATA_DIR`:
+
+```bash
+export CTCF_DATA_DIR=/path/to/data
+```
+
+That directory must contain `OASIS_L2R_2021_task03/` and `IXI_data/` with the
+subdirectories described above. The commands below use `--3`; alternatively,
+add a machine-specific profile in `path_profiles.py` and select it explicitly.
 
 ## Pretrained Checkpoints
 
@@ -142,12 +146,12 @@ elsewhere, just pass the appropriate path via `--ckpt`.
 
 ```bash
 # CTCF
-python -m experiments.train_CTCF --ds OASIS --1
-python -m experiments.train_CTCF --ds IXI --1
+python -m experiments.train_CTCF --ds OASIS --3
+python -m experiments.train_CTCF --ds IXI --3
 
 # Baselines
-python -m experiments.train_TransMorphDCA --ds OASIS --1
-python -m experiments.train_UTSRMorph --ds OASIS --1
+python -m experiments.train_TransMorphDCA --ds OASIS --3
+python -m experiments.train_UTSRMorph --ds OASIS --3
 ```
 
 ### Inference — Reproducing the Paper Metrics
@@ -158,12 +162,12 @@ python -m experiments.train_UTSRMorph --ds OASIS --1
 # OASIS — 19 test pairs
 python -m experiments.inference --model ctcf \
   --ckpt Checkpoints/CTCF/OASIS/best.pth \
-  --ds OASIS --1 --hd95
+  --ds OASIS --3 --hd95
 
 # IXI — 115 test subjects
 python -m experiments.inference --model ctcf \
   --ckpt Checkpoints/CTCF/IXI/best.pth \
-  --ds IXI --1 --use_test --hd95
+  --ds IXI --3 --use_test --hd95
 ```
 
 **TransMorph-DCA:**
@@ -171,11 +175,11 @@ python -m experiments.inference --model ctcf \
 ```bash
 python -m experiments.inference --model tm-dca \
   --ckpt Checkpoints/TM-DCA/OASIS/best.pth \
-  --ds OASIS --1 --hd95
+  --ds OASIS --3 --hd95
 
 python -m experiments.inference --model tm-dca \
   --ckpt Checkpoints/TM-DCA/IXI/best.pth \
-  --ds IXI --1 --use_test --hd95
+  --ds IXI --3 --use_test --hd95
 ```
 
 **UTSRMorph** (the config key differs between OASIS and IXI):
@@ -183,11 +187,11 @@ python -m experiments.inference --model tm-dca \
 ```bash
 python -m experiments.inference --model utsrmorph \
   --ckpt Checkpoints/UTSRMorph/OASIS/best.pth \
-  --ds OASIS --1 --hd95 --utsr_config UTSRMorph-Large
+  --ds OASIS --3 --hd95 --utsr_config UTSRMorph-Large
 
 python -m experiments.inference --model utsrmorph \
   --ckpt Checkpoints/UTSRMorph/IXI/best.pth \
-  --ds IXI --1 --use_test --hd95 --utsr_config UTSRMorph-IXI-Large
+  --ds IXI --3 --use_test --hd95 --utsr_config UTSRMorph-IXI-Large
 ```
 
 Per-case metrics are written to
@@ -197,7 +201,13 @@ Per-case metrics are written to
 ### Cross-Dataset Zero-Shot (Table 6 in paper)
 
 ```bash
-bash tools/run_cross_inference.sh --paths-profile 1 --gpu 0
+CKPT_CTCF_OASIS=Checkpoints/CTCF/OASIS/best.pth \
+CKPT_CTCF_IXI=Checkpoints/CTCF/IXI/best.pth \
+CKPT_TMDCA_OASIS=Checkpoints/TM-DCA/OASIS/best.pth \
+CKPT_TMDCA_IXI=Checkpoints/TM-DCA/IXI/best.pth \
+CKPT_UTSR_OASIS=Checkpoints/UTSRMorph/OASIS/best.pth \
+CKPT_UTSR_IXI=Checkpoints/UTSRMorph/IXI/best.pth \
+bash tools/runners/eval/cross_dataset_inference.sh --paths-profile 3 --gpu 0
 ```
 
 ### Common Inference Flags
@@ -213,9 +223,14 @@ bash tools/run_cross_inference.sh --paths-profile 1 --gpu 0
 
 ### Ablation Experiments
 
-All ablation rounds from the paper can be reproduced with a single script:
+The exact R1–R6 orchestration belongs to the frozen `v1.0` paper snapshot and
+is intentionally not duplicated in the active runner tree. Use a separate
+worktree to reproduce it without replacing the current checkout:
 
 ```bash
+git worktree add ../CTCF-v1.0 v1.0
+cd ../CTCF-v1.0
+
 # Run a specific round
 bash tools/ablation.sh R1 --gpu 0
 
@@ -244,6 +259,25 @@ Rounds:
 | `--l3_error_mode` | ncc | Error map: `absdiff`, `gradmag`, or `ncc` |
 | `--time_steps` | 6 | L2 integration steps |
 
+## Certified Search Research Utilities
+
+The completed C0–C7 inference-gate producers are no longer duplicated in the
+active tree. Their exact source revisions remain available through Git, and
+the read-only registry records the corresponding commits and compact result
+products. The reusable numerical core lives in `tools.analysis.search`:
+
+- `transaction` — materialization, exact checks, acceptance, and byte-exact rollback;
+- `cost_volume`, `multiscale`, `intensity`, `pyramid`, and `learned` — reusable proposal primitives;
+- `metrics` — explicitly identified geometry metrics;
+- `history` — the standard-library-only registry verifier.
+
+If the compact historical products are present under `results/`, verify all
+known C0–C7/NUMSTAB products with:
+
+```bash
+python -m tools.analysis.search.history verify-known --results-root results
+```
+
 ## Project Structure
 
 ```
@@ -253,17 +287,18 @@ models/CTCF/
   configs.py        # CtcfConfig dataclass
   blocks.py         # Swin Transformer blocks, DCA attention
 
-models/TransMorph_DCA/  # Baseline: TransMorph-DCA
-models/UTSRMorph/       # Baseline: UTSRMorph
+models/TransMorph_DCA/  # Published baseline: TransMorph-DCA
+models/UTSRMorph/       # Published baseline: UTSRMorph
+models/{VoxelMorph,LKUNet,MambaMorph,VMambaMorph,EfficientMorph}/
+                        # Pluggable registration backbones
 
 experiments/
-  train_CTCF.py         # CTCF training (Runner class, CLI args)
-  train_TransMorphDCA.py
-  train_UTSRMorph.py
+  train_*.py            # CTCF, baseline, and pluggable-backbone training entry points
   inference.py          # Unified inference and evaluation
   core/
-    train_runtime.py    # Path profiles, run_train() entry point
-    train_rules.py      # Dataset defaults (cascade schedule, hyperparams)
+    path_profiles.py    # Explicit local/remote dataset profiles
+    train_runtime.py    # Shared training runtime
+    inference_runtime.py
     model_adapters.py   # CLI args -> CtcfConfig bridge
 
 utils/
@@ -277,10 +312,18 @@ datasets/
   IXI.py            # IXI dataloader (576 volumes, 30 regions)
 
 tools/
-  ablation.sh   # Unified ablation runner (R1-R6)
-  count_params.py   # Parameter counting utility
-  compute_stats.py          # Statistical tests (Wilcoxon, Hodges-Lehmann)
-  paper/            # Figure generation scripts
+  analysis/
+    search/          # Reusable certified-search core and historical verifier
+    tests/search/    # Search-core and registry contracts
+    compute_stats.py # Statistical tests (Wilcoxon, Hodges-Lehmann)
+    model_complexity.py
+  runners/
+    train/           # Active training protocols
+    eval/            # Evaluation and checkpoint validation
+    topology/        # Exact-certificate and repair studies
+    archive/         # Historical runner scripts retained as code provenance
+  dev/               # Repository quality and invariant checks
+  paper/             # Figure and table generation scripts
 ```
 
 ## Notes

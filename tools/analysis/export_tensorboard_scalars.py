@@ -38,7 +38,7 @@ from typing import Any
 
 SCHEMA_VERSION = "CTCF_TENSORBOARD_SCALAR_EXPORT_V1"
 DEFAULT_OUTPUT = "logs/TENSORBOARD_EXPORT_20260820"
-DEFAULT_INVENTORY = "../CTCF_for_Codex/storage/tensorboard_inventory_20260820.csv"
+DEFAULT_INVENTORY = "logs/tensorboard_inventory_20260820.csv"
 EVENT_GLOB = "events.out.tfevents*"
 READ_CHUNK_BYTES = 4 * 1024 * 1024
 
