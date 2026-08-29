@@ -30,12 +30,12 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from tools.analysis.search_history import verify as sh
-from tools.analysis.search_history.__main__ import _locate, main
+from tools.analysis.search.history import verify as sh
+from tools.analysis.search.history.__main__ import _locate, main
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 RESULTS = REPO_ROOT / "results"
-PACKAGE = REPO_ROOT / "tools" / "analysis" / "search_history"
+PACKAGE = REPO_ROOT / "tools" / "analysis" / "search" / "history"
 REQUIRE_HISTORICAL = os.environ.get("CTCF_REQUIRE_HISTORICAL_GOLDENS") == "1"
 
 FREEZE_COMMIT = "f3119f7f2f93147ca1bb3aed7340db93b2bb5079"
@@ -1311,7 +1311,7 @@ class IsolationTest(SearchHistoryTestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; import tools.analysis.search_history as p; "
+                "import sys; import tools.analysis.search.history as p; "
                 "print(' '.join(sorted(m for m in sys.modules if 'search_gate' in m)))",
             ],
             capture_output=True,
@@ -1336,7 +1336,7 @@ class IsolationTest(SearchHistoryTestCase):
 class CommandLineTest(SearchHistoryTestCase):
     def _run(self, arguments: list[str]) -> tuple[int, dict[str, Any] | None, str]:
         completed = subprocess.run(
-            [sys.executable, "-m", "tools.analysis.search_history", *arguments],
+            [sys.executable, "-m", "tools.analysis.search.history", *arguments],
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,

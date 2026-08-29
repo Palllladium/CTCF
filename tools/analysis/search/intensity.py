@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
-from tools.analysis.search_gate_cost_volume import masked_vector_rms
-from tools.analysis.search_gate_multiscale import (
+from tools.analysis.search.cost_volume import masked_vector_rms
+from tools.analysis.search.multiscale import (
     CenteredCostVolume,
     DecodedProposal,
     PosteriorVolume,
@@ -19,7 +19,7 @@ from tools.analysis.search_gate_multiscale import (
     posterior_from_standardized_costs_with_prior,
     postprocess_and_match_rms,
 )
-from tools.analysis.transactional_search import certified_local_clip_candidate
+from tools.analysis.search.transaction import certified_local_clip_candidate
 
 
 @dataclass(frozen=True, slots=True)

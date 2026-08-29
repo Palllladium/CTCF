@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import torch
 
-from tools.analysis.search_gate_intensity_runtime import (
+from tools.analysis.search.intensity import (
     build_intensity_reach_bank,
     decode_intensity_direction,
     materialize_intensity_candidate,
@@ -95,7 +95,7 @@ class IntensityRuntimeTest(unittest.TestCase):
             }
 
         with patch(
-            "tools.analysis.search_gate_intensity_runtime.certified_local_clip_candidate",
+            "tools.analysis.search.intensity.certified_local_clip_candidate",
             side_effect=clip_once,
         ) as clip:
             sweep1 = materialize_intensity_candidate(

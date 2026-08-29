@@ -11,8 +11,8 @@ from types import ModuleType
 import numpy as np
 import torch
 
-from tools.analysis import search_gate_metrics
-from tools.analysis.search_gate_metrics import (
+from tools.analysis.search import metrics as search_gate_metrics
+from tools.analysis.search.metrics import (
     DETJ_DIAGNOSTICS,
     DIAGNOSTIC_SDLOGJ_POSITIVE_ONLY_CROP2,
     DIGITAL_DECOMPOSITION,
@@ -28,7 +28,7 @@ from tools.analysis.search_gate_metrics import (
     compute_metric,
     learn2reg_jacobian_determinant,
 )
-from tools.analysis.transactional_search import load_flow_npz, save_flow_npz_atomic
+from tools.analysis.search.transaction import load_flow_npz, save_flow_npz_atomic
 from utils.field import _digital_determinants, digital_fold_percent, logdet_std_from_flow
 
 SHAPE = (9, 10, 11)

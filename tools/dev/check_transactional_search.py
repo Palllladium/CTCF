@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
-from tools.analysis.transactional_search import (
+from tools.analysis.search.transaction import (
     OFFSETS,
     ZERO_OFFSET_INDEX,
     CandidateScreen,

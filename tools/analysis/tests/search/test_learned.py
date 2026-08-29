@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from models.CorrMLP.wrapper import CorrMLPSolo
-from tools.analysis.search_gate_learned import (
+from tools.analysis.search.learned import (
     CORRMLP_FULL_STATE_KEY_COUNT,
     CORRMLP_IXI_LAST_EPOCH,
     CORRMLP_X1_CHANNELS,
@@ -24,7 +24,7 @@ from tools.analysis.search_gate_learned import (
     raw_candidate_cost_volume,
     valid_corrmlp_x1_sample_mask,
 )
-from tools.analysis.transactional_search import OFFSETS, ZERO_OFFSET_INDEX, geometry_mask, sample_at_psi
+from tools.analysis.search.transaction import OFFSETS, ZERO_OFFSET_INDEX, geometry_mask, sample_at_psi
 
 
 def file_sha256(path: Path) -> str:
@@ -78,7 +78,7 @@ class CorrMLPCheckpointContractTest(unittest.TestCase):
 
     def test_sha_mismatch_fails_before_deserialization(self) -> None:
         with (
-            mock.patch("tools.analysis.search_gate_learned.torch.load") as load,
+            mock.patch("tools.analysis.search.learned.torch.load") as load,
             self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"),
         ):
             load_frozen_corrmlp_x1(self.checkpoint_path, expected_sha256="0" * 64)
@@ -87,7 +87,7 @@ class CorrMLPCheckpointContractTest(unittest.TestCase):
     def test_wrong_epoch_is_rejected_even_when_bytes_are_authenticated(self) -> None:
         checkpoint = {"epoch": CORRMLP_IXI_LAST_EPOCH - 1, "state_dict": self.state}
         with (
-            mock.patch("tools.analysis.search_gate_learned.torch.load", return_value=checkpoint),
+            mock.patch("tools.analysis.search.learned.torch.load", return_value=checkpoint),
             self.assertRaisesRegex(RuntimeError, "epoch mismatch"),
         ):
             load_frozen_corrmlp_x1(
@@ -100,7 +100,7 @@ class CorrMLPCheckpointContractTest(unittest.TestCase):
         partial.pop(next(iter(partial)))
         checkpoint = {"epoch": CORRMLP_IXI_LAST_EPOCH, "state_dict": partial}
         with (
-            mock.patch("tools.analysis.search_gate_learned.torch.load", return_value=checkpoint),
+            mock.patch("tools.analysis.search.learned.torch.load", return_value=checkpoint),
             self.assertRaisesRegex(RuntimeError, "state key count mismatch"),
         ):
             load_frozen_corrmlp_x1(
@@ -114,7 +114,7 @@ class CorrMLPCheckpointContractTest(unittest.TestCase):
         altered[f"module.{first}"] = altered.pop(first)
         checkpoint = {"epoch": CORRMLP_IXI_LAST_EPOCH, "state_dict": altered}
         with (
-            mock.patch("tools.analysis.search_gate_learned.torch.load", return_value=checkpoint),
+            mock.patch("tools.analysis.search.learned.torch.load", return_value=checkpoint),
             self.assertRaisesRegex(RuntimeError, "required 'net.' prefix"),
         ):
             load_frozen_corrmlp_x1(

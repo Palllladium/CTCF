@@ -13,7 +13,7 @@ from typing import Any
 
 REGISTRY_SCHEMA = "ctcf-search-history-registry-v1"
 REGISTRY_PATH = Path(__file__).resolve().parent / "registry.v1.json"
-DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[4]
 
 VERIFICATION_SCOPE = "COMPACT_PRODUCT_BYTES_AND_RECORDED_PROVENANCE"
 SCOPE_EXCLUSIONS = (

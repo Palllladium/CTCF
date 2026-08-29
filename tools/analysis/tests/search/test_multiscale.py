@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from tools.analysis.search_gate_multiscale import (
+from tools.analysis.search.multiscale import (
     C4_COMMON_COLLAR_WIDTH,
     OFFSETS_STRIDE1,
     OFFSETS_STRIDE2,

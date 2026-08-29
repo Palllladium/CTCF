@@ -5,7 +5,7 @@ from typing import ClassVar
 
 import torch
 
-from tools.analysis.search_gate_pyramid import (
+from tools.analysis.search.pyramid import (
     binomial_blur3d,
     blurred_full_resolution_image,
     build_pyramid_direction,

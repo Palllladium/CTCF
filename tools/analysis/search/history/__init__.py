@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tools.analysis.search_history.verify import (
+from tools.analysis.search.history.verify import (
     EXIT_INTERNAL_ERROR,
     EXIT_INVALID_PRODUCT,
     EXIT_INVALID_REGISTRY,

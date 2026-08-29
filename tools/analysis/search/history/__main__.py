@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from tools.analysis.search_history.verify import (
+from tools.analysis.search.history.verify import (
     DEFAULT_REPO_ROOT,
     EVIDENCE_GROUPS,
     EXIT_INTERNAL_ERROR,
@@ -247,7 +247,7 @@ def command_verify_known(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m tools.analysis.search_history")
+    parser = argparse.ArgumentParser(prog="python -m tools.analysis.search.history")
     parser.add_argument("--registry", default=str(REGISTRY_PATH))
     subparsers = parser.add_subparsers(dest="command", required=True)
 

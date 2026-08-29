@@ -7,7 +7,7 @@ from dataclasses import replace
 import torch
 import torch.nn.functional as F
 
-from tools.analysis.search_gate_cost_volume import (
+from tools.analysis.search.cost_volume import (
     POSTERIOR_DIAGNOSTICS_ID,
     RMS_FIRST_DIFFERENCE_ROUGHNESS_ID,
     _standardize_candidate_costs,
@@ -23,7 +23,7 @@ from tools.analysis.search_gate_cost_volume import (
     postprocess_residual,
     raw_posterior,
 )
-from tools.analysis.transactional_search import OFFSETS, ZERO_OFFSET_INDEX, geometry_mask, sample_at_psi
+from tools.analysis.search.transaction import OFFSETS, ZERO_OFFSET_INDEX, geometry_mask, sample_at_psi
 
 
 def candidate_tensors(shape: tuple[int, int, int] = (7, 8, 9)) -> tuple[torch.Tensor, torch.Tensor]:

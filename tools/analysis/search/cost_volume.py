@@ -7,7 +7,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
-from tools.analysis.transactional_search import OFFSETS, sample_at_psi, smooth_proposal, valid_sample_mask
+from tools.analysis.search.transaction import OFFSETS, sample_at_psi, smooth_proposal, valid_sample_mask
 from utils.field import identity_collar
 
 MessagePassingMode = Literal["none", "isotropic", "adaptive"]
