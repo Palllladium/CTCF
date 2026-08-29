@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import math
 import os
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from experiments.core.cli_ctcf import ctcf_overrides_from_args
 from experiments.core.inference_metrics import metric_profile_for, write_results, write_trace
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import get_dataset_paths
+from tools.analysis.run_artifacts import classify_checkpoint_incompatibilities
 from utils import (
     NumpyType,
     RegisterModel,
@@ -25,8 +27,17 @@ from utils import (
     setup_device,
 )
 from utils.field import (
+    boundary_max_disp,
+    boundary_nonzero_count,
+    boundary_tangential_lip,
+    boundary_vertex_mask,
+    certified_local_clip,
     digital_min_det,
     digital_project,
+    displacement_grad_norm_max,
+    enforce_identity_boundary,
+    identity_collar,
+    perturb_flow,
     trilinear_cert_bound,
     trilinear_fold_percent,
     trilinear_min_det,
@@ -35,24 +46,57 @@ from utils.field import (
 from utils.tto import TTOConfig, refine_flow
 
 
-def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> None:
-    """Load checkpoint weights; on strict mismatch, warn and fall back to a tolerant load."""
+def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> dict[str, object]:
+    """Load checkpoint weights and return an explicit, machine-readable load report."""
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt.get("state_dict", ckpt.get("model", ckpt)) if isinstance(ckpt, dict) else ckpt
 
     if strict:
         try:
             model.load_state_dict(sd, strict=True)
-            return
-        except RuntimeError as e:
-            print(f"[WARN] Strict checkpoint load failed: {e}")
-            print("[WARN] Falling back to tolerant load. Pass --strict_ckpt 0 to silence this warning.")
+        except RuntimeError as strict_error:
+            missing, unexpected = model.load_state_dict(sd, strict=False)
+            compatibility = classify_checkpoint_incompatibilities(
+                missing,
+                unexpected,
+                (name for name, _ in model.named_buffers()),
+            )
+            if not compatibility.compatible:
+                raise RuntimeError(f"Strict checkpoint load failed for '{ckpt_path}': {strict_error}") from strict_error
+            allowed = list(compatibility.allowed_missing_buffers)
+            print(
+                f"[INFO] Strict checkpoint compatibility succeeded with regenerated deterministic buffer(s): {allowed}"
+            )
+            return {
+                "strict": True,
+                "torch_strict": False,
+                "state_key_count": len(sd),
+                "missing_keys": allowed,
+                "allowed_missing_buffers": allowed,
+                "unexpected_keys": [],
+            }
+        report = {
+            "strict": True,
+            "torch_strict": True,
+            "state_key_count": len(sd),
+            "missing_keys": [],
+            "allowed_missing_buffers": [],
+            "unexpected_keys": [],
+        }
+        print(f"[INFO] Strict checkpoint load succeeded: {len(sd)} keys from {ckpt_path}")
+        return report
 
     missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing:
         print(f"[WARN] Missing keys: {len(missing)} (first 10): {missing[:10]}")
     if unexpected:
         print(f"[WARN] Unexpected keys: {len(unexpected)} (first 10): {unexpected[:10]}")
+    return {
+        "strict": False,
+        "state_key_count": len(sd),
+        "missing_keys": list(missing),
+        "unexpected_keys": list(unexpected),
+    }
 
 
 def build_infer_dataset(ds_key: str, files: list[str], atlas_path: str | None):
@@ -147,6 +191,14 @@ class InferRunner:
 
     def __init__(self, args):
         self.args = args
+        if args.tto_collar and not args.tto_tri_project:
+            raise ValueError("--tto_collar requires --tto_tri_project 1: the taper must be repaired and checked")
+        if args.tto_collar and args.tto_tri_project_eps <= 0:
+            raise ValueError("--tto_collar requires --tto_tri_project_eps > 0 for a strict local margin")
+        if args.tto_collar and args.tto_perturb != "none":
+            raise ValueError(
+                "--tto_perturb changes the field after certification and is incompatible with --tto_collar"
+            )
         self.device = setup_device(args.gpu, seed=args.seed, deterministic=args.deterministic)
 
         ds_key = args.ds.upper()
@@ -193,6 +245,7 @@ class InferRunner:
             w_reg=args.tto_w_reg,
             w_jac=args.tto_w_jac,
             w_ncc=args.tto_w_ncc,
+            w_mind=args.tto_w_mind,
             anchor_w=args.tto_anchor_w,
             jac_mode=args.tto_jac_mode,
             jac_eps=args.tto_jac_eps,
@@ -279,6 +332,15 @@ class InferRunner:
                 )
                 flow, snapshots = result.flow, result.snapshots
 
+            # Identity collar supplies an exact identity trace. Both repair stages must keep those vertices
+            # fixed; local positivity and the separate global-invertibility theorem are checked independently.
+            fixed_mask = None
+            fixed_values = None
+            if args.tto_collar:
+                flow = identity_collar(flow.float(), width=args.tto_collar_width)
+                fixed_mask = boundary_vertex_mask(flow)
+                fixed_values = torch.zeros_like(flow)
+
             proj_folds, proj_iters = None, 0
             if args.tto_project:
                 flow, proj_folds, proj_iters = digital_project(
@@ -286,15 +348,53 @@ class InferRunner:
                     eps=args.tto_project_eps,
                     damp=args.tto_project_damp,
                     max_iters=args.tto_project_iters,
+                    fixed_mask=fixed_mask,
+                    fixed_values=fixed_values,
                 )
-            tri_proj_resid, tri_proj_iters = None, 0
+            tri_proj_report = None
             if args.tto_tri_project:
-                flow, tri_proj_resid, tri_proj_iters = trilinear_project(
+                flow, tri_proj_report = trilinear_project(
                     flow.float(),
                     eps=args.tto_tri_project_eps,
                     damp=args.tto_tri_project_damp,
                     max_iters=args.tto_tri_project_iters,
+                    subdiv_depth=args.tto_tri_subdiv_depth,
+                    fixed_mask=fixed_mask,
+                    fixed_values=fixed_values,
                 )
+            # The local clip preserves the work predicate in float64. Its float32 materialisation is not called
+            # machine-certified until the independent verifier has checked the saved bytes.
+            if args.tto_clip_from_identity:
+                flow = certified_local_clip(
+                    torch.zeros_like(flow.float()),
+                    flow.float(),
+                    eps=args.tto_tri_project_eps,
+                    sweeps=args.tto_clip_sweeps,
+                )
+            # Robustness test: perturb the certified field as a deployment step would; every metric below
+            # (Dice, tri_cert_bound, tri_fold_pct) is then read on the perturbed field — did the margin hold?
+            if args.tto_perturb != "none":
+                flow = perturb_flow(flow.float(), mode=args.tto_perturb, scale=args.tto_perturb_scale)
+            final_tri_bound = None
+            if args.tto_collar:
+                flow = enforce_identity_boundary(flow)
+                if not bool(torch.isfinite(flow).all()):
+                    raise RuntimeError(f"{cid}: collar finalization produced NaN or Inf")
+                if boundary_nonzero_count(flow) != 0:
+                    raise RuntimeError(f"{cid}: identity-boundary invariant was lost")
+                final_tri_bound = trilinear_cert_bound(
+                    flow.float(), args.tto_tri_subdiv_depth, args.tto_tri_project_eps
+                )
+                if (
+                    tri_proj_report is None
+                    or not tri_proj_report.certified
+                    or not math.isfinite(final_tri_bound)
+                    or final_tri_bound < args.tto_tri_project_eps
+                ):
+                    status = "missing report" if tri_proj_report is None else tri_proj_report.status
+                    raise RuntimeError(
+                        f"{cid}: collar finalization failed closed ({status}, final_bound={final_tri_bound:.6g})"
+                    )
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
@@ -304,16 +404,31 @@ class InferRunner:
             # imply trilinear>0, so a gap between them is a real interpolation-consistency failure.
             fl = flow.float()
             tri_fold = trilinear_fold_percent(fl)
+            tri_bound = (
+                final_tri_bound
+                if final_tri_bound is not None
+                else trilinear_cert_bound(fl, args.tto_tri_subdiv_depth, args.tto_tri_project_eps)
+            )
+            bnd_nonzero = boundary_nonzero_count(fl)
             row = {
                 "case_id": cid,
                 "time_sec": dt,
                 "cert_min_det": digital_min_det(fl),
                 "tri_min_det": trilinear_min_det(fl),
-                "tri_cert_bound": trilinear_cert_bound(fl),
+                "tri_cert_bound": tri_bound,
+                "bernstein_pass_float64": float(math.isfinite(tri_bound) and tri_bound >= args.tto_tri_project_eps),
                 # Audit: percent of cells that PROVABLY fold trilinearly, and whether this case folds
                 # at all (mean over cases -> fraction of cases folding) — the numbers digital10 hides.
                 "tri_fold_pct": tri_fold,
                 "tri_case_folds": float(tri_fold > 0.0),
+                # Global-injectivity inputs (Ball/Kroemer): disp_grad_norm < 1 alone certifies GLOBAL
+                # injectivity. boundary_tan_lip < 1 only certifies each face separately; a merely "small"
+                # boundary displacement does not exclude cross-face collisions.
+                "disp_grad_norm": displacement_grad_norm_max(fl),
+                "boundary_tan_lip": boundary_tangential_lip(fl),
+                "boundary_max_disp": boundary_max_disp(fl),
+                "boundary_nonzero_count": float(bnd_nonzero),
+                "identity_boundary_exact": float(bnd_nonzero == 0),
                 **row,
             }
             if self.tto.enabled:
@@ -328,8 +443,10 @@ class InferRunner:
                 row["proj_folds_end"] = proj_folds
                 row["proj_iters"] = float(proj_iters)
             if args.tto_tri_project:
-                row["tri_proj_resid"] = tri_proj_resid
-                row["tri_proj_iters"] = float(tri_proj_iters)
+                row["tri_proj_certified"] = float(tri_proj_report.certified)
+                row["tri_proj_uncertified_cells"] = float(tri_proj_report.n_uncertified_cells)
+                row["tri_proj_sampled_negative_pct"] = tri_proj_report.sampled_negative_cell_percent
+                row["tri_proj_iters"] = float(tri_proj_report.iterations)
 
             if args.hd95:
                 with torch.no_grad():

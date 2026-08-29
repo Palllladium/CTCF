@@ -6,7 +6,7 @@ import torch.nn as nn
 from models.CTCF.blocks import resize_3d, upsample_flow
 from models.CTCF.stages import CoarseFlowNetQuarter, CTCFDCACoreHalf, FlowRefiner3D
 from models.TransMorph_DCA.model import SpatialTransformer
-from utils.field import compose_flows, integrate_svf
+from utils.field import certified_max_step, compose_flows, integrate_svf
 
 
 def _build_level2(config, backbone: str) -> nn.Module:
@@ -60,6 +60,9 @@ class CTCFCascadeA(nn.Module):
 
         self.l3_iters = config.l3_iters
         self.l3_svf = config.l3_svf
+        # Inference-only certified line-search (default off). off | vel | disp; eps = certificate margin.
+        self.l3_ls_space = getattr(config, "l3_ls_space", "off")
+        self.l3_ls_eps = float(getattr(config, "l3_ls_eps", 0.0))
         self.l1_half_res = config.l1_half_res
         self.l2_full_res = config.l2_full_res
         self.l3_full_res = config.l3_full_res
@@ -129,10 +132,41 @@ class CTCFCascadeA(nn.Module):
         st: SpatialTransformer,
     ) -> torch.Tensor:
         """Merge L3 residual into the running flow (SVF + composition, or direct addition)."""
+        if self.l3_ls_space != "off":
+            return self._apply_l3_delta_certified(delta, flow_cur, st)
         if self.l3_svf:
             delta = self._integrate_svf(delta, st)
             return compose_flows(delta, flow_cur)
         return flow_cur + delta
+
+    def _apply_l3_delta_certified(
+        self,
+        delta: torch.Tensor,
+        flow_cur: torch.Tensor,
+        st: SpatialTransformer,
+    ) -> torch.Tensor:
+        """Certified line-search (inference-only): clip the L3 update to the largest trilinear-
+        diffeomorphic fraction of itself. 'vel' re-integrates t*delta per probe (each candidate a proper
+        SVF map); 'disp' integrates once and scales the increment (cheaper, cruder). Both are enforced
+        feasible by tri_cert_bound, so every iterate stays diffeomorphic on the deployed warp."""
+        if self.l3_svf and self.l3_ls_space == "vel":
+
+            def candidate(t: float) -> torch.Tensor:
+                return compose_flows(self._integrate_svf(delta * t, st), flow_cur)
+
+        elif self.l3_svf:  # disp space with SVF: integrate once, scale the displacement increment
+            delta_int = self._integrate_svf(delta, st)
+
+            def candidate(t: float) -> torch.Tensor:
+                return compose_flows(delta_int * t, flow_cur)
+
+        else:  # non-SVF: direct residual
+
+            def candidate(t: float) -> torch.Tensor:
+                return flow_cur + delta * t
+
+        _, flow_new = certified_max_step(candidate, eps=self.l3_ls_eps)
+        return flow_new
 
     def _to_full_flow(
         self,

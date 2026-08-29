@@ -1,0 +1,2503 @@
+{
+  "schema": "ctcf-search-history-registry-v1",
+  "freeze_commit": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+  "verification_scope": "COMPACT_PRODUCT_BYTES_AND_RECORDED_PROVENANCE",
+  "note": "Eleven canonical scientific products plus one supporting GPU-parity witness. Relative hints are local search hints only; absolute paths, hostnames and user profiles are deliberately absent.",
+  "external_reference_commits": [
+    {
+      "name": "convexadam_mind_ssc",
+      "commit": "b229e52e44b114e2040a503334c92269750c16b2",
+      "repository": "EXTERNAL_NOT_CTCF",
+      "note": "MIND-SSC reference implementation commit recorded inside the C0 product. It is not a CTCF commit and is absent from the CTCF object database, so it is never resolved with git; it is pinned by value through a json_equals assertion instead."
+    }
+  ],
+  "products": [
+    {
+      "id": "SG-C0",
+      "role": "CANONICAL",
+      "gate": "C0",
+      "summary": "Frozen C0 MIND-SSC operator gate.",
+      "run_id": "C0_20260820T071655Z_d2a9b06efec6",
+      "relative_hints": [
+        "search_gate_c0/C0_20260820T071655Z_d2a9b06efec6"
+      ],
+      "evidence_gaps": [
+        "test_isolation",
+        "source_links"
+      ],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "329a2e1891893abc376d41aab4ecb95087aaa38e6151d8845eb1d603e8d83d59",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "d2a9b06efec6b9d35dd4f3058f918e4fd6645b3f",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "d2a9b06efec6b9d35dd4f3058f918e4fd6645b3f",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "STAGE_DEVELOPMENT",
+          "git_head": "d2a9b06efec6b9d35dd4f3058f918e4fd6645b3f",
+          "file": "development/stage_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "STAGE_SMOKE",
+          "git_head": "d2a9b06efec6b9d35dd4f3058f918e4fd6645b3f",
+          "file": "smoke/stage_contract.json",
+          "pointer": "/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "d2a9b06efec6b9d35dd4f3058f918e4fd6645b3f",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c0.py"
+        },
+        {
+          "git_head": "d2a9b06efec6b9d35dd4f3058f918e4fd6645b3f",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c0.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "development/run_manifest.json",
+          "sha256": "a6828fcbc63d03123ac9c026389e528fb2d32f578b02fdca0df7c9e9fd6efde6"
+        },
+        {
+          "path": "outputs.tsv",
+          "sha256": "781970fa3a5b9ac98878447820f373912d326702784297a6142fb85a3d29e40e"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "329a2e1891893abc376d41aab4ecb95087aaa38e6151d8845eb1d603e8d83d59"
+        },
+        {
+          "path": "smoke/run_manifest.json",
+          "sha256": "b4a7d905599417aabd72a5786f52511b92774883f6c1668868969b71e363aa31"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::selfcheck.json",
+          "kind": "file_sha256",
+          "file": "selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::selfcheck.json#checks.mind_reference.passed",
+          "kind": "json_equals",
+          "file": "selfcheck.json",
+          "pointer": "/checks/mind_reference/passed",
+          "value": true
+        },
+        {
+          "check": "equals::selfcheck.json#reference.git_commit",
+          "kind": "json_equals",
+          "file": "selfcheck.json",
+          "pointer": "/reference/git_commit",
+          "value": "b229e52e44b114e2040a503334c92269750c16b2"
+        },
+        {
+          "check": "sha256::development/stage_contract.json",
+          "kind": "file_sha256",
+          "file": "development/stage_contract.json",
+          "sha256": "174f9d5f0339bfad6a4e5b0d489c37ee8cf1d9b2e7cba94d1029baa76158a0dd"
+        },
+        {
+          "check": "equals::development/stage_contract.json#protocol_id",
+          "kind": "json_equals",
+          "file": "development/stage_contract.json",
+          "pointer": "/protocol_id",
+          "value": "CTCF-SEARCH-GATE-C0-V1"
+        },
+        {
+          "check": "sha256::smoke/stage_contract.json",
+          "kind": "file_sha256",
+          "file": "smoke/stage_contract.json",
+          "sha256": "6fce90a4cf520eb4a51d1daab52b02196c78bea002512c1efed90eef22a0b062"
+        },
+        {
+          "check": "equals::smoke/stage_contract.json#protocol_id",
+          "kind": "json_equals",
+          "file": "smoke/stage_contract.json",
+          "pointer": "/protocol_id",
+          "value": "CTCF-SEARCH-GATE-C0-V1"
+        }
+      ],
+      "test_isolation": [],
+      "source_links": []
+    },
+    {
+      "id": "SG-C1-EXPLORATION",
+      "role": "CANONICAL",
+      "gate": "C1",
+      "summary": "Frozen C1 exploration stage.",
+      "run_id": "C1_EXPLORATION_20260821T121202Z_9275171a67a3",
+      "relative_hints": [
+        "search_gate_c1/C1_EXPLORATION_20260821T121202Z_9275171a67a3"
+      ],
+      "evidence_gaps": [
+        "source_links"
+      ],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "2b429d68e0f01f85089f7c5e0cb0383f47298e574cc84e7815179cc63b98c942",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "STAGE_EXPLORATION",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "exploration/stage_contract.json",
+          "pointer": "/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c1.py"
+        },
+        {
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c1.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "9de5738b056e948198305dae10b2f7b874454cb855e79114211c324a48dd95eb"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "2b429d68e0f01f85089f7c5e0cb0383f47298e574cc84e7815179cc63b98c942"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c1_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c1_selfcheck.json",
+          "sha256": "0ff01ca9e4d282e121da5c20e1a5c66ea42dd577c1dee0f10186984f9c98a4c7"
+        },
+        {
+          "check": "equals::c1_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c1_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c1_selfcheck.json#protocol_id",
+          "kind": "json_equals",
+          "file": "c1_selfcheck.json",
+          "pointer": "/protocol_id",
+          "value": "CTCF-SEARCH-GATE-C1-V1"
+        },
+        {
+          "check": "equals::c1_selfcheck.json#confirmation_policy_sha256",
+          "kind": "json_equals",
+          "file": "c1_selfcheck.json",
+          "pointer": "/confirmation_policy_sha256",
+          "value": "9dd1320776c38dc137346d03f40b173d23f373c6fef00b758e5a5d1ca2f9d9e6"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "sha256::exploration/stage_contract.json",
+          "kind": "file_sha256",
+          "file": "exploration/stage_contract.json",
+          "sha256": "15146a96fc3671e15972911b732afce1f693cbfc0b7bcc168bb5108ec144adf6"
+        },
+        {
+          "check": "equals::exploration/stage_contract.json#protocol_id",
+          "kind": "json_equals",
+          "file": "exploration/stage_contract.json",
+          "pointer": "/protocol_id",
+          "value": "CTCF-SEARCH-GATE-C1-V1"
+        },
+        {
+          "check": "sha256::exploration/run_manifest.json",
+          "kind": "file_sha256",
+          "file": "exploration/run_manifest.json",
+          "sha256": "2e2084c66d33f165fb3a5995d05f535fb4b500e5d22072a4b811b1d388d94403"
+        },
+        {
+          "check": "sha256::exploration/per_case.csv",
+          "kind": "file_sha256",
+          "file": "exploration/per_case.csv",
+          "sha256": "a75b054b9b7938fc5fb923c6b1176f917c06d4756cae4da8872c3a6169058834"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::exploration/stage_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "exploration/stage_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        }
+      ],
+      "source_links": []
+    },
+    {
+      "id": "SG-C1-CONFIRMATION",
+      "role": "CANONICAL",
+      "gate": "C1",
+      "summary": "Frozen C1 confirmation stage.",
+      "run_id": "C1_CONFIRMATION_20260821T150103Z_9275171a67a3",
+      "relative_hints": [
+        "search_gate_c1/C1_CONFIRMATION_20260821T150103Z_9275171a67a3"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "7861e887b7f61ce23e028d6b8d318ee77cbf5339b7a4ebc67b54ad1832055750",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "STAGE_CONFIRMATION",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "EXPLORATION_FREEZE",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/exploration_freeze/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c1.py"
+        },
+        {
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c1.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "d086d8875d36871bba4fe0091c73194f6da4107f323e3805ebcfcade69f5dacc"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "7861e887b7f61ce23e028d6b8d318ee77cbf5339b7a4ebc67b54ad1832055750"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c1_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c1_selfcheck.json",
+          "sha256": "0ff01ca9e4d282e121da5c20e1a5c66ea42dd577c1dee0f10186984f9c98a4c7"
+        },
+        {
+          "check": "equals::c1_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c1_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c1_selfcheck.json#protocol_id",
+          "kind": "json_equals",
+          "file": "c1_selfcheck.json",
+          "pointer": "/protocol_id",
+          "value": "CTCF-SEARCH-GATE-C1-V1"
+        },
+        {
+          "check": "equals::c1_selfcheck.json#confirmation_policy_sha256",
+          "kind": "json_equals",
+          "file": "c1_selfcheck.json",
+          "pointer": "/confirmation_policy_sha256",
+          "value": "9dd1320776c38dc137346d03f40b173d23f373c6fef00b758e5a5d1ca2f9d9e6"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "sha256::confirmation/stage_contract.json",
+          "kind": "file_sha256",
+          "file": "confirmation/stage_contract.json",
+          "sha256": "444f12ba86d873ea251140429a43b024d1bfced0649998578edac7f3db74d117"
+        },
+        {
+          "check": "equals::confirmation/stage_contract.json#protocol_id",
+          "kind": "json_equals",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/protocol_id",
+          "value": "CTCF-SEARCH-GATE-C1-V1"
+        },
+        {
+          "check": "sha256::confirmation/run_manifest.json",
+          "kind": "file_sha256",
+          "file": "confirmation/run_manifest.json",
+          "sha256": "7ccf7b13f32c67b6821aeea31d742ade450d26d9f2dde56b286495479255defa"
+        },
+        {
+          "check": "sha256::confirmation/per_case.csv",
+          "kind": "file_sha256",
+          "file": "confirmation/per_case.csv",
+          "sha256": "5ffa7ac6bfee75e71807517e6c6fa210ee2a9fa515fd237b3e577ca774e460c6"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::confirmation/stage_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-confirmation/stage_contract.json#exploration_freeze.sha256",
+          "kind": "json_equals",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/exploration_freeze/sha256",
+          "value": "2e2084c66d33f165fb3a5995d05f535fb4b500e5d22072a4b811b1d388d94403",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-confirmation/stage_contract.json#exploration_freeze.contract_sha256",
+          "kind": "json_equals",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/exploration_freeze/contract_sha256",
+          "value": "15146a96fc3671e15972911b732afce1f693cbfc0b7bcc168bb5108ec144adf6",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/stage_contract.json"
+        },
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-confirmation/stage_contract.json#exploration_freeze.summary_sha256",
+          "kind": "json_equals",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/exploration_freeze/summary_sha256",
+          "value": "a20d7d0fe33776c4f490f0474f99c04a5fc92c0bd6d997212891544abca0f019",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/summary.json"
+        },
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-confirmation/stage_contract.json#exploration_freeze.validation_universe_sha256",
+          "kind": "json_equals",
+          "file": "confirmation/stage_contract.json",
+          "pointer": "/exploration_freeze/validation_universe_sha256",
+          "value": "ea379dfcfd40fe4a7009fcdd5543ef0ff4df1a28ccff808786144cde865e057e",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/validation_universe.csv"
+        }
+      ]
+    },
+    {
+      "id": "SG-C2-SCIENCE",
+      "role": "CANONICAL",
+      "gate": "C2",
+      "summary": "Primary scientific C2 product; owner of EV-SEARCH-003.",
+      "run_id": "C2_DEVELOPMENT_20260821T183655Z_7e8fc5b9b17a",
+      "relative_hints": [
+        "search_gate_c2/C2_DEVELOPMENT_20260821T183655Z_7e8fc5b9b17a"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "221ef1edab9da917046c46cd80dec90cd83115ffe73c9d9cbb9a7bd2a6292f4c",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "7e8fc5b9b17af3a71c068a4113ace75e17e527d6",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "7e8fc5b9b17af3a71c068a4113ace75e17e527d6",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "CONTRACT",
+          "git_head": "7e8fc5b9b17af3a71c068a4113ace75e17e527d6",
+          "file": "c2_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_C1_EXPLORATION",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/exploration/git_head"
+        },
+        {
+          "role": "SOURCE_C1_CONFIRMATION",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/confirmation/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "7e8fc5b9b17af3a71c068a4113ace75e17e527d6",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c2.py"
+        },
+        {
+          "git_head": "7e8fc5b9b17af3a71c068a4113ace75e17e527d6",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c2.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "cfb9cb590c6b7d9e9846c0cf8ea4a5df8f43b8c0b6db06a63125e73aa8f76b76"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "221ef1edab9da917046c46cd80dec90cd83115ffe73c9d9cbb9a7bd2a6292f4c"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c2_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c2_selfcheck.json",
+          "sha256": "dc3b15acca6c2b58701e8d0d4c077f8012f6635a2fe0ff4cf0cf304edb6ad84c"
+        },
+        {
+          "check": "equals::c2_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c2_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c2_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c2_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "01a021ee22bdc99e1c8148e94358f89e944c35fa05fefeea7044011fb3a79447"
+        },
+        {
+          "check": "sha256::c2_contract.json",
+          "kind": "file_sha256",
+          "file": "c2_contract.json",
+          "sha256": "0e51c115c20a78019b65ecc579e47c287f1a33a7a6801920af495a062d062c1a"
+        },
+        {
+          "check": "equals::c2_contract.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/policy_sha256",
+          "value": "01a021ee22bdc99e1c8148e94358f89e944c35fa05fefeea7044011fb3a79447"
+        },
+        {
+          "check": "sha256::c2_manifest.json",
+          "kind": "file_sha256",
+          "file": "c2_manifest.json",
+          "sha256": "99eebe51e8cc53a2d5156fe427bbf34acbb6ec67f39d509c80baff0427dba286"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "sha256::per_step.csv",
+          "kind": "file_sha256",
+          "file": "per_step.csv",
+          "sha256": "2a487ff1efc4d2451ae3d516125e00155572dd80441263df97759e0837228e5a"
+        },
+        {
+          "check": "sha256::per_branch.csv",
+          "kind": "file_sha256",
+          "file": "per_branch.csv",
+          "sha256": "a0beeda890f2228111a39b2366a6c2d79b1bf13705d261ab7bb232234e2459d9"
+        },
+        {
+          "check": "sha256::trajectory_summary.csv",
+          "kind": "file_sha256",
+          "file": "trajectory_summary.csv",
+          "sha256": "83e2311374bff3fc0a243dfe2a8f9a74f17ee482dd228f5c24de6f82c1429a4b"
+        },
+        {
+          "check": "sha256::summary.json",
+          "kind": "file_sha256",
+          "file": "summary.json",
+          "sha256": "ea3c6bf2d5760493477aacba930380bd89b2e5d7933721002c64c81b5203badb"
+        },
+        {
+          "check": "sha256::c1_reference.csv",
+          "kind": "file_sha256",
+          "file": "c1_reference.csv",
+          "sha256": "34611a7334b6af3139c656488ecf5ce85c5d533b5066c7db858302f2766477cc"
+        },
+        {
+          "check": "sha256::datasets.csv",
+          "kind": "file_sha256",
+          "file": "datasets.csv",
+          "sha256": "ea379dfcfd40fe4a7009fcdd5543ef0ff4df1a28ccff808786144cde865e057e"
+        },
+        {
+          "check": "sha256::datasets.tsv",
+          "kind": "file_sha256",
+          "file": "datasets.tsv",
+          "sha256": "6f5a532afaf53a32256df71f63ef50b1dc049288bdc742227690dd5fc736f040"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c2_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::c2_selfcheck.json#checks.test_split_is_unreachable",
+          "kind": "json_equals",
+          "file": "c2_selfcheck.json",
+          "pointer": "/checks/test_split_is_unreachable",
+          "value": true
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-c2_contract.json#c1_sources.exploration.sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/exploration/sha256",
+          "value": "2e2084c66d33f165fb3a5995d05f535fb4b500e5d22072a4b811b1d388d94403",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C1-CONFIRMATION<-c2_contract.json#c1_sources.confirmation.sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/confirmation/sha256",
+          "value": "7ccf7b13f32c67b6821aeea31d742ade450d26d9f2dde56b286495479255defa",
+          "source_product_id": "SG-C1-CONFIRMATION",
+          "source_artifact": "confirmation/run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-c2_contract.json#c1_sources.exploration.per_case_sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/exploration/per_case_sha256",
+          "value": "a75b054b9b7938fc5fb923c6b1176f917c06d4756cae4da8872c3a6169058834",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/per_case.csv"
+        },
+        {
+          "check": "source_link::SG-C1-CONFIRMATION<-c2_contract.json#c1_sources.confirmation.per_case_sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/confirmation/per_case_sha256",
+          "value": "5ffa7ac6bfee75e71807517e6c6fa210ee2a9fa515fd237b3e577ca774e460c6",
+          "source_product_id": "SG-C1-CONFIRMATION",
+          "source_artifact": "confirmation/per_case.csv"
+        }
+      ]
+    },
+    {
+      "id": "SG-C2-PARITY",
+      "role": "SUPPORTING",
+      "gate": "C2",
+      "summary": "Non-canonical GPU-parity control recorded after the search_gate_common refactor; owner of EV-OPS-014. It witnesses behaviour preservation and is not the scientific owner of any C2 number.",
+      "run_id": "C2_DEVELOPMENT_20260822T111122Z_f31aaf8a39b9",
+      "relative_hints": [
+        "search_gate_c2/C2_DEVELOPMENT_20260822T111122Z_f31aaf8a39b9"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "fc5630b71f2508f42005523d88407db461d234c847814a7b37b42e0b79d92d5a",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "CONTRACT",
+          "git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+          "file": "c2_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_C1_EXPLORATION",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/exploration/git_head"
+        },
+        {
+          "role": "SOURCE_C1_CONFIRMATION",
+          "git_head": "9275171a67a301229a7b8fb7abd2c1d2c04e8a81",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/confirmation/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c2.py"
+        },
+        {
+          "git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c2.sh"
+        },
+        {
+          "git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_common.py"
+        },
+        {
+          "git_head": "f31aaf8a39b91af857660a4c9fd2841eedae20ec",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/_search_gate_common.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "2c1e4cd50a759d370f657b9e8ef14d227d583a32ff25fc6a2631eeeb78f49ed4"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "fc5630b71f2508f42005523d88407db461d234c847814a7b37b42e0b79d92d5a"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c2_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c2_selfcheck.json",
+          "sha256": "dc3b15acca6c2b58701e8d0d4c077f8012f6635a2fe0ff4cf0cf304edb6ad84c"
+        },
+        {
+          "check": "equals::c2_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c2_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c2_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c2_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "01a021ee22bdc99e1c8148e94358f89e944c35fa05fefeea7044011fb3a79447"
+        },
+        {
+          "check": "sha256::c2_contract.json",
+          "kind": "file_sha256",
+          "file": "c2_contract.json",
+          "sha256": "7a54371362924347558929baee989680dfd4f07cbb5133a4a3f21c5d09895210"
+        },
+        {
+          "check": "equals::c2_contract.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/policy_sha256",
+          "value": "01a021ee22bdc99e1c8148e94358f89e944c35fa05fefeea7044011fb3a79447"
+        },
+        {
+          "check": "sha256::c2_manifest.json",
+          "kind": "file_sha256",
+          "file": "c2_manifest.json",
+          "sha256": "3ece06588d6d4d1995f12b150a137e6d1e33bd9b020739279d99d7c8cfe2f6a9"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "sha256::per_step.csv",
+          "kind": "file_sha256",
+          "file": "per_step.csv",
+          "sha256": "2a487ff1efc4d2451ae3d516125e00155572dd80441263df97759e0837228e5a"
+        },
+        {
+          "check": "sha256::per_branch.csv",
+          "kind": "file_sha256",
+          "file": "per_branch.csv",
+          "sha256": "a0beeda890f2228111a39b2366a6c2d79b1bf13705d261ab7bb232234e2459d9"
+        },
+        {
+          "check": "sha256::trajectory_summary.csv",
+          "kind": "file_sha256",
+          "file": "trajectory_summary.csv",
+          "sha256": "83e2311374bff3fc0a243dfe2a8f9a74f17ee482dd228f5c24de6f82c1429a4b"
+        },
+        {
+          "check": "sha256::summary.json",
+          "kind": "file_sha256",
+          "file": "summary.json",
+          "sha256": "ea3c6bf2d5760493477aacba930380bd89b2e5d7933721002c64c81b5203badb"
+        },
+        {
+          "check": "sha256::c1_reference.csv",
+          "kind": "file_sha256",
+          "file": "c1_reference.csv",
+          "sha256": "34611a7334b6af3139c656488ecf5ce85c5d533b5066c7db858302f2766477cc"
+        },
+        {
+          "check": "sha256::datasets.csv",
+          "kind": "file_sha256",
+          "file": "datasets.csv",
+          "sha256": "ea379dfcfd40fe4a7009fcdd5543ef0ff4df1a28ccff808786144cde865e057e"
+        },
+        {
+          "check": "sha256::datasets.tsv",
+          "kind": "file_sha256",
+          "file": "datasets.tsv",
+          "sha256": "6f5a532afaf53a32256df71f63ef50b1dc049288bdc742227690dd5fc736f040"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c2_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::c2_selfcheck.json#checks.test_split_is_unreachable",
+          "kind": "json_equals",
+          "file": "c2_selfcheck.json",
+          "pointer": "/checks/test_split_is_unreachable",
+          "value": true
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-c2_contract.json#c1_sources.exploration.sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/exploration/sha256",
+          "value": "2e2084c66d33f165fb3a5995d05f535fb4b500e5d22072a4b811b1d388d94403",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C1-CONFIRMATION<-c2_contract.json#c1_sources.confirmation.sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/confirmation/sha256",
+          "value": "7ccf7b13f32c67b6821aeea31d742ade450d26d9f2dde56b286495479255defa",
+          "source_product_id": "SG-C1-CONFIRMATION",
+          "source_artifact": "confirmation/run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C1-EXPLORATION<-c2_contract.json#c1_sources.exploration.per_case_sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/exploration/per_case_sha256",
+          "value": "a75b054b9b7938fc5fb923c6b1176f917c06d4756cae4da8872c3a6169058834",
+          "source_product_id": "SG-C1-EXPLORATION",
+          "source_artifact": "exploration/per_case.csv"
+        },
+        {
+          "check": "source_link::SG-C1-CONFIRMATION<-c2_contract.json#c1_sources.confirmation.per_case_sha256",
+          "kind": "json_equals",
+          "file": "c2_contract.json",
+          "pointer": "/c1_sources/confirmation/per_case_sha256",
+          "value": "5ffa7ac6bfee75e71807517e6c6fa210ee2a9fa515fd237b3e577ca774e460c6",
+          "source_product_id": "SG-C1-CONFIRMATION",
+          "source_artifact": "confirmation/per_case.csv"
+        }
+      ]
+    },
+    {
+      "id": "SG-C3",
+      "role": "CANONICAL",
+      "gate": "C3A",
+      "summary": "Frozen C3a label-free descriptor gate. It authenticated the SG-C2-PARITY tree; SG-C2-SCIENCE remains the scientific owner of the C2 numbers through the nine-file payload equivalence.",
+      "run_id": "C3_DEVELOPMENT_20260822T212632Z_5d6c762a8a6f",
+      "relative_hints": [
+        "search_gate_c3/C3_DEVELOPMENT_20260822T212632Z_5d6c762a8a6f"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_CONTRACT",
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_CONTRACT",
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "file": "source_contract.json",
+          "pointer": "/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c3.py"
+        },
+        {
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c3.py"
+        },
+        {
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c3.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "a3e21c12e4ddc7ce4e9de2e7227a7dbfd00ae7ef20649386e371fe0c04f1846f"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c3_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c3_selfcheck.json",
+          "sha256": "366af88181ec74437bb351ac1ccb26b8c2bb4526a7528a6c171b16bc5eca28a6"
+        },
+        {
+          "check": "equals::c3_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c3_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c3_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c3_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "d9e0161b9abe84fafb0ab2bb7f0a6c3e583d061a51e2de63d18373f1fe51781c"
+        },
+        {
+          "check": "sha256::c3_manifest.json",
+          "kind": "file_sha256",
+          "file": "c3_manifest.json",
+          "sha256": "d5c35ba4a27dab2d6d0dcd9f8017c39364aece31471286fe844a1e34b2337094"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "equals::decision_contract.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/policy_sha256",
+          "value": "d9e0161b9abe84fafb0ab2bb7f0a6c3e583d061a51e2de63d18373f1fe51781c"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c3_selfcheck.json#checks.test_115_is_unreachable",
+          "kind": "json_equals",
+          "file": "c3_selfcheck.json",
+          "pointer": "/checks/test_115_is_unreachable",
+          "value": true
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C2-PARITY<-source_contract.json#c2_source.manifest_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/c2_source/manifest_sha256",
+          "value": "3ece06588d6d4d1995f12b150a137e6d1e33bd9b020739279d99d7c8cfe2f6a9",
+          "source_product_id": "SG-C2-PARITY",
+          "source_artifact": "c2_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C2-PARITY<-source_contract.json#c2_source.contract_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/c2_source/contract_sha256",
+          "value": "7a54371362924347558929baee989680dfd4f07cbb5133a4a3f21c5d09895210",
+          "source_product_id": "SG-C2-PARITY",
+          "source_artifact": "c2_contract.json"
+        },
+        {
+          "check": "source_link::SG-C2-PARITY<-decision_contract.json#c2_decision_goldens.source_manifest_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/c2_decision_goldens/source_manifest_sha256",
+          "value": "3ece06588d6d4d1995f12b150a137e6d1e33bd9b020739279d99d7c8cfe2f6a9",
+          "source_product_id": "SG-C2-PARITY",
+          "source_artifact": "c2_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C2-PARITY<-decision_contract.json#c2_decision_goldens.source_contract_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/c2_decision_goldens/source_contract_sha256",
+          "value": "7a54371362924347558929baee989680dfd4f07cbb5133a4a3f21c5d09895210",
+          "source_product_id": "SG-C2-PARITY",
+          "source_artifact": "c2_contract.json"
+        }
+      ]
+    },
+    {
+      "id": "SG-NUMSTAB",
+      "role": "CANONICAL",
+      "gate": "NUMSTAB",
+      "summary": "Frozen numerical-stability gate over the C3a decision.",
+      "run_id": "NUMSTAB_DEVELOPMENT_20260824T112725Z_8c8de5038319",
+      "relative_hints": [
+        "search_gate_numerical_stability/NUMSTAB_DEVELOPMENT_20260824T112725Z_8c8de5038319"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "1e060f6f5475dbd185fb7659686aa188ff4e2572214688dc9e037756d972035f",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_CONTRACT",
+          "git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_CONTRACT",
+          "git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+          "file": "source_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_C3",
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "file": "source_contract.json",
+          "pointer": "/source_c3/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_numerical_stability.py"
+        },
+        {
+          "git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_numerical_stability.py"
+        },
+        {
+          "git_head": "8c8de5038319dddf1f2b481495599e2e82688c34",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_numerical_stability.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "be303223dd6e7f405083bcd6e2d5569829f5f5a163521b2c6f019db18274aea6"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "1e060f6f5475dbd185fb7659686aa188ff4e2572214688dc9e037756d972035f"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::numstab_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "numstab_selfcheck.json",
+          "sha256": "33759fb54dc6515fb5ec1c6e912882e8dd4593810ea2745f0a8c91e47dd3ec15"
+        },
+        {
+          "check": "equals::numstab_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "numstab_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::numstab_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "numstab_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "9d9bf723780ac279b3a9c68a8b6b94503019f81b3f8348fc468986fe26b60273"
+        },
+        {
+          "check": "sha256::numerical_stability_manifest.json",
+          "kind": "file_sha256",
+          "file": "numerical_stability_manifest.json",
+          "sha256": "3a2ded48853ed6b39c0debefc208fb1b727df9cadd2fbe0dc169ad19fdb842af"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::numstab_selfcheck.json#checks.test_115_is_closed",
+          "kind": "json_equals",
+          "file": "numstab_selfcheck.json",
+          "pointer": "/checks/test_115_is_closed",
+          "value": true
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C3<-decision_contract.json#source_c3_run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/source_c3_run_manifest_sha256",
+          "value": "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5",
+          "source_product_id": "SG-C3",
+          "source_artifact": "run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C3<-source_contract.json#source_c3.run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/source_c3/run_manifest_sha256",
+          "value": "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5",
+          "source_product_id": "SG-C3",
+          "source_artifact": "run_manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "SG-C4",
+      "role": "CANONICAL",
+      "gate": "C4",
+      "summary": "Frozen C4 multiscale gate.",
+      "run_id": "C4_DEVELOPMENT_20260824T161239Z_c69d12000176",
+      "relative_hints": [
+        "search_gate_c4/C4_DEVELOPMENT_20260824T161239Z_c69d12000176"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "70d6f526501a26b442ad1d3b821028a7d5ed9ef5b6c809f7e7fdebe2cc15460e",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_CONTRACT",
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_CONTRACT",
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "file": "source_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_C3",
+          "git_head": "5d6c762a8a6f11607fe4312f30da774b3e05dec2",
+          "file": "source_contract.json",
+          "pointer": "/source_c3/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c4.py"
+        },
+        {
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c4.py"
+        },
+        {
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c4_contracts.py"
+        },
+        {
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c4_workers.py"
+        },
+        {
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c4.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "9359d3aed41307a42de58c43f1dc3a0b81711d35f2ae5f9f5f4d608fd853ef56"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "70d6f526501a26b442ad1d3b821028a7d5ed9ef5b6c809f7e7fdebe2cc15460e"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c4_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c4_selfcheck.json",
+          "sha256": "e688db7f181b30a796964ed5ce42f6de7102686ebed8b1d7309ff245d3882bf3"
+        },
+        {
+          "check": "equals::c4_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c4_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "sha256::c4_manifest.json",
+          "kind": "file_sha256",
+          "file": "c4_manifest.json",
+          "sha256": "dd3c6a6eb4d0fdcb479b7dee4d722c4573cd68a59ac3849a0482610a7721f230"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "equals::decision_contract.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/policy_sha256",
+          "value": "97020963f07165a2297a08e1605db3c0f413fac2bddc76f945fdaed49e02c3b1"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c4_selfcheck.json#checks.test_115_is_not_authorized",
+          "kind": "json_equals",
+          "file": "c4_selfcheck.json",
+          "pointer": "/checks/test_115_is_not_authorized",
+          "value": true
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C3<-decision_contract.json#source_c3_run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/source_c3_run_manifest_sha256",
+          "value": "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5",
+          "source_product_id": "SG-C3",
+          "source_artifact": "run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C3<-source_contract.json#source_c3.run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/source_c3/run_manifest_sha256",
+          "value": "ee1958b6ec3f00eb3100538c6f46dbdc056869570ab6c147b661775bd96313a5",
+          "source_product_id": "SG-C3",
+          "source_artifact": "run_manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "SG-C5",
+      "role": "CANONICAL",
+      "gate": "C5",
+      "summary": "Frozen C5 recovery product. The RUN_ID suffix names the producer phase while the root native manifest was written by the recovery consumer head, so a git sha must never be read off the RUN_ID.",
+      "run_id": "C5_DEVELOPMENT_20260825T175112Z_242dde3281d2",
+      "relative_hints": [
+        "search_gate_c5/C5_DEVELOPMENT_20260825T175112Z_242dde3281d2"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "094860ab5ff2ef4c5c411a5daa065b4aecd6a98a715d0add060be8cb4fdc8670",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_PRODUCER",
+          "git_head": "242dde3281d22c573a4a64bc494c8d2e5ef597b2",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_PRODUCER",
+          "git_head": "242dde3281d22c573a4a64bc494c8d2e5ef597b2",
+          "file": "source_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "EVALUATION_CONSUMER",
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "file": "evaluation_contract.json",
+          "pointer": "/evaluation_code/git_head"
+        },
+        {
+          "role": "EVALUATION_DECISION_PRODUCER",
+          "git_head": "242dde3281d22c573a4a64bc494c8d2e5ef597b2",
+          "file": "evaluation_contract.json",
+          "pointer": "/evaluation_code/decision_git_head"
+        },
+        {
+          "role": "SOURCE_C4",
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "file": "source_contract.json",
+          "pointer": "/source_c4/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "head_role": "RECOVERY_CONSUMER",
+          "path": "tools/analysis/run_search_gate_c5.py"
+        },
+        {
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "head_role": "RECOVERY_CONSUMER",
+          "path": "tools/analysis/search_gate_c5.py"
+        },
+        {
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "head_role": "RECOVERY_CONSUMER",
+          "path": "tools/analysis/search_gate_c5_contracts.py"
+        },
+        {
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "head_role": "RECOVERY_CONSUMER",
+          "path": "tools/analysis/search_gate_c5_workers.py"
+        },
+        {
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "head_role": "RECOVERY_CONSUMER",
+          "path": "tools/runners/eval/search_gate_c5.sh"
+        },
+        {
+          "git_head": "242dde3281d22c573a4a64bc494c8d2e5ef597b2",
+          "head_role": "DECISION_PRODUCER",
+          "path": "tools/analysis/run_search_gate_c5.py"
+        },
+        {
+          "git_head": "242dde3281d22c573a4a64bc494c8d2e5ef597b2",
+          "head_role": "DECISION_PRODUCER",
+          "path": "tools/runners/eval/search_gate_c5.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "2e2fae693aa7e05abd62733288b62df16649c9866ba3167f55f80820a4346f32"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "094860ab5ff2ef4c5c411a5daa065b4aecd6a98a715d0add060be8cb4fdc8670"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c5_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c5_selfcheck.json",
+          "sha256": "9868a26aaaab611492c9b59000d758f4f2cfd310a2e45c3f12af5ee060a4aed6"
+        },
+        {
+          "check": "equals::c5_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c5_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "sha256::c5_manifest.json",
+          "kind": "file_sha256",
+          "file": "c5_manifest.json",
+          "sha256": "2fad4990d1b557101f9eb93312c3d2705f79f81a6d46753bdcdd7da879a65027"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "equals::evaluation_contract.json#status",
+          "kind": "json_equals",
+          "file": "evaluation_contract.json",
+          "pointer": "/status",
+          "value": "FROZEN_AFTER_DECISION_BARRIER"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "chain::evaluation_contract.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_contract.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::evaluation_contract.json#decision_barrier_sha256->decision_barrier.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_contract.json",
+          "pointer": "/decision_barrier_sha256",
+          "target_file": "decision_barrier.json"
+        },
+        {
+          "check": "chain::evaluation_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "equals::decision_contract.json#full_policy_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/full_policy_sha256",
+          "value": "5612a190b5fe4adc581bdffe02fa5db762a0d5038df737a242abf593f1992097"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c5_selfcheck.json#checks.test_115_is_not_authorized",
+          "kind": "json_equals",
+          "file": "c5_selfcheck.json",
+          "pointer": "/checks/test_115_is_not_authorized",
+          "value": true
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#ixi_test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/ixi_test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "evaluation_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C4<-decision_contract.json#source_c4_run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/source_c4_run_manifest_sha256",
+          "value": "70d6f526501a26b442ad1d3b821028a7d5ed9ef5b6c809f7e7fdebe2cc15460e",
+          "source_product_id": "SG-C4",
+          "source_artifact": "run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C4<-source_contract.json#source_c4.run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/source_c4/run_manifest_sha256",
+          "value": "70d6f526501a26b442ad1d3b821028a7d5ed9ef5b6c809f7e7fdebe2cc15460e",
+          "source_product_id": "SG-C4",
+          "source_artifact": "run_manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "SG-C5B",
+      "role": "CANONICAL",
+      "gate": "C5B",
+      "summary": "Frozen C5b intensity gate.",
+      "run_id": "C5B_DEVELOPMENT_20260827T105217Z_d36e092a48c9",
+      "relative_hints": [
+        "search_gate_c5b/C5B_DEVELOPMENT_20260827T105217Z_d36e092a48c9/C5B_DEVELOPMENT_20260827T105217Z_d36e092a48c9"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "948d6a513a3fe8b6fa155069948ced946fec6e46ab489e7eef7f7a8fc6dcaf69",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_CONTRACT",
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_CONTRACT",
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "file": "source_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "EVALUATION_CONTRACT",
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "file": "evaluation_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_C5_PRODUCER",
+          "git_head": "242dde3281d22c573a4a64bc494c8d2e5ef597b2",
+          "file": "decision_contract.json",
+          "pointer": "/source_identity/producer_git_head"
+        },
+        {
+          "role": "SOURCE_C5_CONSUMER",
+          "git_head": "baafc3bcfed74ed3e471222390e3a604816ae4a3",
+          "file": "decision_contract.json",
+          "pointer": "/source_identity/consumer_git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c5b.py"
+        },
+        {
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c5b.py"
+        },
+        {
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c5b_contracts.py"
+        },
+        {
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c5b_source.py"
+        },
+        {
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c5b_workers.py"
+        },
+        {
+          "git_head": "d36e092a48c9ac162ca366aeb5f4d4c36c304b3a",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c5b.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "072dd05cbb786f2632d35258f8b62e8b032c09653cb12979bdfaa6a2ea514415"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "948d6a513a3fe8b6fa155069948ced946fec6e46ab489e7eef7f7a8fc6dcaf69"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c5b_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c5b_selfcheck.json",
+          "sha256": "5920084d7200be94e73b543eb18773475cdb589716e1f68588cc4abf0cf81d9f"
+        },
+        {
+          "check": "equals::c5b_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c5b_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c5b_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c5b_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "4fa7a24c75a0558ddb8255ed8115d6d50c0396d31eb0fb691a9ef4668eb5958a"
+        },
+        {
+          "check": "sha256::c5b_manifest.json",
+          "kind": "file_sha256",
+          "file": "c5b_manifest.json",
+          "sha256": "009bdb6c96e1b4bd1344a1077f08e712e8a4376d1f0a8a631d2fad3b74160e82"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "equals::evaluation_barrier.json#status",
+          "kind": "json_equals",
+          "file": "evaluation_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "equals::source_contract.json#status",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/status",
+          "value": "AUTHENTICATED"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "chain::evaluation_barrier.json#decision_barrier_sha256->decision_barrier.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_barrier.json",
+          "pointer": "/decision_barrier_sha256",
+          "target_file": "decision_barrier.json"
+        },
+        {
+          "check": "chain::evaluation_barrier.json#evaluation_contract_sha256->evaluation_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_barrier.json",
+          "pointer": "/evaluation_contract_sha256",
+          "target_file": "evaluation_contract.json"
+        },
+        {
+          "check": "chain::evaluation_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c5b_selfcheck.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "c5b_selfcheck.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "evaluation_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "evaluation_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C5<-decision_contract.json#source_identity.native_manifest_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/source_identity/native_manifest_sha256",
+          "value": "094860ab5ff2ef4c5c411a5daa065b4aecd6a98a715d0add060be8cb4fdc8670",
+          "source_product_id": "SG-C5",
+          "source_artifact": "run_manifest.json"
+        },
+        {
+          "check": "source_link::SG-C5<-source_contract.json#source_projection.source_identity.native_manifest_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/source_projection/source_identity/native_manifest_sha256",
+          "value": "094860ab5ff2ef4c5c411a5daa065b4aecd6a98a715d0add060be8cb4fdc8670",
+          "source_product_id": "SG-C5",
+          "source_artifact": "run_manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "SG-C6",
+      "role": "CANONICAL",
+      "gate": "C6",
+      "summary": "Frozen C6 V2 true-pyramid causal gate.",
+      "run_id": "C6_DEVELOPMENT_20260827T211512Z_c0a59d1c04af",
+      "relative_hints": [
+        "search_gate_c6/C6_DEVELOPMENT_20260827T211512Z_c0a59d1c04af"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "f64f48cb309c0f51155e792da4a2196835a2518cb1941e71af8507f3d4748bba",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_CONTRACT",
+          "git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        },
+        {
+          "role": "SOURCE_C4",
+          "git_head": "c69d12000176c796e96dd15f4b831c8df05ef64b",
+          "file": "source_contract.json",
+          "pointer": "/source_snapshot/source_c4/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c6.py"
+        },
+        {
+          "git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c6.py"
+        },
+        {
+          "git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_pyramid.py"
+        },
+        {
+          "git_head": "c0a59d1c04afcd14c686e64f72cf2dfbf5c69f3e",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c6.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "02a60f3e9d52bce0c8f6e2db45b154ea694f093eb6ad5ed1f12db02d8a332dd6"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "f64f48cb309c0f51155e792da4a2196835a2518cb1941e71af8507f3d4748bba"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c6_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c6_selfcheck.json",
+          "sha256": "3e0bacd066054f4b8005e06f8aa93575efb86920c507f603a0b96ac1dba2a7ba"
+        },
+        {
+          "check": "equals::c6_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c6_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c6_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c6_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "d0337e60ac0c7d271ae506acd009b439091bc723afa142c81b250529e6c4807b"
+        },
+        {
+          "check": "sha256::c6_manifest.json",
+          "kind": "file_sha256",
+          "file": "c6_manifest.json",
+          "sha256": "e83e5bafeee830a3b7c96e75e57fde8f97c2590f76f80538d1a48e3ea7d3353f"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "equals::evaluation_barrier.json#status",
+          "kind": "json_equals",
+          "file": "evaluation_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "chain::evaluation_barrier.json#decision_barrier_sha256->decision_barrier.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_barrier.json",
+          "pointer": "/decision_barrier_sha256",
+          "target_file": "decision_barrier.json"
+        },
+        {
+          "check": "chain::evaluation_barrier.json#evaluation_contract_sha256->evaluation_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_barrier.json",
+          "pointer": "/evaluation_contract_sha256",
+          "target_file": "evaluation_contract.json"
+        },
+        {
+          "check": "chain::evaluation_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c6_selfcheck.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "c6_selfcheck.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "evaluation_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "evaluation_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C4<-source_contract.json#source_snapshot.source_c4.run_manifest_sha256",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/source_snapshot/source_c4/run_manifest_sha256",
+          "value": "70d6f526501a26b442ad1d3b821028a7d5ed9ef5b6c809f7e7fdebe2cc15460e",
+          "source_product_id": "SG-C4",
+          "source_artifact": "run_manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "SG-C7",
+      "role": "CANONICAL",
+      "gate": "C7",
+      "summary": "Frozen C7 CorrMLP descriptor-cost gate.",
+      "run_id": "C7_DEVELOPMENT_20260828T172743Z_f3119f7f2f93",
+      "relative_hints": [
+        "search_gate_c7/C7_DEVELOPMENT_20260828T172743Z_f3119f7f2f93"
+      ],
+      "evidence_gaps": [],
+      "manifest": {
+        "schema": "ctcf-native-manifest-v1",
+        "sha256": "4605085c9c00cf9e26b015e8a3fffb31a45039b2e8d00a86bbe871e60679864d",
+        "status": "COMPLETE",
+        "exit_code": 0,
+        "code_git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+        "tracked_tree_clean_at_start": true
+      },
+      "code_heads": [
+        {
+          "role": "RUN_MANIFEST",
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "file": "run_manifest.json",
+          "pointer": "/code/git_head"
+        },
+        {
+          "role": "DECISION_CONTRACT",
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "file": "decision_contract.json",
+          "pointer": "/git_head"
+        }
+      ],
+      "entrypoints": [
+        {
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/run_search_gate_c7.py"
+        },
+        {
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c7.py"
+        },
+        {
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_c7_source.py"
+        },
+        {
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/analysis/search_gate_learned.py"
+        },
+        {
+          "git_head": "f3119f7f2f93147ca1bb3aed7340db93b2bb5079",
+          "head_role": "RUN_MANIFEST",
+          "path": "tools/runners/eval/search_gate_c7.sh"
+        }
+      ],
+      "unindexed_files": [
+        {
+          "path": "outputs.tsv",
+          "sha256": "c8a8d595f0bb468d640b040619711d1dfb0c335e4a54dcd641d221102cac4a6d"
+        },
+        {
+          "path": "run_manifest.json",
+          "sha256": "4605085c9c00cf9e26b015e8a3fffb31a45039b2e8d00a86bbe871e60679864d"
+        }
+      ],
+      "assertions": [
+        {
+          "check": "sha256::c7_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "c7_selfcheck.json",
+          "sha256": "bb5e703660419ba06842f8bb2ffaabf1ee1829e72b4ab5b06f083a3f562c80cc"
+        },
+        {
+          "check": "equals::c7_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "c7_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        },
+        {
+          "check": "equals::c7_selfcheck.json#policy_sha256",
+          "kind": "json_equals",
+          "file": "c7_selfcheck.json",
+          "pointer": "/policy_sha256",
+          "value": "daca934f080c0b5b46d428183914b6bbfc81d422322e74c4a65fb55e60cd95ea"
+        },
+        {
+          "check": "sha256::c7_manifest.json",
+          "kind": "file_sha256",
+          "file": "c7_manifest.json",
+          "sha256": "f75add561b6ee4d0f9c0418a99f670bd759b005fe6cd3220407662ae36ab5a0d"
+        },
+        {
+          "check": "equals::decision_barrier.json#status",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "equals::evaluation_barrier.json#status",
+          "kind": "json_equals",
+          "file": "evaluation_barrier.json",
+          "pointer": "/status",
+          "value": "COMPLETE"
+        },
+        {
+          "check": "chain::decision_barrier.json#decision_contract_sha256->decision_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_barrier.json",
+          "pointer": "/decision_contract_sha256",
+          "target_file": "decision_contract.json"
+        },
+        {
+          "check": "chain::decision_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "decision_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "chain::evaluation_barrier.json#decision_barrier_sha256->decision_barrier.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_barrier.json",
+          "pointer": "/decision_barrier_sha256",
+          "target_file": "decision_barrier.json"
+        },
+        {
+          "check": "chain::evaluation_barrier.json#evaluation_contract_sha256->evaluation_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_barrier.json",
+          "pointer": "/evaluation_contract_sha256",
+          "target_file": "evaluation_contract.json"
+        },
+        {
+          "check": "chain::evaluation_contract.json#source_contract_sha256->source_contract.json",
+          "kind": "json_equals_file_sha256",
+          "file": "evaluation_contract.json",
+          "pointer": "/source_contract_sha256",
+          "target_file": "source_contract.json"
+        },
+        {
+          "check": "sha256::transactional_selfcheck.json",
+          "kind": "file_sha256",
+          "file": "transactional_selfcheck.json",
+          "sha256": "bf0469970d909aab513bc7774b10c226bd01a87348e584179f769bca1e364c7f"
+        },
+        {
+          "check": "equals::transactional_selfcheck.json#status",
+          "kind": "json_equals",
+          "file": "transactional_selfcheck.json",
+          "pointer": "/status",
+          "value": "PASS"
+        }
+      ],
+      "test_isolation": [
+        {
+          "check": "equals::c7_selfcheck.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "c7_selfcheck.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_barrier.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::decision_contract.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_barrier.json#test_split_accessed",
+          "kind": "json_equals",
+          "file": "evaluation_barrier.json",
+          "pointer": "/test_split_accessed",
+          "value": false
+        },
+        {
+          "check": "equals::evaluation_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "evaluation_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        },
+        {
+          "check": "equals::source_contract.json#test_115_authorized",
+          "kind": "json_equals",
+          "file": "source_contract.json",
+          "pointer": "/test_115_authorized",
+          "value": false
+        }
+      ],
+      "source_links": [
+        {
+          "check": "source_link::SG-C6<-decision_contract.json#source_c6_manifest_sha256",
+          "kind": "json_equals",
+          "file": "decision_contract.json",
+          "pointer": "/source_c6_manifest_sha256",
+          "value": "e83e5bafeee830a3b7c96e75e57fde8f97c2590f76f80538d1a48e3ea7d3353f",
+          "source_product_id": "SG-C6",
+          "source_artifact": "c6_manifest.json"
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "type": "EQUIVALENT_SCIENTIFIC_PAYLOAD_TO",
+      "from_id": "SG-C2-PARITY",
+      "to_id": "SG-C2-SCIENCE",
+      "files": [
+        "per_step.csv",
+        "per_branch.csv",
+        "trajectory_summary.csv",
+        "summary.json",
+        "c1_reference.csv",
+        "datasets.csv",
+        "datasets.tsv",
+        "c2_selfcheck.json",
+        "transactional_selfcheck.json"
+      ],
+      "note": "The parity run reproduces the scientific payload byte for byte after the refactor; it does not thereby become the scientific owner of the C2 numbers."
+    }
+  ]
+}

@@ -68,6 +68,13 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "so the field is not dragged toward the label-free NCC optimum.",
     )
     group.add_argument(
+        "--tto_w_mind",
+        type=float,
+        default=0.0,
+        help="MIND similarity weight during TTO — an intensity-INVARIANT objective for cross-domain "
+        "adaptation where NCC drifts to the intensity match. Pair with --tto_w_ncc 0 for pure MIND.",
+    )
+    group.add_argument(
         "--tto_anchor_w",
         type=float,
         default=0.0,
@@ -134,17 +141,17 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "--tto_project_eps",
         type=float,
         default=0.0,
-        help="Projection margin: enforce det >= eps (a robust certificate that survives resampling) "
-        "instead of the det>0 knife-edge (--tto_project 1). Higher eps = more headroom, small Dice cost.",
+        help="Digital-projection margin: target det >= eps instead of the det>0 knife-edge. It does not "
+        "certify the trilinear interpolant or survive arbitrary resampling without a new check.",
     )
     group.add_argument(
         "--tto_tri_project",
         type=int,
         choices=[0, 1],
         default=0,
-        help="Repair the field onto the TRILINEAR-diffeomorphic set: contract cells whose sound Bernstein "
-        "bound of the actual grid_sample warp fails, certifying the DEPLOYED warp (not the digital "
-        "surrogate). Runs after --tto_project; set --tto_project 0 to use it standalone.",
+        help="Heuristically repair cells that fail the sufficient trilinear Bernstein predicate. Collar mode "
+        "fails closed; a publication-grade machine verdict still requires utils.cert_exact on the saved "
+        "float32 field. Runs after --tto_project; set --tto_project 0 to use it standalone.",
     )
     group.add_argument(
         "--tto_tri_project_iters",
@@ -156,13 +163,66 @@ def add_tto_args(p: argparse.ArgumentParser) -> None:
         "--tto_tri_project_damp",
         type=float,
         default=0.6,
-        help="Per-pass blend toward the local-smooth field at trilinear-folding cells (--tto_tri_project 1).",
+        help="Per-pass blend toward the local-smooth field at cells failing the Bernstein screen.",
     )
     group.add_argument(
         "--tto_tri_project_eps",
         type=float,
         default=0.0,
         help="Trilinear-repair margin: certify tri_cert_bound >= eps over every cell (--tto_tri_project 1).",
+    )
+    group.add_argument(
+        "--tto_tri_subdiv_depth",
+        type=int,
+        default=0,
+        help="Bernstein subdivision depth for the trilinear certificate/repair: refines the conservative "
+        "per-cell bound on sub-eps cells, certifying cells the coarse bound falsely flags (so fewer needless "
+        "repair contractions and a tighter reported tri_cert_bound). 0 = off (coarse first-level bound).",
+    )
+    group.add_argument(
+        "--tto_clip_from_identity",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Drive from identity toward the network field with the 8-color local clip. Feasibility is preserved "
+        "in float64 working arithmetic, but the final float32 field must be independently rechecked. Uses "
+        "--tto_tri_project_eps as its work margin.",
+    )
+    group.add_argument(
+        "--tto_clip_sweeps",
+        type=int,
+        default=4,
+        help="Gauss-Seidel sweeps of the 8-color certified clip (--tto_clip_from_identity 1). More sweeps "
+        "recover more of the proposal at higher cost; feasibility is preserved at every sweep.",
+    )
+    group.add_argument(
+        "--tto_collar",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Identity collar: taper displacement to exact zero on the six boundary faces. Requires a "
+        "boundary-constrained trilinear repair with positive margin; the saved field must then pass the exact "
+        "verifier. This supplies the identity-trace input to a separate global-invertibility theorem.",
+    )
+    group.add_argument(
+        "--tto_collar_width",
+        type=int,
+        default=4,
+        help="Width in voxels of the identity-collar smoothstep taper (--tto_collar 1). Wider = gentler ramp "
+        "(lower fold risk in the taper), but zeroes more of the FOV border (background in brain MRI).",
+    )
+    group.add_argument(
+        "--tto_perturb",
+        choices=["none", "fp16", "noise"],
+        default="none",
+        help="After repair, perturb the field to test how much certificate margin survives a deployment "
+        "step: fp16 storage round-trip, or additive noise. Metrics are recomputed on the perturbed field.",
+    )
+    group.add_argument(
+        "--tto_perturb_scale",
+        type=float,
+        default=0.02,
+        help="Amplitude (voxels) of --tto_perturb noise.",
     )
     group.add_argument(
         "--tto_lr_schedule",

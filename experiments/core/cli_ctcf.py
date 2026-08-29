@@ -22,9 +22,20 @@ _OVERRIDE_HELP = {
     "l2_full_res": "run L2 at full-res.",
     "l3_full_res": "run L3 at full-res.",
     "l3_svf": "integrate L3 delta as SVF via scaling-and-squaring.",
+    "l3_ls_space": "INFERENCE-ONLY certified line-search: clip each L3 update to the largest "
+    "trilinear-diffeomorphic fraction. off (default) | vel (integrate t*delta per probe) | disp "
+    "(integrate once, scale the increment).",
+    "l3_ls_eps": "certificate margin for --*l3_ls_space (tri_cert_bound >= eps at each L3 step).",
 }
 
-CTCF_OVERRIDE_KEYS = (*_INT_OVERRIDES, "l3_error_mode", "l3_corr_mode", *_BOOL_OVERRIDES)
+CTCF_OVERRIDE_KEYS = (
+    *_INT_OVERRIDES,
+    "l3_error_mode",
+    "l3_corr_mode",
+    "l3_ls_space",
+    "l3_ls_eps",
+    *_BOOL_OVERRIDES,
+)
 
 
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
@@ -96,10 +107,37 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--jac_mode",
         type=str,
-        choices=["central", "digital"],
+        choices=["central", "digital", "trilinear"],
         default="central",
-        help="Jacobian penalty: central (legacy detJ, inert on SVF fields) or digital (hinge on the "
-        "ten Liu-et-al. determinants). Default central keeps every prior run reproducible.",
+        help="Jacobian penalty: central (legacy detJ, inert on SVF fields), digital (hinge on the ten "
+        "Liu-et-al. determinants), or trilinear (hinge on the deployed grid_sample warp — the criterion "
+        "we certify). Default central keeps every prior run reproducible.",
+    )
+    group.add_argument(
+        "--tri_pen_mode",
+        type=str,
+        choices=["bernstein", "sampled"],
+        default="bernstein",
+        help="For --jac_mode trilinear: bernstein (sound 27-coefficient hinge) or sampled (cheaper "
+        "interior-lattice proxy).",
+    )
+    group.add_argument(
+        "--tri_pen_reduce",
+        type=str,
+        choices=["mean", "active"],
+        default="mean",
+        help="For --jac_mode trilinear: reduce the per-cell hinge by 'mean' (over all cells) or 'active' "
+        "(over only violating cells). active concentrates the gradient where the field actually folds, since "
+        "folds are sparse and mean smears them into a near-zero signal.",
+    )
+    group.add_argument(
+        "--log_tri_gradnorm",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="For --jac_mode trilinear: also log the L2 norm of the penalty's gradient w.r.t. the field "
+        "(a decoupled extra backward). Off by default; enable for the scale-matched TRI_ACTIVE sweep to "
+        "watch the runaway (active-reduce amplifies the gradient by ~1/active_frac as folds get sparse).",
     )
     group.add_argument(
         "--w_dice",
@@ -164,6 +202,19 @@ def add_ctcf_override_args(p: argparse.ArgumentParser, prefix: str = "") -> None
         choices=list(_CORR_MODE_CHOICES),
         default=None,
         help=_OVERRIDE_HELP["l3_corr_mode"],
+    )
+    group.add_argument(
+        f"--{prefix}l3_ls_space",
+        type=str,
+        choices=["off", "vel", "disp"],
+        default=None,
+        help=_OVERRIDE_HELP["l3_ls_space"],
+    )
+    group.add_argument(
+        f"--{prefix}l3_ls_eps",
+        type=float,
+        default=None,
+        help=_OVERRIDE_HELP["l3_ls_eps"],
     )
     for name in _BOOL_OVERRIDES:
         group.add_argument(
@@ -285,6 +336,8 @@ def ctcf_overrides_from_args(args: argparse.Namespace, prefix: str = "") -> dict
     overrides = {name: getattr(args, f"{prefix}{name}") for name in _INT_OVERRIDES}
     overrides["l3_error_mode"] = getattr(args, f"{prefix}l3_error_mode")
     overrides["l3_corr_mode"] = getattr(args, f"{prefix}l3_corr_mode")
+    overrides["l3_ls_space"] = getattr(args, f"{prefix}l3_ls_space")
+    overrides["l3_ls_eps"] = getattr(args, f"{prefix}l3_ls_eps")
     for name in _BOOL_OVERRIDES:
         overrides[name] = optional_bool(getattr(args, f"{prefix}{name}"))
     return overrides

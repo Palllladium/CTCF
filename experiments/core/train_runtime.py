@@ -23,9 +23,11 @@ from experiments.core.helpers import (
 )
 from experiments.core.path_profiles import PATHS, print_experiment_header
 from experiments.core.train_logging import (
+    append_epoch_metrics,
     format_iter_log,
     format_metric_suffix,
     format_train_suffix,
+    prepare_metrics_csv,
     write_tb_images,
 )
 from utils import (
@@ -107,7 +109,8 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         raise RuntimeError("CUDA is required for training.")
 
     device = runner.device
-    paths = make_exp_dirs(args.exp or "EXP")
+    experiment_name = args.exp or "EXP"
+    paths = make_exp_dirs(experiment_name)
     attach_stdout_logger(paths.log_dir, quiet=bool(args.quiet))
 
     save_ckpt_enabled = bool(args.save_ckpt)
@@ -116,7 +119,6 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
     if save_ckpt_enabled:
         os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(os.path.join(paths.exp_dir, "vis"), exist_ok=True)
-    writer = SummaryWriter(log_dir=paths.log_dir) if use_tb else None
 
     train_loader, val_loader = build_loaders(args)
     max_train_iters = args.max_train_iters
@@ -137,6 +139,13 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         device,
         best_dsc_init=-1.0,
     )
+    metrics_journal = prepare_metrics_csv(
+        os.path.join(paths.log_dir, "metrics.csv"),
+        experiment=experiment_name,
+        dataset=ds_key,
+        epoch_start=epoch_start,
+    )
+    writer = SummaryWriter(log_dir=paths.log_dir) if use_tb else None
     print_experiment_header(args, ds_key)
 
     nan_streak_limit = 3
@@ -251,6 +260,25 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         is_best = dsc > best_dsc
         if is_best:
             best_dsc = dsc
+
+        append_epoch_metrics(
+            metrics_journal,
+            experiment=experiment_name,
+            dataset=ds_key,
+            epoch=epoch,
+            learning_rate=lr_now,
+            train_iterations=train_iters_done,
+            meters=meters,
+            perf_epoch_time_sec=perf.epoch_time_sec,
+            perf_iter_time_ms=perf.mean_iter_time_ms,
+            perf_peak_gpu_mem_gib=perf.peak_gpu_mem_gib,
+            val_dice=dsc,
+            val_jac_nonpositive_percent=jacp,
+            val_ndv_percent=ndvp,
+            val_sdlogj=sdlogj,
+            is_best=is_best,
+            best_val_dice=best_dsc,
+        )
 
         state = {
             "epoch": epoch,

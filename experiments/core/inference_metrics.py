@@ -126,7 +126,14 @@ def write_results(
         mean = float(arr.mean())
         std = float(arr.std(ddof=1)) if n > 1 else 0.0
         sem = std / math.sqrt(n) if n > 1 else 0.0
-        metrics[k] = {"mean": mean, "std": std, "sem": sem, "ci95": 1.96 * sem}
+        metrics[k] = {
+            "mean": mean,
+            "std": std,
+            "sem": sem,
+            "ci95": 1.96 * sem,
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+        }
 
     summary = {
         "model": model_name,
@@ -141,9 +148,19 @@ def write_results(
         json.dump(summary, f, indent=2, ensure_ascii=False)
     with open(summary_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["metric", "mean", "std", "sem", "ci95"])
+        writer.writerow(["metric", "mean", "std", "sem", "ci95", "min", "max"])
         for k, v in metrics.items():
-            writer.writerow([k, f"{v['mean']:.6f}", f"{v['std']:.6f}", f"{v['sem']:.6f}", f"{v['ci95']:.6f}"])
+            writer.writerow(
+                [
+                    k,
+                    f"{v['mean']:.6f}",
+                    f"{v['std']:.6f}",
+                    f"{v['sem']:.6f}",
+                    f"{v['ci95']:.6f}",
+                    f"{v['min']:.6f}",
+                    f"{v['max']:.6f}",
+                ]
+            )
 
     print(f"\n[SAVED] per-case: {per_case_path}")
     print(f"[SAVED] summary: {summary_json}")

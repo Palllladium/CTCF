@@ -3,6 +3,13 @@ from __future__ import annotations
 import argparse
 
 
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}")
+    return parsed
+
+
 def optional_bool(value: int | None) -> bool | None:
     """Map an optional 0/1 CLI flag to bool, leaving None untouched (use config default)."""
     return None if value is None else bool(value)
@@ -120,14 +127,14 @@ def _add_train_args(p: argparse.ArgumentParser) -> None:
         "--use_tb",
         type=int,
         choices=[0, 1],
-        default=1,
-        help="Enable/disable TensorBoard logging.",
+        default=0,
+        help="Enable TensorBoard logging explicitly (disabled by default; compact text/CSV logs remain canonical).",
     )
     p.add_argument(
         "--tb_images_every",
-        type=int,
-        default=5,
-        help="TensorBoard image logging period in epochs.",
+        type=nonnegative_int,
+        default=0,
+        help="TensorBoard image period in epochs; 0 disables images even when --use_tb=1.",
     )
     p.add_argument(
         "--quiet",
