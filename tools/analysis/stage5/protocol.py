@@ -41,7 +41,7 @@ PROTOCOL_BUNDLE_SCHEMA = "ctcf-stage5-protocol-bundle-v1"
 
 def u0_training_contract(config: U0TrainingConfig) -> dict[str, Any]:
     return {
-        "schema": "ctcf-stage5-u0-training-contract-v1",
+        "schema": "ctcf-stage5-u0-training-contract-v2",
         "dataset_split": "training",
         "labels_reachable": False,
         "pair_schedule": "epoch-specific deterministic directed derangement over all 294 training subjects",
@@ -52,6 +52,7 @@ def u0_training_contract(config: U0TrainingConfig) -> dict[str, Any]:
         "development_access_during_training": False,
         "training_metrics_are_diagnostic_only": True,
         "best_checkpoint_written": False,
+        "amp_overflow_policy": "FAIL_CLOSED_NO_SKIPPED_OPTIMIZER_UPDATES",
     }
 
 
@@ -59,7 +60,7 @@ def controller_training_contract(config: ControllerTrainingConfig) -> dict[str, 
     controller = build_stage5_controller(config)
     parameter_count = sum(parameter.numel() for parameter in controller.parameters())
     return {
-        "schema": "ctcf-stage5-controller-training-contract-v1",
+        "schema": "ctcf-stage5-controller-training-contract-v2",
         "dataset_split": "training",
         "labels_reachable": False,
         "source_field_policy": "frozen_U0_no_grad_then_shared_frozen_bootstrap_construction_on_the_fly",
@@ -77,6 +78,7 @@ def controller_training_contract(config: ControllerTrainingConfig) -> dict[str, 
         "development_access_during_training": False,
         "training_metrics_are_diagnostic_only": True,
         "best_checkpoint_written": False,
+        "amp_overflow_policy": "FAIL_CLOSED_NO_SKIPPED_OPTIMIZER_UPDATES",
     }
 
 

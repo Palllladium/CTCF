@@ -409,8 +409,26 @@ def _strict_scaler_step(
     scale_before = float(scaler.get_scale())
     scaler.step(optimizer)
     scaler.update()
-    if float(scaler.get_scale()) < scale_before:
-        raise FloatingPointError(f"non-finite {phase} gradients caused an AMP optimizer-step skip")
+    scale_after = float(scaler.get_scale())
+    if scale_after < scale_before:
+        raise FloatingPointError(
+            f"non-finite {phase} gradients caused an AMP optimizer-step skip "
+            f"(scale {scale_before:g} -> {scale_after:g})"
+        )
+
+
+def _stage5_grad_scaler(
+    config: U0TrainingConfig | ControllerTrainingConfig,
+    *,
+    device_type: str = "cuda",
+) -> torch.amp.GradScaler:
+    """Build the frozen scaler whose scale cannot grow during a Stage-5 training run."""
+    return torch.amp.GradScaler(
+        device_type,
+        init_scale=config.amp_initial_scale,
+        growth_interval=config.amp_growth_interval,
+        enabled=True,
+    )
 
 
 def _sanitize_u0_logs(logs: Mapping[str, Any]) -> dict[str, float]:
@@ -579,7 +597,7 @@ def train_u0(
             "Stage5 could not construct the frozen CTCF-CascadeA-Mamba U0 model; "
             "verify the H100 environment and Mamba dependencies"
         ) from exc
-    scaler = torch.amp.GradScaler("cuda", enabled=True)
+    scaler = _stage5_grad_scaler(config)
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_root / "last.pth"
     identity = _RunIdentity(
@@ -1168,7 +1186,7 @@ def train_controller(
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=True)
+    scaler = _stage5_grad_scaler(config)
     base_sha = _verify_checkpoint_sidecar(base_checkpoint)
     base_runner = load_frozen_u0(
         base_checkpoint,
@@ -1351,7 +1369,7 @@ def _smoke_controller_step(
         lr=controller_config.learning_rate,
         weight_decay=controller_config.weight_decay,
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=True)
+    scaler = _stage5_grad_scaler(controller_config)
     optimizer.zero_grad(set_to_none=True)
     input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = _controller_training_tensors(features_ab)
     input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = _controller_training_tensors(features_ba)
@@ -1457,7 +1475,7 @@ def _smoke_controller_step(
         lr=controller_config.learning_rate,
         weight_decay=controller_config.weight_decay,
     )
-    reloaded_scaler = torch.amp.GradScaler("cuda", enabled=True)
+    reloaded_scaler = _stage5_grad_scaler(controller_config)
     reloaded_controller_state = load_training_state(
         controller_checkpoint,
         model=reloaded_controller,
@@ -1528,7 +1546,7 @@ def smoke_stage5_runtime(
         runner = Runner(_u0_args(u0_config, seed), device)
     except Exception as exc:
         raise RuntimeError("Stage5 H100 smoke test could not construct the frozen Mamba U0") from exc
-    u0_scaler = torch.amp.GradScaler("cuda", enabled=True)
+    u0_scaler = _stage5_grad_scaler(u0_config)
     u0_parameters_before = state_dict_sha256(dict(runner.model.named_parameters()))
     runner.model.train()
     runner.optimizer.zero_grad(set_to_none=True)
@@ -1602,7 +1620,7 @@ def smoke_stage5_runtime(
     del raw_ab, raw_ba, raw_logs, u0_loss, u0_scaler, u0_state, runner
     torch.cuda.empty_cache()
     reloaded_runner = Runner(_u0_args(u0_config, seed), device)
-    reloaded_scaler = torch.amp.GradScaler("cuda", enabled=True)
+    reloaded_scaler = _stage5_grad_scaler(u0_config)
     reloaded_state = load_training_state(
         u0_checkpoint,
         model=reloaded_runner.model,

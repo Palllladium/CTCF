@@ -43,6 +43,10 @@ class RuntimeConfigTest(unittest.TestCase):
             runtime.ControllerTrainingConfig(fixed_epoch=100.0)  # type: ignore[arg-type]
         with self.assertRaisesRegex(ValueError, "finite"):
             runtime.ControllerTrainingConfig(loss=ControllerLossConfig(ncc_weight=float("nan")))
+        with self.assertRaisesRegex(ValueError, "AMP initial scale"):
+            runtime.U0TrainingConfig(amp_initial_scale=32768.0)
+        with self.assertRaisesRegex(ValueError, "AMP growth interval"):
+            runtime.ControllerTrainingConfig(amp_growth_interval=2000)
 
     def test_runner_namespace_is_label_free_and_complete(self) -> None:
         args = runtime._u0_args(runtime.U0TrainingConfig(), seed=7)
@@ -506,6 +510,21 @@ class CertifiedSourceTest(unittest.TestCase):
 
 
 class TrainingMechanicsTest(unittest.TestCase):
+    def test_frozen_amp_scale_cannot_grow_during_any_training_endpoint(self) -> None:
+        u0 = runtime.U0TrainingConfig()
+        controller = runtime.ControllerTrainingConfig()
+        maximum_u0_updates = u0.fixed_epoch * 294
+        maximum_controller_updates = controller.fixed_epoch * (294 // 2)
+        self.assertGreater(u0.amp_growth_interval, maximum_u0_updates)
+        self.assertGreater(controller.amp_growth_interval, maximum_controller_updates)
+        self.assertEqual(u0.amp_initial_scale, 65536.0)
+        self.assertEqual(controller.amp_initial_scale, 65536.0)
+
+        scaler = runtime._stage5_grad_scaler(u0, device_type="cpu")
+        state = scaler.state_dict()
+        self.assertEqual(state["scale"], u0.amp_initial_scale)
+        self.assertEqual(state["growth_interval"], u0.amp_growth_interval)
+
     def test_inference_features_become_ordinary_fp32_training_tensors(self) -> None:
         with torch.inference_mode():
             features = SimpleNamespace(
@@ -534,7 +553,7 @@ class TrainingMechanicsTest(unittest.TestCase):
         runtime._strict_scaler_step(scaler, optimizer, phase="test")
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(parameter * torch.tensor(float("inf"))).backward()
-        with self.assertRaisesRegex(FloatingPointError, "optimizer-step skip"):
+        with self.assertRaisesRegex(FloatingPointError, r"optimizer-step skip \(scale .* -> .*\)"):
             runtime._strict_scaler_step(scaler, optimizer, phase="test")
 
     def test_mocked_u0_run_resumes_from_checkpoint_authoritative_metrics(self) -> None:

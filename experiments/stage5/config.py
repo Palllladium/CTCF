@@ -17,6 +17,8 @@ from tools.analysis.stage5.primitives import canonical_sha256, require_finite, r
 STAGE5_U0_FIXED_EPOCH = 400
 STAGE5_CONTROLLER_FIXED_EPOCH = 100
 STAGE5_SEEDS = (0, 1, 2)
+STAGE5_AMP_INITIAL_SCALE = 65536.0
+STAGE5_AMP_GROWTH_INTERVAL = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,8 @@ class U0TrainingConfig:
     w_reg: float = 1.0
     w_icon: float = 0.05
     w_jac: float = 0.005
+    amp_initial_scale: float = STAGE5_AMP_INITIAL_SCALE
+    amp_growth_interval: int = STAGE5_AMP_GROWTH_INTERVAL
 
     def __post_init__(self) -> None:
         endpoint = f"the frozen {STAGE5_U0_FIXED_EPOCH}-epoch U0 endpoint"
@@ -40,10 +44,15 @@ class U0TrainingConfig:
             or require_int(self.time_steps, architecture, error=ValueError) != 6
         ):
             raise ValueError("Stage5 U0 must use the frozen CTCF-CascadeA-Mamba/time_steps=6 architecture")
-        for name in ("learning_rate", "w_ncc", "w_reg", "w_icon", "w_jac"):
+        for name in ("learning_rate", "w_ncc", "w_reg", "w_icon", "w_jac", "amp_initial_scale"):
             require_finite(getattr(self, name), f"Stage5 U0 {name}", minimum=0.0, error=ValueError)
         if self.learning_rate <= 0.0 or self.w_ncc <= 0.0:
             raise ValueError("Stage5 U0 learning rate and NCC weight must be positive")
+        if self.amp_initial_scale != STAGE5_AMP_INITIAL_SCALE:
+            raise ValueError("Stage5 U0 must use the frozen AMP initial scale")
+        growth = require_int(self.amp_growth_interval, "Stage5 U0 AMP growth interval", minimum=1, error=ValueError)
+        if growth != STAGE5_AMP_GROWTH_INTERVAL:
+            raise ValueError("Stage5 U0 must use the frozen AMP growth interval")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +63,8 @@ class ControllerTrainingConfig:
     free_residual_limit_voxels: float = 2.0
     width: int = 16
     loss: ControllerLossConfig = field(default_factory=ControllerLossConfig)
+    amp_initial_scale: float = STAGE5_AMP_INITIAL_SCALE
+    amp_growth_interval: int = STAGE5_AMP_GROWTH_INTERVAL
 
     def __post_init__(self) -> None:
         # ControllerLossConfig validates its own weights; re-checking them here would put
@@ -61,11 +72,21 @@ class ControllerTrainingConfig:
         endpoint = f"the frozen {STAGE5_CONTROLLER_FIXED_EPOCH}-epoch controller endpoint"
         if require_int(self.fixed_epoch, endpoint, error=ValueError) != STAGE5_CONTROLLER_FIXED_EPOCH:
             raise ValueError(f"Stage5 controllers must use the frozen {STAGE5_CONTROLLER_FIXED_EPOCH}-epoch endpoint")
-        for name in ("learning_rate", "weight_decay", "free_residual_limit_voxels"):
+        for name in ("learning_rate", "weight_decay", "free_residual_limit_voxels", "amp_initial_scale"):
             require_finite(getattr(self, name), f"Stage5 controller {name}", minimum=0.0, error=ValueError)
         if self.learning_rate <= 0.0 or self.free_residual_limit_voxels <= 0.0:
             raise ValueError("invalid Stage5 controller optimizer contract")
         require_int(self.width, "Stage5 controller width", minimum=4, error=ValueError)
+        if self.amp_initial_scale != STAGE5_AMP_INITIAL_SCALE:
+            raise ValueError("Stage5 controllers must use the frozen AMP initial scale")
+        growth = require_int(
+            self.amp_growth_interval,
+            "Stage5 controller AMP growth interval",
+            minimum=1,
+            error=ValueError,
+        )
+        if growth != STAGE5_AMP_GROWTH_INTERVAL:
+            raise ValueError("Stage5 controllers must use the frozen AMP growth interval")
 
 
 def build_stage5_controller(config: ControllerTrainingConfig) -> Stage5SpatialController:
@@ -88,6 +109,8 @@ def require_seed(seed: int) -> int:
 
 
 __all__ = [
+    "STAGE5_AMP_GROWTH_INTERVAL",
+    "STAGE5_AMP_INITIAL_SCALE",
     "STAGE5_CONTROLLER_FIXED_EPOCH",
     "STAGE5_SEEDS",
     "STAGE5_U0_FIXED_EPOCH",
