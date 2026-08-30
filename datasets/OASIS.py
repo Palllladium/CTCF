@@ -1,3 +1,5 @@
+"""OASIS pair datasets: random within-split subject pairs, images with segmentations."""
+
 from __future__ import annotations
 
 import random

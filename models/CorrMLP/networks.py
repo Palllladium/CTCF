@@ -1,3 +1,21 @@
+"""CorrMLP: correlation-aware coarse-to-fine MLP decoder over a conv encoder; predicts
+full-resolution voxel-unit flow.
+
+Source:  https://github.com/MungoMeng/Registration-CorrMLP
+Authors: Mingyuan Meng, Dagan Feng, Lei Bi, Jinman Kim
+Paper:   Meng et al., "Correlation-aware Coarse-to-fine MLPs for Deformable Medical Image
+         Registration", CVPR 2024 (arXiv:2406.00123)
+License: GPL-3.0, declared by the upstream authors and redistributed here under those terms
+
+Vendored verbatim from upstream ``CorrMLP/networks.py``: the imports and every top-level
+definition are unchanged, and this header is the only addition. Nothing in this file is CTCF
+code; do not edit it to fit our conventions, adapt it in ``models/CorrMLP/wrapper.py`` instead.
+
+Output convention: ``CorrMLP.forward(fixed, moving) -> (warped, flow)`` takes its arguments in
+the opposite order to the CTCF convention; ``CorrMLPSolo`` swaps them. The flow is voxel-units,
+channel-first (B, 3, D, H, W), which already matches CTCF.
+"""
+
 import sys
 import math
 import numpy as np

@@ -1,3 +1,19 @@
+"""Displacement-field geometry: warping, composition, Jacobians, folds and certified repair.
+
+Every field in this module is a Phi displacement in **voxel units**, channel-first
+``(B, 3, D, H, W)``, on a unit-spaced grid, with channel ``c`` paired to spatial axis ``c``.
+That is the CTCF convention; it is not the Psi source-index displacement the deployment warp
+samples, and it is not a normalized-grid flow. Converting between the two is
+``tools.analysis.search.transaction.phi_to_psi_displacement`` and its inverse.
+
+Fold and determinant results here come from several *different* schemes that do not agree:
+the central-difference ``jacobian_det``, the digital corner/star determinants, and the
+trilinear cell bounds each answer a different question. A count from one is not a count from
+another, so a number taken out of this module must travel with the name of the predicate that
+produced it. ``trilinear_cert_bound`` and ``certified_local_clip`` decide *sufficient*
+predicates: failing one means "not certified by this predicate", never "this map folds".
+"""
+
 from __future__ import annotations
 
 import math

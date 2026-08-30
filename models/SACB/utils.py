@@ -1,3 +1,5 @@
+"""Vendored verbatim from https://github.com/x-xc/SACB_Net; see models/SACB/model.py for attribution."""
+
 import math
 import numpy as np
 import torch.nn.functional as F

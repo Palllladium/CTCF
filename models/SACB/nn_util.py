@@ -1,3 +1,5 @@
+"""Vendored verbatim from https://github.com/x-xc/SACB_Net; see models/SACB/model.py for attribution."""
+
 import torch
 import torch.nn as nn 
 import numpy as np

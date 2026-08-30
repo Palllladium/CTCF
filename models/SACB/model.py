@@ -1,3 +1,23 @@
+"""SACB-Net: a U-shaped registration network whose convolutions carry per-voxel spatially
+adaptive kernels selected by clustering; predicts full-resolution voxel-unit flow.
+
+Source:  https://github.com/x-xc/SACB_Net
+Authors: Xinxing Cheng, Tianyang Zhang, Wenqi Lu, Qingjie Meng, Alejandro F. Frangi, Jinming Duan
+Paper:   Cheng et al., "SACB-Net: Spatial-awareness Convolutions for Medical Image
+         Registration", CVPR 2025 (arXiv:2503.19592), pp. 5227-5237
+License: none declared by the upstream authors (the repository carries no LICENSE file)
+
+Vendored from the upstream repository root together with ``SACB1.py``, ``nn_util.py`` and
+``utils.py``. The only change is that their import lines were repointed to ``models.SACB.*``;
+every definition is unchanged. Nothing in these four files is CTCF code; adapt it in
+``models/SACB/wrapper.py`` instead of editing it here.
+
+Runtime constraint: ``SACB1`` allocates with a hardcoded ``.cuda()`` and uses ``kmeans_gpu``,
+so this model has no CPU path and cannot be smoke-tested off a GPU.
+
+Output convention: ``SACB_Net.forward(moving, fixed) -> (warped, flow)`` already matches CTCF -
+voxel-units, channel-first (B, 3, D, H, W), full resolution - so no flow conversion is needed.
+"""
 
 import torch
 import torch.nn as nn

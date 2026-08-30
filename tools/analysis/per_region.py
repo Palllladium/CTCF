@@ -1,5 +1,5 @@
 """
-Per-region Dice aggregation for Paper 2 §7 (region x backbone analysis).
+Per-region Dice aggregation: region x backbone analysis.
 
 Reads the per-label Dice already stored in each run's per_case.csv (`dice_lbl_<N>` columns,
 where <N> is the true VOI label value — OASIS uses 1..35, IXI uses 1..36 minus the 6 absent

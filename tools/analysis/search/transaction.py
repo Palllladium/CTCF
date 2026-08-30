@@ -1,3 +1,15 @@
+"""The 27-offset discrete search and the transaction that either commits it or gives back the source.
+
+Fields here are Psi source-index displacements -- what the deployment warp actually samples
+under ``align_corners=False`` -- not the Phi convention ``utils.field`` uses;
+``phi_to_psi_displacement`` and ``psi_to_phi_displacement`` own that conversion.
+
+A commit is accepted only if the candidate, *after being written and read back*, passes exact
+certification. Rollback is not "restore an equivalent field": it copies the original bytes and
+proves SHA-256 identity with the artifact the transaction started from, because a fresh encode
+of the same tensor may differ bit for bit.
+"""
+
 from __future__ import annotations
 
 import math

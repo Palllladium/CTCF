@@ -1,3 +1,16 @@
+"""The named Jacobian and inverse-consistency metrics, each frozen under its own metric id.
+
+The ids are long on purpose: they spell out the scheme (central vs shifted vs digital), the
+crop, the mask, and the ddof, because these choices are what the number means. Two ids in this
+module can score the same field and disagree by orders of magnitude, so a value from here is
+only quotable together with the id that produced it -- ``compute_metric`` refuses an id it does
+not know rather than guessing a nearby one.
+
+``MetricFailClosedError`` marks a metric that declines to report rather than reporting a
+degraded value. A metric that does not certify a field says nothing about whether the field
+folds; only a negative witness does that.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

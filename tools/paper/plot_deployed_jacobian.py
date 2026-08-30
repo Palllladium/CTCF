@@ -1,4 +1,4 @@
-"""Deployed-warp Jacobian figure (Paper 3) — the topology story the Paper-1 log|det J| map cannot show.
+"""Deployed-warp Jacobian figure — the topology story the Paper-1 log|det J| map cannot show.
 
 Paper 1's map used the central-difference determinant under log|.|, which (a) is the wrong scheme (it does not
 test the trilinear interpolant grid_sample deploys) and (b) HIDES the sign (a fold, det<0, is invisible under
