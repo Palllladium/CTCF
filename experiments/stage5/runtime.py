@@ -1117,8 +1117,17 @@ class _ControllerStep:
     config: ControllerTrainingConfig
 
 
-def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch: int) -> dict[str, float]:
-    """Take one optimizer step on one unordered pair, seen in both directions."""
+@dataclass(frozen=True, slots=True)
+class _ControllerPairInputs:
+    psi_ab: torch.Tensor
+    psi_ba: torch.Tensor
+    tensors_ab: tuple[torch.Tensor, ...]
+    tensors_ba: tuple[torch.Tensor, ...]
+    bootstrap_residual: float
+
+
+def _prepare_controller_pair(step: _ControllerStep, pair: Mapping[str, str], epoch: int) -> _ControllerPairInputs:
+    """Prepare the frozen inputs once; diagnostic replays must reuse these exact tensors."""
     moving_ab = _tensor_image(step.store, pair["subject_a"], step.device)
     fixed_ab = _tensor_image(step.store, pair["subject_b"], step.device)
     moving_ba = fixed_ab
@@ -1136,12 +1145,24 @@ def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch:
         ) from exc
     features_ab = build_stage5_features(fixed_ab, moving_ab, psi_ab)
     features_ba = build_stage5_features(fixed_ba, moving_ba, psi_ba)
-    input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = _controller_training_tensors(features_ab)
-    input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = _controller_training_tensors(features_ba)
-    step.optimizer.zero_grad(set_to_none=True)
+    return _ControllerPairInputs(
+        psi_ab=psi_ab,
+        psi_ba=psi_ba,
+        tensors_ab=_controller_training_tensors(features_ab),
+        tensors_ba=_controller_training_tensors(features_ba),
+        bootstrap_residual=(bootstrap_ab["digital_residual_percent"] + bootstrap_ba["digital_residual_percent"]) / 2.0,
+    )
+
+
+def _controller_pair_loss(
+    step: _ControllerStep, inputs: _ControllerPairInputs, *, diagnostic_fp32: bool = False
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Production uses FP16; FP32 is an explicit, diagnostic-only comparison."""
+    input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = inputs.tensors_ab
+    input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = inputs.tensors_ba
     # The controller runs under FP16 autocast while controller_objective re-enters FP32 inside.
     # That boundary is the numerical contract of the run; do not widen or move it.
-    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=not diagnostic_fp32):
         output_ab = step.controller(input_ab, step.variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
         output_ba = step.controller(input_ba, step.variant, s2_proposal=s2_ba, s4_proposal=s4_ba)
         loss, logs = controller_objective(
@@ -1149,19 +1170,25 @@ def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch:
             moving_norm_ab,
             fixed_norm_ba,
             moving_norm_ba,
-            psi_ab,
-            psi_ba,
+            inputs.psi_ab,
+            inputs.psi_ba,
             output_ab.requested_delta,
             output_ba.requested_delta,
             config=step.config.loss,
         )
+    return loss, logs
+
+
+def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch: int) -> dict[str, float]:
+    """Take one optimizer step on one unordered pair, seen in both directions."""
+    inputs = _prepare_controller_pair(step, pair, epoch)
+    step.optimizer.zero_grad(set_to_none=True)
+    loss, logs = _controller_pair_loss(step, inputs)
     if not bool(torch.isfinite(loss)):
         raise FloatingPointError(f"non-finite Stage5 controller loss at epoch {epoch}")
     step.scaler.scale(loss).backward()
     _strict_scaler_step(step.scaler, step.optimizer, phase=f"controller {step.variant}")
-    logs["bootstrap_digital_residual_percent"] = (
-        bootstrap_ab["digital_residual_percent"] + bootstrap_ba["digital_residual_percent"]
-    ) / 2.0
+    logs["bootstrap_digital_residual_percent"] = inputs.bootstrap_residual
     return logs
 
 
