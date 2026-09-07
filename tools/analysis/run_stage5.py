@@ -521,6 +521,21 @@ def command_train_u0(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_import_u0(args: argparse.Namespace) -> int:
+    from tools.analysis.stage5.u0_import import import_completed_u0
+
+    _protocol_context(args)
+    result = import_completed_u0(
+        source_protocol=args.source_protocol,
+        target_protocol=args.protocol,
+        source_checkpoint_root=args.source_checkpoint_root,
+        target_checkpoint_root=args.checkpoint_root,
+        output_manifest=args.output_manifest,
+    )
+    print(f"[STAGE5 U0 IMPORT] {canonical_sha256(result)}")
+    return 0
+
+
 def command_materialize_source(args: argparse.Namespace) -> int:
     _, protocol = _protocol_context(args)
     count = materialize_source_fields(
@@ -1043,6 +1058,14 @@ def build_parser() -> argparse.ArgumentParser:
     u0.add_argument("--device", required=True)
     u0.add_argument("--checkpoint-root", type=Path, required=True)
     u0.add_argument("--seed", type=int, choices=BASE_SEEDS, required=True)
+
+    imported = action("import-u0", command_import_u0)
+    _add_protocol(imported)
+    _add_smoke_gate(imported)
+    imported.add_argument("--source-protocol", type=Path, required=True)
+    imported.add_argument("--source-checkpoint-root", type=Path, required=True)
+    imported.add_argument("--checkpoint-root", type=Path, required=True)
+    imported.add_argument("--output-manifest", type=Path, required=True)
 
     source = action("materialize-source", command_materialize_source)
     _add_protocol(source)

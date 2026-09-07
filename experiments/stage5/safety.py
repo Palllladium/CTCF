@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -104,8 +105,12 @@ def construct_initial_field(
             fixed_mask=fixed_mask,
             fixed_values=fixed_values,
         )
-        if residual != 0.0:
-            raise RuntimeError(f"digital bootstrap preconditioner failed: residual={residual}")
+        # Digital relaxation is a bounded preconditioner, not the acceptance
+        # certificate. Its remaining violations are input to the trilinear
+        # repair, which can start from an uncertified field. Keep the residual
+        # as a diagnostic; never relax the final trilinear or stored-byte gates.
+        if not math.isfinite(residual) or not 0.0 <= residual <= 100.0 or not bool(torch.isfinite(digital).all()):
+            raise RuntimeError(f"invalid digital bootstrap preconditioner output: residual={residual}")
         repaired, repair = trilinear_project(
             digital,
             eps=WORK_EPS,

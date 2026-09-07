@@ -114,9 +114,10 @@ def bootstrap_parameters() -> dict[str, Any]:
         "collar_width": COLLAR_WIDTH,
         "work_epsilon_decimal": str(WORK_EPS),
         "claim_epsilon_decimal": CLAIM_EPS,
-        "repair_operator_id": "CTCF_DIGITAL_THEN_TRILINEAR_COLLAR_REPAIR_V1",
+        "repair_operator_id": "CTCF_DIGITAL_THEN_TRILINEAR_COLLAR_REPAIR_V2",
         "repair_parameters": {
             "digital_epsilon": 0.0,
+            "digital_residual_policy": "DIAGNOSTIC_CONTINUE_TO_TRILINEAR",
             "fixed_boundary_values": 0.0,
             "trilinear_work_epsilon": WORK_EPS,
             "phi_then_psi_conversion": True,

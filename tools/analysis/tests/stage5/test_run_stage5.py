@@ -33,6 +33,7 @@ class ParserContractTest(unittest.TestCase):
                 "smoke",
                 "freeze-smoke",
                 "train-u0",
+                "import-u0",
                 "materialize-source",
                 "init-controller",
                 "train-controller",

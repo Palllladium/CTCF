@@ -8,12 +8,17 @@ from unittest.mock import patch
 import torch
 
 from experiments.stage5.features import build_stage5_features
-from experiments.stage5.runtime import ControllerTrainingConfig, U0TrainingConfig
+from experiments.stage5.runtime import (
+    ControllerTrainingConfig,
+    U0TrainingConfig,
+    _validate_collar_repair_bootstrap_report,
+)
 from experiments.stage5.safety import commit_controller_delta, construct_initial_field, prepare_initial_field
 from models.CTCF.controller import STAGE5_INPUT_CHANNEL_COUNT
 from tools.analysis.search.transaction import load_flow_npz, save_flow_npz_atomic
 from tools.analysis.stage5.artifacts import field_record, save_reload_attestation
 from tools.analysis.stage5.protocol import controller_training_contract, search_contract, u0_training_contract
+from utils.field import TrilinearProjectionReport, digital_project
 
 
 class Stage5FrozenSubcontractTest(unittest.TestCase):
@@ -61,6 +66,80 @@ class Stage5FrozenSubcontractTest(unittest.TestCase):
 
 
 class Stage5TransactionTest(unittest.TestCase):
+    def test_real_trilinear_repair_recovers_a_digital_preconditioner_residual(self) -> None:
+        raw = torch.zeros((1, 3, 18, 18, 18), dtype=torch.float32)
+        raw[0, 0, 8, 8, 8] = 3.0
+        # Exhaust a deliberately tiny preconditioning budget. Both numerical
+        # projectors and both stored-field exact verifiers remain real.
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "experiments.stage5.safety.digital_project",
+                side_effect=lambda flow, **kwargs: digital_project(flow, max_iters=1, **kwargs),
+            ),
+        ):
+            artifact = prepare_initial_field(raw, Path(temporary), policy="collar_repair")
+            self.assertGreater(artifact.report["digital_residual_percent"], 0.0)
+            self.assertTrue(artifact.report["phi_exact"]["certified"])
+            self.assertTrue(artifact.report["psi_exact"]["certified"])
+            self.assertGreater(torch.count_nonzero(load_flow_npz(artifact.phi_path)).item(), 0)
+
+    def test_digital_residual_does_not_bypass_or_prevent_trilinear_certification(self) -> None:
+        # The preliminary digital pass must reach the real trilinear repair and
+        # the save/reload exact certificates even when its diagnostic is nonzero.
+        raw = torch.zeros((1, 3, 18, 18, 18), dtype=torch.float32)
+        raw[:, 0, 8:10, 8:10, 8:10] = 0.1
+        residual = 1.5005010936874896e-05
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("experiments.stage5.safety.digital_project", return_value=(raw, residual, 80)),
+        ):
+            artifact = prepare_initial_field(raw, Path(temporary), policy="collar_repair")
+        self.assertEqual(artifact.report["digital_residual_percent"], residual)
+        self.assertTrue(artifact.report["trilinear_repair"]["certified"])
+        self.assertTrue(artifact.report["phi_exact"]["certified"])
+        self.assertTrue(artifact.report["psi_exact"]["certified"])
+        _validate_collar_repair_bootstrap_report(artifact.report)
+        artifact.report["trilinear_repair"]["certified"] = False
+        with self.assertRaisesRegex(RuntimeError, "collar-repair bootstrap report changed"):
+            _validate_collar_repair_bootstrap_report(artifact.report)
+
+    def test_digital_residual_still_fails_when_trilinear_repair_fails(self) -> None:
+        raw = torch.zeros((1, 3, 18, 18, 18), dtype=torch.float32)
+        failed = TrilinearProjectionReport(False, -0.1, 1, 0.0, 80, "max_iters_uncertified")
+        with (
+            patch("experiments.stage5.safety.digital_project", return_value=(raw, 0.01, 80)),
+            patch("experiments.stage5.safety.trilinear_project", return_value=(raw, failed)) as repair,
+            self.assertRaisesRegex(RuntimeError, "initial field repair failed"),
+        ):
+            construct_initial_field(raw, policy="collar_repair")
+        repair.assert_called_once()
+
+    def test_nonfinite_preconditioner_is_rejected_before_repair(self) -> None:
+        raw = torch.zeros((1, 3, 18, 18, 18), dtype=torch.float32)
+        for residual in (float("nan"), float("inf"), -1.0, 101.0):
+            with (
+                self.subTest(residual=residual),
+                patch("experiments.stage5.safety.digital_project", return_value=(raw, residual, 80)),
+                patch("experiments.stage5.safety.trilinear_project") as repair,
+                self.assertRaisesRegex(RuntimeError, "invalid digital bootstrap"),
+            ):
+                construct_initial_field(raw, policy="collar_repair")
+            repair.assert_not_called()
+
+    def test_failed_stored_exact_certificate_is_not_accepted_after_repair(self) -> None:
+        raw = torch.zeros((1, 3, 18, 18, 18), dtype=torch.float32)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("experiments.stage5.safety.digital_project", return_value=(raw, 0.01, 80)),
+            patch(
+                "experiments.stage5.safety.certify_flow_exact",
+                return_value={"status": "UNRESOLVED", "certified": False},
+            ),
+            self.assertRaisesRegex(RuntimeError, "stored initial Phi failed exact certification"),
+        ):
+            prepare_initial_field(raw, Path(temporary), policy="collar_repair")
+
     def test_persisted_source_uses_the_same_bootstrap_construction_as_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             raw = torch.zeros((1, 3, 18, 18, 18), dtype=torch.float32)

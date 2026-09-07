@@ -11,6 +11,9 @@ readonly OASIS_ALL_ROOT="${OASIS_ALL_ROOT:?Set OASIS_ALL_ROOT to the OASIS All39
 readonly EXPECTED_GIT_HEAD="${EXPECTED_GIT_HEAD:?Set EXPECTED_GIT_HEAD to the exact committed Stage5 Git SHA.}"
 readonly RUN_ID="${RUN_ID:?Set one stable RUN_ID and reuse it for every restart.}"
 readonly REMOTE_HEAVY_LOCATOR="${REMOTE_HEAVY_LOCATOR:-PENDING_UPLOAD}"
+readonly IMPORT_U0_RUN_ID="${IMPORT_U0_RUN_ID:-}"
+readonly IMPORT_U0_COMPACT_ROOT="${IMPORT_U0_COMPACT_ROOT:-results/stage5/$IMPORT_U0_RUN_ID}"
+readonly IMPORT_U0_HEAVY_ROOT="${IMPORT_U0_HEAVY_ROOT:-results/stage5_heavy/$IMPORT_U0_RUN_ID}"
 
 readonly COMPACT_ROOT="${COMPACT_ROOT:-results/stage5/$RUN_ID}"
 readonly HEAVY_ROOT="${HEAVY_ROOT:-results/stage5_heavy/$RUN_ID}"
@@ -62,9 +65,18 @@ if [[ "${RUN_ID##*_}" != "${EXPECTED_GIT_HEAD:0:12}" ]]; then
   exit 2
 fi
 case "$PHASE" in
-  all|prepare|smoke|train-u0|materialize-source|train-controller|decide|evaluate|package) ;;
+  all|prepare|smoke|import-u0|train-u0|materialize-source|train-controller|decide|evaluate|package) ;;
   *) echo "[FAIL] Unknown PHASE=$PHASE" >&2; exit 2 ;;
 esac
+if [[ -n "$IMPORT_U0_RUN_ID" ]]; then
+  if [[ ! "$IMPORT_U0_RUN_ID" =~ ^S5_[A-Z0-9]+_[0-9]{8}T[0-9]{6}Z_68df5b241042$ || "$IMPORT_U0_RUN_ID" == "$RUN_ID" ]]; then
+    echo "[FAIL] U0 import requires a distinct source run from the supported pre-hotfix revision." >&2
+    exit 2
+  fi
+elif [[ "$PHASE" == "import-u0" ]]; then
+  echo "[FAIL] PHASE=import-u0 requires IMPORT_U0_RUN_ID." >&2
+  exit 2
+fi
 
 mkdir -p "$LOG_ROOT" "$STATUS_ROOT" "$BARRIER_ROOT" "$HEAVY_ROOT"
 exec 9>"$COMPACT_ROOT/stage5.lock"
@@ -126,6 +138,9 @@ capture_provenance() {
     printf 'EXPECTED_GIT_HEAD=%q ' "$EXPECTED_GIT_HEAD"
     printf 'RUN_ID=%q ' "$RUN_ID"
     printf 'REMOTE_HEAVY_LOCATOR=%q ' "$REMOTE_HEAVY_LOCATOR"
+    printf 'IMPORT_U0_RUN_ID=%q ' "$IMPORT_U0_RUN_ID"
+    printf 'IMPORT_U0_COMPACT_ROOT=%q ' "$IMPORT_U0_COMPACT_ROOT"
+    printf 'IMPORT_U0_HEAVY_ROOT=%q ' "$IMPORT_U0_HEAVY_ROOT"
     printf 'COMPACT_ROOT=%q ' "$COMPACT_ROOT"
     printf 'HEAVY_ROOT=%q ' "$HEAVY_ROOT"
     printf 'DATA_ROOT=%q ' "$DATA_ROOT"
@@ -322,6 +337,15 @@ smoke_phase() {
   cp "$smoke_root/smoke_report.json" "$SMOKE_REPORT.part"
   mv "$SMOKE_REPORT.part" "$SMOKE_REPORT"
   run_cli freeze-smoke "${PROTOCOL_ARGS[@]}" --smoke-report "$SMOKE_REPORT" --output "$SMOKE_BARRIER"
+}
+
+import_u0_phase() {
+  run_logged "$LOG_ROOT/import_u0.log" run_cli import-u0 \
+    "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+    --source-protocol "$IMPORT_U0_COMPACT_ROOT/protocol/protocol.json" \
+    --source-checkpoint-root "$IMPORT_U0_HEAVY_ROOT/checkpoints" \
+    --checkpoint-root "$CHECKPOINT_ROOT" \
+    --output-manifest "$COMPACT_ROOT/imports/u0_import.json"
 }
 
 train_u0_phase() {
@@ -542,6 +566,7 @@ fi
 case "$PHASE" in
   prepare) prepare_phase ;;
   smoke) smoke_phase ;;
+  import-u0) import_u0_phase ;;
   train-u0) train_u0_phase ;;
   materialize-source) materialize_source_phase ;;
   train-controller) train_controller_phase ;;
@@ -551,6 +576,9 @@ case "$PHASE" in
   all)
     prepare_phase
     smoke_phase
+    if [[ -n "$IMPORT_U0_RUN_ID" ]]; then
+      import_u0_phase
+    fi
     train_u0_phase
     train_controller_phase
     materialize_source_phase

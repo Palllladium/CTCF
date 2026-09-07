@@ -762,9 +762,16 @@ def _validate_collar_repair_bootstrap_report(nested: Mapping[str, Any]) -> None:
     bound = repair.get("cert_bound") if isinstance(repair, dict) else None
     certified_repair = isinstance(repair, dict) and repair.get("certified") is True
     usable_bound = not isinstance(bound, bool) and isinstance(bound, (int, float)) and math.isfinite(bound)
+    residual = nested.get("digital_residual_percent")
+    usable_residual = (
+        not isinstance(residual, bool)
+        and isinstance(residual, (int, float))
+        and math.isfinite(residual)
+        and 0.0 <= residual <= 100.0
+    )
     if (
         nested.get("scientific_degradation") is not None
-        or nested.get("digital_residual_percent") != 0.0
+        or not usable_residual
         or not certified_repair
         or not usable_bound
         or bound < WORK_EPS
@@ -1119,8 +1126,14 @@ def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch:
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
         _, raw_ab = step.base_runner.model(moving_ab, fixed_ab, alpha_l1=1.0, alpha_l3=1.0)
         _, raw_ba = step.base_runner.model(moving_ba, fixed_ba, alpha_l1=1.0, alpha_l3=1.0)
-    _, psi_ab, _ = construct_initial_field(raw_ab, policy=step.bootstrap_policy)
-    _, psi_ba, _ = construct_initial_field(raw_ba, policy=step.bootstrap_policy)
+    try:
+        _, psi_ab, bootstrap_ab = construct_initial_field(raw_ab, policy=step.bootstrap_policy)
+        _, psi_ba, bootstrap_ba = construct_initial_field(raw_ba, policy=step.bootstrap_policy)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Stage5 controller {step.variant} bootstrap failed at epoch={epoch + 1} "
+            f"subjects={pair['subject_a']},{pair['subject_b']}: {exc}"
+        ) from exc
     features_ab = build_stage5_features(fixed_ab, moving_ab, psi_ab)
     features_ba = build_stage5_features(fixed_ba, moving_ba, psi_ba)
     input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = _controller_training_tensors(features_ab)
@@ -1146,6 +1159,9 @@ def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch:
         raise FloatingPointError(f"non-finite Stage5 controller loss at epoch {epoch}")
     step.scaler.scale(loss).backward()
     _strict_scaler_step(step.scaler, step.optimizer, phase=f"controller {step.variant}")
+    logs["bootstrap_digital_residual_percent"] = (
+        bootstrap_ab["digital_residual_percent"] + bootstrap_ba["digital_residual_percent"]
+    ) / 2.0
     return logs
 
 
