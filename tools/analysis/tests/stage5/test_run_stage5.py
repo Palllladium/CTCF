@@ -20,6 +20,40 @@ from utils.cert_exact import certify_flow_exact
 
 
 class ParserContractTest(unittest.TestCase):
+    def test_controller_can_start_without_smoke_but_still_checks_git_and_protocol(self) -> None:
+        args = run_stage5.build_parser().parse_args(
+            [
+                "train-controller",
+                "--repo-root",
+                ".",
+                "--expected-git-head",
+                "a" * 40,
+                "--protocol",
+                "protocol.json",
+                "--data-contract",
+                "data.json",
+                "--image-root",
+                "images",
+                "--checkpoint-root",
+                "checkpoints",
+                "--seed",
+                "0",
+                "--variant",
+                "F0",
+                "--device",
+                "cuda:0",
+            ]
+        )
+        with (
+            patch.object(run_stage5, "assert_clean_exact_git", return_value="a" * 40) as git_guard,
+            patch.object(run_stage5, "_read_protocol", return_value={"verified": True}) as protocol_guard,
+            patch.object(run_stage5, "_validate_smoke_gate") as smoke,
+        ):
+            self.assertEqual(run_stage5._protocol_context(args), ("a" * 40, {"verified": True}))
+        git_guard.assert_called_once()
+        protocol_guard.assert_called_once()
+        smoke.assert_not_called()
+
     def test_expected_actions_are_present(self) -> None:
         parser = run_stage5.build_parser()
         subparsers = next(action for action in parser._actions if action.dest == "action")
@@ -339,6 +373,48 @@ class ResumeAndArtifactTest(unittest.TestCase):
 
 
 class PackagingGuardTest(unittest.TestCase):
+    def test_complete_without_smoke_still_reaches_scientific_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = [
+                "data_attestations/source_inventory.json",
+                "data_attestations/split_manifest.json",
+                "data_attestations/pair_manifest.json",
+                "data_attestations/data_contract.json",
+                "protocol/protocol.json",
+                "barriers/training_barrier.json",
+                "barriers/decision_barrier.json",
+                "barriers/evaluation_barrier.json",
+            ]
+            products = [
+                "evaluation_bundle.json",
+                "per_decision.csv",
+                "per_label.csv",
+                "geometry_metrics.csv",
+                "field_stage_diagnostics.csv",
+                "per_pair_metric.csv",
+                "planned_contrasts.csv",
+                "paired_effects_vs_u0.csv",
+                "decision_diagnostics.csv",
+            ]
+            for name in files + [f"evaluation/products/{name}" for name in products]:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            args = self._args(root)
+            args.status, args.exit_code = "COMPLETE", 0
+            with (
+                patch.object(run_stage5, "assert_clean_exact_git", return_value="a" * 40),
+                patch.object(
+                    run_stage5,
+                    "_validate_complete_compact_run",
+                    side_effect=RuntimeError("invalid scientific artifacts"),
+                ) as validate,
+                self.assertRaisesRegex(RuntimeError, "invalid scientific artifacts"),
+            ):
+                run_stage5.command_finalize(args)
+            validate.assert_called_once_with(root, "a" * 40)
+
     @staticmethod
     def _args(root: Path) -> argparse.Namespace:
         return argparse.Namespace(
@@ -457,6 +533,8 @@ class ShellContractTest(unittest.TestCase):
         block = self.source.split("train_controller_phase()", 1)[1].split("decision_worker()", 1)[0]
         self.assertNotIn("--source-root", block)
         all_block = self.source.split("  all)\n", 1)[1]
+        self.assertNotIn("smoke_phase", all_block)
+        self.assertNotIn("SMOKE_ARGS", self.source)
         self.assertLess(all_block.index("train_controller_phase"), all_block.index("materialize_source_phase"))
 
     def test_logs_never_default_to_repository_root(self) -> None:

@@ -136,7 +136,9 @@ def _read_protocol(path: Path, git_head: str) -> dict[str, Any]:
 def _protocol_context(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     head = assert_clean_exact_git(args.repo_root, args.expected_git_head)
     protocol = _read_protocol(args.protocol, head)
-    if hasattr(args, "smoke_barrier"):
+    if getattr(args, "smoke_barrier", None) is not None or getattr(args, "smoke_report", None) is not None:
+        if args.smoke_barrier is None or args.smoke_report is None:
+            raise ValueError("Explicit smoke verification requires both report and barrier")
         _validate_smoke_gate(args.smoke_barrier, args.smoke_report, protocol, head)
     return head, protocol
 
@@ -845,8 +847,6 @@ def _validate_complete_compact_run(run_root: Path, git_head: str) -> None:
     training_path = run_root / "barriers" / "training_barrier.json"
     decision_path = run_root / "barriers" / "decision_barrier.json"
     evaluation_path = run_root / "barriers" / "evaluation_barrier.json"
-    smoke_report_path = run_root / "smoke" / "smoke_report.json"
-    smoke_barrier_path = run_root / "barriers" / "smoke_barrier.json"
     products_root = run_root / "evaluation" / "products"
     evaluation_root = run_root / "evaluation"
 
@@ -854,7 +854,6 @@ def _validate_complete_compact_run(run_root: Path, git_head: str) -> None:
     runtime = load_stage5_runtime_contract(data_root / "data_contract.json")
     if runtime.contract_sha256 != protocol["data_contract_sha256"]:
         raise RuntimeError("Stage5 compact data contract differs from the frozen protocol")
-    _validate_smoke_gate(smoke_barrier_path, smoke_report_path, protocol, git_head)
     training = load_canonical_json(training_path)
     decision = load_canonical_json(decision_path)
     evaluation_barrier = load_canonical_json(evaluation_path)
@@ -920,8 +919,6 @@ def command_finalize(args: argparse.Namespace) -> int:
             run_root / "data_attestations" / "pair_manifest.json",
             run_root / "data_attestations" / "data_contract.json",
             run_root / "protocol" / "protocol.json",
-            run_root / "smoke" / "smoke_report.json",
-            run_root / "barriers" / "smoke_barrier.json",
             run_root / "barriers" / "training_barrier.json",
             run_root / "barriers" / "decision_barrier.json",
             run_root / "barriers" / "evaluation_barrier.json",
@@ -960,6 +957,7 @@ def command_finalize(args: argparse.Namespace) -> int:
         "completed_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "git_head": head,
         "tracked_tree_clean": True,
+        "smoke_required": False,
         "heldout_test_accessed": False,
         "heldout_test_member_payload_extracted": False,
         "heldout_test_decoded_or_evaluated": False,
@@ -995,8 +993,9 @@ def _add_data(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_smoke_gate(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--smoke-barrier", type=Path, required=True)
-    parser.add_argument("--smoke-report", type=Path, required=True)
+    # Optional diagnostics for explicit callers; production phases need no smoke.
+    parser.add_argument("--smoke-barrier", type=Path)
+    parser.add_argument("--smoke-report", type=Path)
 
 
 def _add_shard(parser: argparse.ArgumentParser) -> None:

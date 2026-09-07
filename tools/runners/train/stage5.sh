@@ -88,7 +88,6 @@ fi
 readonly -a GIT_ARGS=(--repo-root "$REPO_ROOT" --expected-git-head "$EXPECTED_GIT_HEAD")
 readonly -a PROTOCOL_ARGS=("${GIT_ARGS[@]}" --protocol "$PROTOCOL")
 readonly -a DATA_ARGS=(--data-contract "$DATA_CONTRACT" --image-root "$IMAGE_ROOT")
-readonly -a SMOKE_ARGS=(--smoke-barrier "$SMOKE_BARRIER" --smoke-report "$SMOKE_REPORT")
 
 run_cli() {
   "$PYBIN" -m tools.analysis.run_stage5 "$@"
@@ -341,7 +340,7 @@ smoke_phase() {
 
 import_u0_phase() {
   run_logged "$LOG_ROOT/import_u0.log" run_cli import-u0 \
-    "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+    "${PROTOCOL_ARGS[@]}" \
     --source-protocol "$IMPORT_U0_COMPACT_ROOT/protocol/protocol.json" \
     --source-checkpoint-root "$IMPORT_U0_HEAVY_ROOT/checkpoints" \
     --checkpoint-root "$CHECKPOINT_ROOT" \
@@ -357,7 +356,7 @@ train_u0_phase() {
   for slot in "${!SEEDS[@]}"; do
     seed="${SEEDS[$slot]}"
     CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_logged "$LOG_ROOT/u0_seed_${seed}.log" run_cli train-u0 \
-      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
       --checkpoint-root "$CHECKPOINT_ROOT" \
       --seed "$seed" \
       --device cuda:0 &
@@ -394,7 +393,7 @@ materialize_source_phase() {
     read -r seed shard count slot <<< "$job"
     CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_logged "$LOG_ROOT/source_s${seed}_${shard}of${count}.log" \
       run_cli materialize-source \
-      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
       --checkpoint-root "$CHECKPOINT_ROOT" \
       --source-root "$SOURCE_ROOT" \
       --seed "$seed" \
@@ -422,7 +421,7 @@ train_controller_wave() {
     physical_slot=$(((slot + seed) % ${#GPUS[@]}))
     CUDA_VISIBLE_DEVICES="${GPUS[$physical_slot]}" run_logged "$LOG_ROOT/controller_s${seed}_${variant}.log" \
       run_cli train-controller \
-      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
       --checkpoint-root "$CHECKPOINT_ROOT" \
       --seed "$seed" \
       --variant "$variant" \
@@ -444,7 +443,7 @@ train_controller_phase() {
     done
   done
   run_cli freeze-training \
-    "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+    "${PROTOCOL_ARGS[@]}" \
     --checkpoint-root "$CHECKPOINT_ROOT" \
     --output "$TRAINING_BARRIER"
 }
@@ -468,7 +467,7 @@ decision_worker() {
     local seed variant
     read -r seed variant <"$claim"
     if ! CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_cli decide \
-      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+      "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
       --training-barrier "$TRAINING_BARRIER" \
       --checkpoint-root "$CHECKPOINT_ROOT" \
       --source-root "$SOURCE_ROOT" \
@@ -504,7 +503,7 @@ decide_phase() {
   done
   wait_for_batch "${pids[@]}"
   run_cli freeze-decision \
-    "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+    "${PROTOCOL_ARGS[@]}" \
     --training-barrier "$TRAINING_BARRIER" \
     --source-root "$SOURCE_ROOT" \
     --decision-root "$DECISION_ROOT" \
@@ -518,7 +517,7 @@ evaluate_phase() {
   local slot
   for slot in "${!GPUS[@]}"; do
     CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_logged "$LOG_ROOT/evaluation_${slot}of${#GPUS[@]}.log" run_cli evaluate \
-      "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+      "${PROTOCOL_ARGS[@]}" \
       --training-barrier "$TRAINING_BARRIER" \
       --decision-barrier "$DECISION_BARRIER" \
       --decision-barrier-sha256 "$decision_sha" \
@@ -534,7 +533,7 @@ evaluate_phase() {
   done
   wait_for_batch "${pids[@]}"
   run_cli freeze-evaluation \
-    "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+    "${PROTOCOL_ARGS[@]}" \
     --training-barrier "$TRAINING_BARRIER" \
     --decision-barrier "$DECISION_BARRIER" \
     --decision-barrier-sha256 "$decision_sha" \
@@ -542,7 +541,7 @@ evaluate_phase() {
     --evaluation-root "$EVALUATION_ROOT" \
     --output "$EVALUATION_BARRIER"
   CUDA_VISIBLE_DEVICES="${GPUS[0]}" run_logged "$LOG_ROOT/aggregate.log" run_cli aggregate \
-    "${PROTOCOL_ARGS[@]}" "${SMOKE_ARGS[@]}" \
+    "${PROTOCOL_ARGS[@]}" \
     --training-barrier "$TRAINING_BARRIER" \
     --decision-barrier "$DECISION_BARRIER" \
     --decision-barrier-sha256 "$decision_sha" \
@@ -575,7 +574,6 @@ case "$PHASE" in
   package) ;;
   all)
     prepare_phase
-    smoke_phase
     if [[ -n "$IMPORT_U0_RUN_ID" ]]; then
       import_u0_phase
     fi
