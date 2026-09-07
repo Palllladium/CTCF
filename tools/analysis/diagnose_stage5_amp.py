@@ -32,6 +32,12 @@ SOURCE_HEAD = "458489f77fc6f7c792ba1411bb763f4bb06310c5"
 SOURCE_PROTOCOL_SHA = "36e4881fb618103ab2d67c29872ae6f3ae155b285f6c7807d7971b631ee66c88"
 PROBE_SCALES = (65536.0, 32768.0, 8192.0, 1024.0, 1.0)
 VARIANTS = ("F0", "F2V", "F2S", "F2P")
+NCC_REFERENCE_HASHES = {
+    "F0": "fec30d4bfceea476edbab3bafe308fec8b0cd7bb4fb0b059129c143392b3404f",
+    "F2V": "75ce7cba2a542f6710731ba4501e6fd54bf1bba05b44fc83e45070db91101c2d",
+    "F2S": "0b3b587878a4808dcea35288f23d29676cabfa84a0cccd66e1c6ce660c46ab84",
+    "F2P": "f54cb5fdc4125d57fc4c3879cfea27687549cac05826c713874278949c793e70",
+}
 
 
 def tensor_stats(tensor):
@@ -239,13 +245,61 @@ def classify_probes(probes):
     return "FAILURE_PERSISTS_IN_FP32_OR_PROBE_ERROR"
 
 
+def load_ncc_reference(args):
+    if not getattr(args, "ncc_audit", False):
+        return None
+    if args.reference_report is None or sha256_file(args.reference_report) != NCC_REFERENCE_HASHES[args.variant]:
+        raise RuntimeError("NCC audit requires the exact reviewed H100 AMP report for this variant")
+    return json.loads(args.reference_report.read_text(encoding="utf-8"))
+
+
+def audit_ncc_failure(args, report, step, inputs, pair, rng, reference):
+    from tools.analysis.stage5.ncc_diagnostic import audit_pair
+
+    for name, digest in reference["source_hashes"].items():
+        if report["source_hashes"].get(name) != digest:
+            raise RuntimeError(f"NCC audit source bytes differ from the reviewed failure: {name}")
+    for key in (
+        "pair",
+        "pair_index_one_based",
+        "successful_in_memory_updates",
+        "pair_schedule_sha256",
+        "initial_controller_state_sha256",
+        "protocol_sha256",
+        "data_contract_sha256",
+    ):
+        if report[key] != reference[key]:
+            raise RuntimeError(f"NCC audit replay differs from the reviewed failure: {key}")
+    # CUDA grid_sample backward is not promised bitwise deterministic. Distinguish
+    # historical replay equality from exact tensor/state reuse within this attempt.
+    report["historical_controller_state_match"] = (
+        report["failing_controller_state_sha256"] == reference["failing_controller_state_sha256"]
+    )
+    report["reference_controller_state_sha256"] = reference["failing_controller_state_sha256"]
+
+    def save(result):
+        report["ncc_audit"] = result
+        atomic_write_json(args.output, report)
+        print(f"[NCC DIAG PROGRESS] {args.variant} {result['status']}", flush=True)
+
+    report["ncc_audit"] = audit_pair(step, inputs, pair, rng, probe_fn=probe, save=save)
+    report["interpretation"] = "INSPECT_NCC_VALUES_AND_GRADIENTS_NOT_A_TRAINING_SUCCESS"
+
+
 def diagnose(args, report):
+    reference = load_ncc_reference(args)
     step = prepare_step(args, report)
     pairs = runtime.controller_epoch_pairs(runtime._training_subjects(step.store), seed=0, epoch=0)
     report["pair_schedule_sha256"] = canonical_sha256(pairs)
     report["max_pairs"] = len(pairs)
     report["successful_in_memory_updates"] = 0
     report["status"] = "REPLAYING_FIRST_EPOCH"
+    report["replay_metrics"] = []
+    if reference is not None:
+        report["reference_report_sha256"] = sha256_file(args.reference_report)
+        report["source_hashes"][str(args.reference_report)] = report["reference_report_sha256"]
+        pairs = pairs[: reference["pair_index_one_based"]]
+        report["max_pairs"] = len(pairs)
     for index, pair in enumerate(pairs):
         report["pair_index_one_based"] = index + 1
         report["pair"] = pair
@@ -256,6 +310,7 @@ def diagnose(args, report):
         step.optimizer.zero_grad(set_to_none=True)
         try:
             loss, _logs = runtime._controller_pair_loss(step, inputs)
+            report["replay_metrics"].append({"pair": pair, "metrics": _logs})
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError("non-finite controller loss during diagnostic replay")
             step.scaler.scale(loss).backward()
@@ -268,6 +323,10 @@ def diagnose(args, report):
             step.optimizer.zero_grad(set_to_none=True)
             before = state_dict_sha256(step.controller.state_dict())
             report["failing_controller_state_sha256"] = before
+            if reference is not None:
+                audit_ncc_failure(args, report, step, inputs, pair, rng, reference)
+                report["status"] = "NCC_AUDIT_COMPLETE"
+                break
             report["probes"] = []
             for scale, fp32 in [*((s, False) for s in PROBE_SCALES), (1.0, True)]:
                 restore_rng_state(rng)
@@ -292,7 +351,7 @@ def diagnose(args, report):
         report["successful_in_memory_updates"] += 1
         del loss, inputs
     else:
-        report["status"] = "NOT_REPRODUCED_WITHIN_FIRST_EPOCH"
+        report["status"] = "NOT_REPRODUCED_WITHIN_REVIEWED_PREFIX" if reference else "NOT_REPRODUCED_WITHIN_FIRST_EPOCH"
     for name, digest in report["source_hashes"].items():
         if sha256_file(Path(name)) != digest:
             raise RuntimeError(f"Source artifact changed during diagnostic: {name}")
@@ -309,6 +368,8 @@ def main():
     parser.add_argument("--image-root", type=Path, required=True)
     parser.add_argument("--variant", choices=VARIANTS, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ncc-audit", action="store_true", help="Audit NCC on the reviewed failing pair, no AMP sweep")
+    parser.add_argument("--reference-report", type=Path, help="Reviewed prior H100 JSON for this variant")
     args = parser.parse_args()
     head = assert_clean_exact_git(args.repo_root, args.expected_git_head)
     args.output = args.output.resolve()
@@ -320,7 +381,7 @@ def main():
     with args.output.open("x", encoding="utf-8"):
         pass
     report = {
-        "schema": "ctcf-stage5-amp-diagnostic-v1",
+        "schema": "ctcf-stage5-ncc-diagnostic-v1" if args.ncc_audit else "ctcf-stage5-amp-diagnostic-v1",
         "diagnostic_git_head": head,
         "source_git_head": SOURCE_HEAD,
         "variant": args.variant,
@@ -335,6 +396,9 @@ def main():
         "fp32_reference_controller_only": True,
         "status": "INITIALIZING",
     }
+    if args.ncc_audit:
+        report.pop("fp32_reference_controller_only")
+        report.update(probe_scales=[65536.0, 1.0], fp64_reference_ncc_only=True)
     code = 0
     try:
         diagnose(args, report)
