@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import random
 import tempfile
 import unittest
@@ -12,13 +13,13 @@ import numpy as np
 import torch
 
 from experiments.stage5.checkpoints import atomic_torch_save, build_training_state, load_training_state
-from experiments.stage5.config import U0TrainingConfig
+from experiments.stage5.config import ControllerTrainingConfig, U0TrainingConfig
 from experiments.stage5.runtime import _attach_runtime_checkpoint_metadata
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.stage5.artifacts import checkpoint_metadata
 from tools.analysis.stage5.contracts import CHECKPOINT_SELECTION_POLICY, build_protocol_contract
 from tools.analysis.stage5.primitives import canonical_sha256, readable_json_bytes, write_immutable_json
-from tools.analysis.stage5.protocol import bootstrap_parameters, u0_training_contract
+from tools.analysis.stage5.protocol import bootstrap_parameters, controller_training_contract, u0_training_contract
 from tools.analysis.stage5.u0_import import SOURCE_GIT_HEAD, import_completed_u0
 
 
@@ -39,11 +40,13 @@ class CompletedU0ImportTest(unittest.TestCase):
             self._write_source(seed)
 
     def _write_protocol(self, path: Path, head: str, *, old: bool) -> dict:
-        # The import verifies all three sibling files; their content is not used
-        # to instantiate a controller or load any images in this CPU-only test.
+        controller_contract = controller_training_contract(ControllerTrainingConfig())
+        if old:
+            controller_contract["schema"] = "ctcf-stage5-controller-training-contract-v2"
+            controller_contract.pop("objective_numerics")
         contracts = {
             "u0_training_contract": u0_training_contract(self.config),
-            "controller_training_contract": {"schema": "synthetic-controller-contract"},
+            "controller_training_contract": controller_contract,
             "search_contract": {"schema": "synthetic-search-contract"},
         }
         digests = {}
@@ -152,7 +155,22 @@ class CompletedU0ImportTest(unittest.TestCase):
         payload[key] = value
         self._seal(path, payload)
 
+    def _replace_contract(self, protocol_path: Path, name: str, contract: dict) -> None:
+        contract_path = protocol_path.with_name(f"{name}.json")
+        atomic_write_json(contract_path, contract)
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol[f"{name}_sha256"] = sha256_file(contract_path)
+        atomic_write_json(protocol_path, protocol)
+
     def test_import_preserves_training_state_and_source_bytes_and_is_idempotent(self) -> None:
+        self.assertNotEqual(
+            self.source["controller_training_contract_sha256"], self.target["controller_training_contract_sha256"]
+        )
+        # The original 68df5b... compact package contains this exact V2 document.
+        self.assertEqual(
+            self.source["controller_training_contract_sha256"],
+            "fc4d00f404ab8e7d4f2f0873b7aeda6ae889530ea495cc975d8077d609f7155d",
+        )
         before = {str(path): sha256_file(path) for path in (self.root / "source").rglob("*") if path.is_file()}
         result = self._import()
         self.assertEqual(result["operation"], "IMPORT_COMPLETED_U0_WITHOUT_TRAINING")
@@ -261,6 +279,62 @@ class CompletedU0ImportTest(unittest.TestCase):
         self.source_protocol_path.with_name("u0_training_contract.json").write_text("{}", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "file digest mismatch"):
             self._import()
+
+    def test_controller_contract_bytes_must_authenticate_before_digest_rebinding(self) -> None:
+        self.source_protocol_path.with_name("controller_training_contract.json").write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "file digest mismatch"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_target_without_ncc_fix_is_rejected_even_with_valid_contract_digest(self) -> None:
+        old_controller = json.loads(
+            self.source_protocol_path.with_name("controller_training_contract.json").read_text(encoding="utf-8")
+        )
+        self._replace_contract(self.target_protocol_path, "controller_training_contract", old_controller)
+        with self.assertRaisesRegex(RuntimeError, "target controller contract"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_resealed_different_ncc_contract_is_rejected(self) -> None:
+        controller = controller_training_contract(ControllerTrainingConfig())
+        controller["objective_numerics"]["ncc_moments_dtype"] = "float32"
+        self._replace_contract(self.target_protocol_path, "controller_training_contract", controller)
+        with self.assertRaisesRegex(RuntimeError, "target controller contract"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_resealed_controller_optimizer_change_is_rejected(self) -> None:
+        controller = controller_training_contract(ControllerTrainingConfig())
+        controller["config"]["learning_rate"] *= 2
+        self._replace_contract(self.target_protocol_path, "controller_training_contract", controller)
+        with self.assertRaisesRegex(RuntimeError, "target controller contract"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_resealed_source_controller_change_is_rejected(self) -> None:
+        contract_path = self.source_protocol_path.with_name("controller_training_contract.json")
+        controller = json.loads(contract_path.read_text(encoding="utf-8"))
+        controller["config"]["loss"]["ncc_window"] = 9
+        self._replace_contract(self.source_protocol_path, "controller_training_contract", controller)
+        with self.assertRaisesRegex(RuntimeError, "source controller contract"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_other_historical_revision_is_rejected(self) -> None:
+        source = copy.deepcopy(self.source)
+        source["git_head"] = "e" * 40
+        atomic_write_json(self.source_protocol_path, source)
+        with self.assertRaisesRegex(RuntimeError, "named historical revision"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_matching_nondefault_u0_configs_are_rejected(self) -> None:
+        config = U0TrainingConfig(learning_rate=2e-4)
+        for path in (self.source_protocol_path, self.target_protocol_path):
+            self._replace_contract(path, "u0_training_contract", u0_training_contract(config))
+        with self.assertRaisesRegex(RuntimeError, "training contract differs"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
 
     def test_recursive_import_is_rejected(self) -> None:
         self._mutate_source("training_git_head", SOURCE_GIT_HEAD)

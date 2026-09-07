@@ -16,6 +16,7 @@ from collections import defaultdict
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -27,6 +28,7 @@ from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.run_stage5 import assert_clean_exact_git
 from tools.analysis.stage5.artifacts import load_canonical_json
 from tools.analysis.stage5.contracts import canonical_sha256, validate_protocol_contract
+from utils import NCCVxm
 
 SOURCE_HEAD = "458489f77fc6f7c792ba1411bb763f4bb06310c5"
 SOURCE_PROTOCOL_SHA = "36e4881fb618103ab2d67c29872ae6f3ae155b285f6c7807d7971b631ee66c88"
@@ -287,6 +289,13 @@ def audit_ncc_failure(args, report, step, inputs, pair, rng, reference):
 
 
 def diagnose(args, report):
+    # These tools replay the fixed historical source protocol, not the current
+    # production objective. Keep its NCC explicit after the production fix.
+    with patch("experiments.stage5.losses.ControllerNCC", NCCVxm):
+        _diagnose_legacy_source(args, report)
+
+
+def _diagnose_legacy_source(args, report):
     reference = load_ncc_reference(args)
     step = prepare_step(args, report)
     pairs = runtime.controller_epoch_pairs(runtime._training_subjects(step.store), seed=0, epoch=0)

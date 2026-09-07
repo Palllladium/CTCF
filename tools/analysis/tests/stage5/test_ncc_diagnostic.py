@@ -13,9 +13,9 @@ import torch.nn.functional as F
 
 from experiments.stage5 import losses, runtime
 from experiments.stage5.checkpoints import capture_rng_state
+from experiments.stage5.ncc import ControllerNCC
 from tools.analysis import diagnose_stage5_amp as amp
 from tools.analysis.stage5 import ncc_diagnostic as ncc
-from utils import NCCVxm
 
 
 def centered_oracle(first, second, width):
@@ -83,10 +83,10 @@ class NCCReferenceTest(unittest.TestCase):
         self.assertEqual((torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32), previous)
 
     def test_reference_does_not_change_the_production_loss_class(self):
-        self.assertIs(losses.NCCVxm, NCCVxm)
-        with mock.patch.object(losses, "NCCVxm", ncc.ReferenceNCC):
-            self.assertIs(losses.NCCVxm, ncc.ReferenceNCC)
-        self.assertIs(losses.NCCVxm, NCCVxm)
+        self.assertIs(losses.ControllerNCC, ControllerNCC)
+        with mock.patch.object(losses, "ControllerNCC", ncc.ReferenceNCC):
+            self.assertIs(losses.ControllerNCC, ncc.ReferenceNCC)
+        self.assertIs(losses.ControllerNCC, ControllerNCC)
 
     def test_reference_rejects_unsupported_inputs(self):
         x = torch.zeros(1, 1, 5, 5, 5)
@@ -197,7 +197,7 @@ class NCCReplayTest(unittest.TestCase):
         self.assertEqual(optimizer.state_dict(), opt)
         for name, tensor in controller.state_dict().items():
             self.assertTrue(torch.equal(tensor, weights[name]))
-        self.assertIs(losses.NCCVxm, NCCVxm)
+        self.assertIs(losses.ControllerNCC, ControllerNCC)
         json.dumps(result, allow_nan=False)
 
 

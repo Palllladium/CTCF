@@ -1160,8 +1160,8 @@ def _controller_pair_loss(
     """Production uses FP16; FP32 is an explicit, diagnostic-only comparison."""
     input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = inputs.tensors_ab
     input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = inputs.tensors_ba
-    # The controller runs under FP16 autocast while controller_objective re-enters FP32 inside.
-    # That boundary is the numerical contract of the run; do not widen or move it.
+    # The controller runs under FP16 autocast; the objective owns its FP32 warp
+    # and regularizers, and the checked FP64 NCC moments recorded in the protocol.
     with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=not diagnostic_fp32):
         output_ab = step.controller(input_ab, step.variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
         output_ba = step.controller(input_ba, step.variant, s2_proposal=s2_ba, s4_proposal=s4_ba)

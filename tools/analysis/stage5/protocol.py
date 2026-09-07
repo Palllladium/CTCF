@@ -19,6 +19,7 @@ from experiments.stage5.features import (
     POSTERIOR_TEMPERATURE,
     SEARCH_STRIDES,
 )
+from experiments.stage5.ncc import controller_ncc_contract
 from experiments.stage5.safety import CLAIM_EPS, CLIP_SWEEPS, WORK_EPS
 from models.CTCF.controller import (
     STAGE5_INPUT_CHANNEL_COUNT,
@@ -60,7 +61,8 @@ def controller_training_contract(config: ControllerTrainingConfig) -> dict[str, 
     controller = build_stage5_controller(config)
     parameter_count = sum(parameter.numel() for parameter in controller.parameters())
     return {
-        "schema": "ctcf-stage5-controller-training-contract-v2",
+        "schema": "ctcf-stage5-controller-training-contract-v3",
+        "objective_numerics": controller_ncc_contract(),
         "dataset_split": "training",
         "labels_reachable": False,
         "source_field_policy": "frozen_U0_no_grad_then_shared_frozen_bootstrap_construction_on_the_fly",

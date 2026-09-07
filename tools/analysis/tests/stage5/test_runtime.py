@@ -139,7 +139,7 @@ class RuntimeConfigTest(unittest.TestCase):
         image = torch.zeros(1, 1, 5, 5, 5)
         flow = torch.zeros(1, 3, 5, 5, 5)
         with (
-            mock.patch("experiments.stage5.losses.NCCVxm", NonfiniteNcc),
+            mock.patch("experiments.stage5.losses.ControllerNCC", NonfiniteNcc),
             self.assertRaisesRegex(FloatingPointError, "term ncc"),
         ):
             controller_objective(

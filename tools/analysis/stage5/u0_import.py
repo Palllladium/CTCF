@@ -1,4 +1,4 @@
-"""Import completed U0 endpoints across the one bootstrap-only Stage-5 hotfix.
+"""Import original U0 endpoints across the bootstrap and controller-NCC hotfixes.
 
 The legacy ``git_head``/``protocol_sha256`` fields become the target *binding*.
 Actual training provenance stays in ``training_git_head`` and the authenticated
@@ -16,7 +16,7 @@ from typing import Any
 import torch
 
 from experiments.stage5.checkpoints import STAGE5_TRAINING_STATE_SCHEMA, atomic_torch_save, state_dict_sha256
-from experiments.stage5.config import STAGE5_SEEDS, U0TrainingConfig
+from experiments.stage5.config import STAGE5_SEEDS, ControllerTrainingConfig, U0TrainingConfig
 from experiments.stage5.runtime import _validate_runtime_checkpoint_metadata
 from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.stage5.contracts import CHECKPOINT_SELECTION_POLICY, validate_protocol_contract
@@ -31,7 +31,7 @@ from tools.analysis.stage5.primitives import (
     write_immutable_bytes,
     write_immutable_json,
 )
-from tools.analysis.stage5.protocol import bootstrap_parameters, u0_training_contract
+from tools.analysis.stage5.protocol import bootstrap_parameters, controller_training_contract, u0_training_contract
 
 SOURCE_GIT_HEAD = "68df5b24104272fd137106fb51959907502db2a9"
 IMPORT_SCHEMA = "ctcf-stage5-completed-u0-import-v1"
@@ -47,7 +47,7 @@ def _plain_path(path: Path) -> Path:
     return path.resolve()
 
 
-def _load_protocol(path: Path) -> tuple[dict[str, Any], U0TrainingConfig]:
+def _load_protocol(path: Path) -> tuple[dict[str, Any], U0TrainingConfig, dict[str, Any]]:
     require_regular_file(path, "protocol")
     protocol = load_json_object(path)
     validate_protocol_contract(protocol)
@@ -59,14 +59,19 @@ def _load_protocol(path: Path) -> tuple[dict[str, Any], U0TrainingConfig]:
             raise RuntimeError(f"Stage5 U0 import {name} file digest mismatch")
         contracts[name] = load_json_object(contract_path)
     config = U0TrainingConfig(**contracts["u0_training_contract"]["config"])
-    if contracts["u0_training_contract"] != u0_training_contract(config):
+    if config != U0TrainingConfig() or contracts["u0_training_contract"] != u0_training_contract(config):
         raise RuntimeError("Stage5 U0 import training contract differs from the frozen implementation")
     if protocol["u0_fixed_epoch"] != config.fixed_epoch:
         raise RuntimeError("Stage5 U0 import protocol and training endpoint disagree")
-    return protocol, config
+    return protocol, config, contracts["controller_training_contract"]
 
 
-def _validate_hotfix(source: dict[str, Any], target: dict[str, Any]) -> None:
+def _validate_hotfix(
+    source: dict[str, Any],
+    target: dict[str, Any],
+    source_controller: dict[str, Any],
+    target_controller: dict[str, Any],
+) -> None:
     if source["git_head"] != SOURCE_GIT_HEAD or target["git_head"] == SOURCE_GIT_HEAD:
         raise RuntimeError("Stage5 U0 import only supports the named historical revision into a new revision")
     parameters = bootstrap_parameters()
@@ -77,12 +82,28 @@ def _validate_hotfix(source: dict[str, Any], target: dict[str, Any]) -> None:
         raise RuntimeError("Stage5 U0 import requires the expected V2 bootstrap implementation")
     if target["bootstrap"] != {"policy": "collar_repair", "parameters": parameters}:
         raise RuntimeError("Stage5 U0 import target bootstrap is not the exact V2 hotfix")
+    # Replacing a controller digest is permitted only after authenticating both
+    # sibling documents and checking the exact old/new frozen implementations.
+    # U0's training objective and state are deliberately outside this transition.
+    with torch.random.fork_rng(devices=[]):
+        expected_controller = controller_training_contract(ControllerTrainingConfig())
+    if (
+        expected_controller.get("schema") != "ctcf-stage5-controller-training-contract-v3"
+        or "objective_numerics" not in expected_controller
+        or target_controller != expected_controller
+    ):
+        raise RuntimeError("Stage5 U0 import target controller contract is not the exact NCC hotfix")
+    expected_controller["schema"] = "ctcf-stage5-controller-training-contract-v2"
+    del expected_controller["objective_numerics"]
+    if source_controller != expected_controller:
+        raise RuntimeError("Stage5 U0 import source controller contract is not the frozen historical V2 contract")
     expected_source = copy.deepcopy(target)
     expected_source["git_head"] = SOURCE_GIT_HEAD
+    expected_source["controller_training_contract_sha256"] = source["controller_training_contract_sha256"]
     expected_source["bootstrap"]["parameters"]["repair_operator_id"] = OLD_REPAIR_ID
     del expected_source["bootstrap"]["parameters"]["repair_parameters"]["digital_residual_policy"]
     if source != expected_source:
-        raise RuntimeError("Stage5 U0 import protocols differ beyond git_head and the exact bootstrap V1-to-V2 hotfix")
+        raise RuntimeError("Stage5 U0 import protocols differ beyond git_head and the exact bootstrap/NCC hotfixes")
 
 
 class _HashWriter:
@@ -214,9 +235,9 @@ def import_completed_u0(
         raise RuntimeError("Stage5 U0 import source and target checkpoint roots must be disjoint")
     if source_root in output_manifest.parents or output_manifest == source_protocol:
         raise RuntimeError("Stage5 U0 import manifest must not write into the source artifacts")
-    source, source_config = _load_protocol(source_protocol)
-    target, target_config = _load_protocol(target_protocol)
-    _validate_hotfix(source, target)
+    source, source_config, source_controller = _load_protocol(source_protocol)
+    target, target_config, target_controller = _load_protocol(target_protocol)
+    _validate_hotfix(source, target, source_controller, target_controller)
 
     source_records = []
     for seed in STAGE5_SEEDS:

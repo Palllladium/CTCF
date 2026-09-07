@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
+from experiments.stage5.ncc import ControllerNCC
 from tools.analysis.search.transaction import sample_at_psi
 from tools.analysis.stage5.primitives import require_finite, require_int
-from utils import NCCVxm
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +79,9 @@ def controller_objective(
     )
     if any(not bool(torch.isfinite(value).all()) for value in tensors):
         raise FloatingPointError("Stage5 objective received a non-finite tensor")
-    # The controller itself may run under CUDA FP16 autocast, but the objective must
-    # not. NCCVxm squares local window sums; for the frozen 7^3 window even ordinary
-    # normalized inputs can produce intermediates above the FP16 maximum (65504).
-    # Casting here keeps one numerical contract for smoke and full training while
-    # preserving gradients from the FP32 objective back through the AMP controller.
+    # The warp and regularizers stay FP32. Only NCC promotes its local moments to
+    # FP64: FP32 cancellation on near-constant normalized images corrupts both the
+    # value and its gradients. NCC returns an FP32 scalar to the mixed objective.
     with torch.autocast(device_type=fixed_forward.device.type, enabled=False):
         (
             fixed_forward,
@@ -99,7 +97,7 @@ def controller_objective(
         requested_reverse = psi_reverse + delta_reverse
         warped_forward = sample_at_psi(moving_forward, requested_forward)
         warped_reverse = sample_at_psi(moving_reverse, requested_reverse)
-        ncc = NCCVxm(win=(config.ncc_window,) * 3)
+        ncc = ControllerNCC(win=(config.ncc_window,) * 3)
         ncc_forward = ncc(warped_forward, fixed_forward)
         ncc_reverse = ncc(warped_reverse, fixed_reverse)
         similarity = _require_finite("ncc", 0.5 * (ncc_forward + ncc_reverse))
