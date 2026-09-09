@@ -23,9 +23,10 @@ contract_values="$("$PYBIN" -m tools.analysis.stage5.precision_contract --runner
 mapfile -t contract_lines <<< "$contract_values"
 readonly SOURCE_RUN="${contract_lines[0]}"
 jobs=("${contract_lines[@]:1}")
-[[ -n "$SOURCE_RUN" && ${#jobs[@]} -gt 0 && ${#GPUS[@]} == ${#jobs[@]} ]] || {
-  echo "[FAIL] One distinct GPU per diagnostic job is required"; exit 2;
+[[ -n "$SOURCE_RUN" && ${#jobs[@]} -gt 0 && ${#GPUS[@]} -gt 0 ]] || {
+  echo "[FAIL] At least one GPU and one diagnostic job are required"; exit 2;
 }
+[[ "$GPU_LIST" != *, ]] || { echo "[FAIL] Empty GPU index"; exit 2; }
 readonly SOURCE_ROOT="results/stage5/$SOURCE_RUN"
 readonly CHECKPOINT_ROOT="results/stage5_heavy/$SOURCE_RUN/checkpoints"
 declare -A SEEN=()
@@ -42,6 +43,7 @@ flock -sn 9 || { echo "[FAIL] Source run is still active"; exit 3; }
 mkdir -p results/stage5_diagnostics results/stage5_heavy results/exports
 mkdir "$OUTPUT"
 declare -A ACTIVE=()
+declare -A PID_GPU=()
 finish() {
   local result=$? pid tick remaining package_result
   trap - EXIT
@@ -89,10 +91,11 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$OUTPUT/started_at.txt"
 printf 'PYBIN=%q GPU_LIST=%q EXPECTED_GIT_HEAD=%q bash tools/runners/train/stage5_precision_diagnostic.sh\n' \
   "$PYBIN" "$GPU_LIST" "$EXPECTED_GIT_HEAD" > "$OUTPUT/command.sh"
 nvidia-smi > "$OUTPUT/nvidia-smi.txt" 2>&1
-pids=()
 printf 'job\tgpu\tpid\n' > "$OUTPUT/jobs.tsv"
-for i in "${!jobs[@]}"; do
-  job="${jobs[$i]}"
+printf 'job\tpid\texit_code\n' > "$OUTPUT/job_exit_codes.tsv"
+launch_job() {
+  local job="$1" gpu="$2" pid
+  local -a command_args
   command_args=(
     "$PYBIN" -u -m tools.analysis.diagnose_stage5_precision
     --repo-root "$REPO_ROOT" --expected-git-head "$EXPECTED_GIT_HEAD"
@@ -100,24 +103,40 @@ for i in "${!jobs[@]}"; do
     --data-contract "$DATA_CONTRACT" --image-root "$IMAGE_ROOT"
     --job "$job" --output "$OUTPUT/$job.json" --capture-root "$CAPTURE_ROOT"
   )
-  printf 'CUDA_VISIBLE_DEVICES=%q ' "${GPUS[$i]}" > "$OUTPUT/command_$job.sh"
+  printf 'CUDA_VISIBLE_DEVICES=%q ' "$gpu" > "$OUTPUT/command_$job.sh"
   printf '%q ' "${command_args[@]}" >> "$OUTPUT/command_$job.sh"
   printf '\n' >> "$OUTPUT/command_$job.sh"
-  CUDA_VISIBLE_DEVICES="${GPUS[$i]}" "${command_args[@]}" > "$OUTPUT/$job.log" 2>&1 &
+  CUDA_VISIBLE_DEVICES="$gpu" "${command_args[@]}" > "$OUTPUT/$job.log" 2>&1 &
   pid=$!
-  pids+=("$pid")
   ACTIVE[$pid]="$job"
-  printf '%s\t%s\t%s\n' "$job" "${GPUS[$i]}" "$pid" >> "$OUTPUT/jobs.tsv"
-  echo "[PRECISION DIAG START] $job GPU=${GPUS[$i]} PID=$pid $OUTPUT/$job.log"
-done
+  PID_GPU[$pid]="$gpu"
+  printf '%s\t%s\t%s\n' "$job" "$gpu" "$pid" >> "$OUTPUT/jobs.tsv"
+  echo "[PRECISION DIAG START] $job GPU=$gpu PID=$pid $OUTPUT/$job.log"
+}
+
+# Physical indices need not start at zero. Each worker sees its assigned GPU
+# as cuda:0 through CUDA_VISIBLE_DEVICES. Never share a GPU between live jobs.
+free_gpus=("${GPUS[@]}")
+next_job=0
 failed=0
-printf 'job\tpid\texit_code\n' > "$OUTPUT/job_exit_codes.tsv"
-for pid in "${pids[@]}"; do
-  code=0
-  wait "$pid" || code=$?
-  printf '%s\t%s\t%s\n' "${ACTIVE[$pid]}" "$pid" "$code" >> "$OUTPUT/job_exit_codes.tsv"
-  unset 'ACTIVE[$pid]'
-  if (( code != 0 )); then failed=1; fi
+while (( next_job < ${#jobs[@]} || ${#ACTIVE[@]} )); do
+  while (( next_job < ${#jobs[@]} && ${#free_gpus[@]} )); do
+    launch_job "${jobs[$next_job]}" "${free_gpus[0]}"
+    free_gpus=("${free_gpus[@]:1}")
+    next_job=$((next_job + 1))
+  done
+  for pid in "${!ACTIVE[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then continue; fi
+    code=0
+    wait "$pid" || code=$?
+    printf '%s\t%s\t%s\n' "${ACTIVE[$pid]}" "$pid" "$code" >> "$OUTPUT/job_exit_codes.tsv"
+    echo "[PRECISION DIAG FINISH] ${ACTIVE[$pid]} GPU=${PID_GPU[$pid]} EXIT=$code"
+    free_gpus+=("${PID_GPU[$pid]}")
+    unset 'ACTIVE[$pid]' 'PID_GPU[$pid]'
+    if (( code != 0 )); then failed=1; fi
+  done
+  # Polling avoids requiring Bash 5.1 wait -n -p on the server.
+  if (( ${#ACTIVE[@]} )); then sleep 1; fi
 done
 for job in "${jobs[@]}"; do tail -n 8 "$OUTPUT/$job.log"; done
 exit "$failed"
