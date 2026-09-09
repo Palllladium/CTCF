@@ -23,16 +23,16 @@ import torch.nn.functional as F
 from experiments.stage5 import losses, runtime
 from experiments.stage5.checkpoints import capture_rng_state, restore_rng_state, state_dict_sha256
 from experiments.stage5.ncc import NCC_VARIANCE_FLOOR, ControllerNCC, controller_ncc_contract
+from tools.analysis.stage5.precision_contract import PROBE_SCALES, error_status as _error_status
 
-PROBE_SCALES = (65536.0, 32768.0, 8192.0, 1024.0, 1.0)
 COMPARISON_TOLERANCES = {
     "purpose": "diagnostic screening, not a convergence or scientific-quality guarantee",
-    "gradient_relative_l2": 0.05,
-    "gradient_absolute_l2": 1e-7,
-    "gradient_cosine_minimum": 0.999,
-    "ncc_value_absolute": 2e-6,
-    "ncc_gradient_relative_l2": 2e-4,
-    "ncc_gradient_absolute_l2": 1e-7,
+    "mixed_precision_gradient": {"relative": 0.05, "absolute": 1e-7, "cosine_minimum": 0.999},
+    "ncc_crop": {
+        "value_absolute": 2e-6,
+        "gradient": {"relative": 2e-4, "absolute": 1e-7, "cosine_minimum": 0.0},
+    },
+    "component_gradient_sum": {"relative": 2e-4, "absolute": 1e-7, "cosine_minimum": 0.999},
 }
 
 
@@ -44,7 +44,7 @@ def _finite_float(value):
 def tensor_stats(tensor):
     value = tensor.detach()
     # Hooks must not allocate a full-volume FP64 feature map merely to log it.
-    # Slice the largest spatial/channel dimension to cap reduction workspaces.
+    # Reduce flat chunks of at most one million elements to cap workspaces.
     flat = value.reshape(-1)
     nonfinite, maximum, squared_l2 = 0, 0.0, 0.0
     for chunk in flat.split(1_000_000):
@@ -65,13 +65,18 @@ def tensor_stats(tensor):
     }
 
 
-def gradient_difference(actual, reference, *, relative=0.05, absolute=1e-7, cosine_minimum=0.999):
+def gradient_difference(actual, reference, *, relative=None, absolute=None, cosine_minimum=None):
     """Report all errors; the mixed absolute/relative test is safe near zero."""
+    defaults = COMPARISON_TOLERANCES["mixed_precision_gradient"]
+    relative = defaults["relative"] if relative is None else relative
+    absolute = defaults["absolute"] if absolute is None else absolute
+    cosine_minimum = defaults["cosine_minimum"] if cosine_minimum is None else cosine_minimum
+    tolerances = {"relative": relative, "absolute": absolute, "cosine_minimum": cosine_minimum}
     actual, reference = actual.detach().double().cpu(), reference.detach().double().cpu()
     if actual.shape != reference.shape:
         raise ValueError("gradient comparison shape mismatch")
     if not bool(torch.isfinite(actual).all() and torch.isfinite(reference).all()):
-        return {"status": "NONFINITE", "within_heuristic_tolerance": False}
+        return {"status": "NONFINITE", "within_heuristic_tolerance": False, "tolerances": tolerances}
     difference = actual - reference
     error, norm = float(difference.norm()), float(reference.norm())
     observed_norm = float(actual.norm())
@@ -81,6 +86,7 @@ def gradient_difference(actual, reference, *, relative=0.05, absolute=1e-7, cosi
     close = error <= absolute + relative * norm
     return {
         "status": "FINITE",
+        "tolerances": tolerances,
         "reference_l2": norm,
         "actual_l2": observed_norm,
         "absolute_l2": error,
@@ -149,6 +155,7 @@ def centered_ncc_reference(first, second, window):
 
 
 def audit_ncc_crop(first, second, window, *, device="cpu"):
+    tolerances = COMPARISON_TOLERANCES["ncc_crop"]
     first = first.detach().to(device=device, dtype=torch.float32).clone().requires_grad_()
     second = second.detach().to(device=device, dtype=torch.float32).clone().requires_grad_()
     actual = ControllerNCC(win=window)(first, second)
@@ -158,13 +165,16 @@ def audit_ncc_crop(first, second, window, *, device="cpu"):
     actual_gradients = torch.autograd.grad(actual, (first, second))
     expected_gradients = torch.autograd.grad(expected, (reference_first, reference_second))
     comparisons = [
-        gradient_difference(a, r, relative=2e-4, absolute=1e-7, cosine_minimum=0.0)
+        gradient_difference(a, r, **tolerances["gradient"])
         for a, r in zip(actual_gradients, expected_gradients, strict=True)
     ]
     value_error = abs(float(actual.detach()) - float(expected.detach()))
-    passed = value_error <= 2e-6 and all(item["within_heuristic_tolerance"] for item in comparisons)
+    passed = value_error <= tolerances["value_absolute"] and all(
+        item["within_heuristic_tolerance"] for item in comparisons
+    )
     return {
         "status": "PASS" if passed else "FAIL",
+        "tolerances": copy.deepcopy(tolerances),
         "production_device": str(device),
         "shape": list(first.shape),
         "production_value": _finite_float(actual.detach()),
@@ -299,14 +309,6 @@ class GradientTrace:
             handle.remove()
 
 
-def _error_status(exc):
-    if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
-        return "OOM"
-    if isinstance(exc, FloatingPointError):
-        return "MATH_ERROR"
-    return "ERROR"
-
-
 def _run_probe(step, inputs, *, fp32, scale):
     step.optimizer.zero_grad(set_to_none=True)
     result = {"mode": "fp32_strict" if fp32 else "fp16", "scale": scale}
@@ -387,10 +389,14 @@ def _component_audit(step, inputs, deltas):
             }
             for target, gradient in zip(weighted, gradients, strict=True):
                 target.add_(gradient, alpha=weight)
-        comparisons = [gradient_difference(a, b, relative=2e-4) for a, b in zip(weighted, total_gradients, strict=True)]
+        comparisons = [
+            gradient_difference(a, b, **COMPARISON_TOLERANCES["component_gradient_sum"])
+            for a, b in zip(weighted, total_gradients, strict=True)
+        ]
     finite = all(stats["nonfinite"] == 0 for term in terms.values() for stats in term["delta_gradients"])
     return {
         "status": "PASS" if finite and all(item["within_heuristic_tolerance"] for item in comparisons) else "FAIL",
+        "tolerances": copy.deepcopy(COMPARISON_TOLERANCES["component_gradient_sum"]),
         "terms": terms,
         "weighted_gradient_sum_vs_total": comparisons,
         "scope": "component localization and gradient linearity on identical FP32 deltas; not an independent derivative oracle for every operator",
@@ -423,17 +429,18 @@ def _compare_named(actual, reference):
     return gradient_difference(
         torch.cat([actual[name].flatten() for name in sorted(actual)]),
         torch.cat([reference[name].flatten() for name in sorted(reference)]),
+        **COMPARISON_TOLERANCES["mixed_precision_gradient"],
     )
 
 
 def _ncc_audit_outcome(cases, captured_calls, reference_status):
-    """Missing evidence is an incomplete audit, never a numerical mismatch."""
-    errors = [case["status"] for case in cases if case["status"] not in {"PASS", "FAIL"}]
+    """Preserve measured mismatches and operator guards despite missing evidence."""
+    errors = [case["status"] for case in cases if case["status"] not in {"PASS", "FAIL", "MATH_ERROR"}]
     if reference_status in {"OOM", "ERROR", "MATH_ERROR"}:
         errors.append(reference_status)
     if captured_calls != 2:
         errors.append("INCOMPLETE")
-    if any(case["status"] == "FAIL" for case in cases):
+    if any(case["status"] in {"FAIL", "MATH_ERROR"} for case in cases):
         # A measured mismatch remains evidence even when another crop is absent.
         status = "FAIL"
     else:
@@ -469,7 +476,7 @@ def compare_pair(step, inputs, *, save=None):
         "probes": [],
         "ncc_contract": controller_ncc_contract(),
         "initial_model_sha256": model_hash,
-        "comparison_tolerances": COMPARISON_TOLERANCES.copy(),
+        "comparison_tolerances": copy.deepcopy(COMPARISON_TOLERANCES),
         "ncc_audit": {"status": "PENDING"},
         "component_gradient_audit": {"status": "PENDING"},
     }
@@ -487,7 +494,9 @@ def compare_pair(step, inputs, *, save=None):
             probe["parameter_gradient_comparison"] = _compare_named(gradients, reference_gradients)
             probe["requested_delta_gradient_comparison"] = _compare_named(delta_gradients, reference_delta_gradients)
             probe["requested_delta_gradient_comparison_by_direction"] = {
-                name: gradient_difference(value, reference_delta_gradients[name])
+                name: gradient_difference(
+                    value, reference_delta_gradients[name], **COMPARISON_TOLERANCES["mixed_precision_gradient"]
+                )
                 for name, value in delta_gradients.items()
                 if name in reference_delta_gradients
             }

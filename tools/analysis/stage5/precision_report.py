@@ -15,12 +15,9 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-WORKER_SCHEMA = "ctcf-stage5-precision-diagnostic-v1"
-SOURCE_RUN = "S5_DEVELOPMENT_20260907T202438Z_ffd3090f6129"
-SOURCE_HEAD = "ffd3090f6129a48960d849ac345d2fc981dec063"
-JOBS = ("F0", "F2V", "F2P", "coverage")
-VARIANTS = ("F0", "F2V", "F2S", "F2P", "F4P", "F24P", "A2P", "A24P")
-PROBE_SCALES = (65536, 32768, 8192, 1024, 1)
+from tools.analysis.stage5 import precision_contract as contract
+from tools.analysis.stage5.precision_contract import JOBS, PROBE_SCALES, SOURCE_HEAD, SOURCE_RUN, WORKER_SCHEMA
+
 COMPACT_EXTENSIONS = frozenset({".json", ".jsonl", ".log", ".txt", ".tsv", ".csv", ".md", ".sh"})
 MAX_COMPACT_FILE_BYTES = 64 * 1024 * 1024
 
@@ -62,7 +59,7 @@ def _benchmark_summary(record: dict) -> dict | None:
         if (
             not isinstance(timings, list)
             or type(count) is not int
-            or count < 3
+            or count < contract.BENCHMARK_REPEATS
             or len(timings) != count
             or not all(_positive_number(value) for value in timings)
             or not _positive_number(memory)
@@ -77,11 +74,53 @@ def _benchmark_summary(record: dict) -> dict | None:
             "peak_allocated_bytes": memory,
             "gradient_status": gradient_status,
         }
-    modes["fp32_to_fp16_time_ratio"] = (
+        compute = values.get("compute_seconds")
+        if compute is not None:
+            if not isinstance(compute, list) or len(compute) != count or not all(_positive_number(v) for v in compute):
+                return None
+            modes[mode]["median_compute_seconds"] = statistics.median(compute)
+        if record.get("memory_kind") is not None:
+            for key in ("mode_peak_allocated_bytes", "mode_start_allocated_bytes", "mode_incremental_peak_bytes"):
+                series = values.get(key)
+                if (
+                    not isinstance(series, list)
+                    or len(series) != count
+                    or any(type(v) is not int or v < 0 for v in series)
+                ):
+                    return None
+                modes[mode][key] = max(series)
+    modes["fp32_to_fp16_full_step_time_ratio"] = (
         modes["fp32_strict"]["median_full_step_seconds"] / modes["fp16"]["median_full_step_seconds"]
     )
-    modes["fp32_to_fp16_memory_ratio"] = (
+    modes["fp32_to_fp16_full_step_peak_ratio"] = (
         modes["fp32_strict"]["peak_allocated_bytes"] / modes["fp16"]["peak_allocated_bytes"]
+    )
+    modes["timing_kind"] = record.get("timing_kind", "SHARED_PREPARATION_PLUS_MEASURED_MODE_STEP")
+    modes["memory_kind"] = record.get("memory_kind", "LEGACY_FULL_STEP_MAX_INCLUDING_SHARED_PREPARATION")
+    modes["memory_breakdown_status"] = "RECORDED" if record.get("memory_kind") else "NOT_RECORDED"
+    for key, ratio_key in (
+        ("median_compute_seconds", "fp32_to_fp16_compute_time_ratio"),
+        ("mode_peak_allocated_bytes", "fp32_to_fp16_mode_peak_ratio"),
+        ("mode_incremental_peak_bytes", "fp32_to_fp16_incremental_peak_ratio"),
+    ):
+        first, second = modes["fp16"].get(key), modes["fp32_strict"].get(key)
+        modes[ratio_key] = second / first if first is not None and first > 0 and second is not None else None
+    if record.get("memory_kind"):
+        count = record["fp16"]["completed_steps"]
+        preparation = record.get("preparation_seconds", [])
+        peak = record.get("preparation_peak_allocated_bytes", [])
+        if (
+            not isinstance(preparation, list)
+            or not isinstance(peak, list)
+            or len(preparation) != count
+            or len(peak) != count
+            or not all(_positive_number(v) for v in [*preparation, *peak])
+        ):
+            return None
+        modes["preparation"] = {"median_seconds": statistics.median(preparation), "peak_allocated_bytes": max(peak)}
+    modes["interpretation"] = (
+        "Full-step cost includes shared U0/feature preparation. A full-step memory ratio of 1 does not imply equal controller memory. "
+        "Mode peaks include live inputs/U0; incremental peaks subtract allocations live at mode entry. Allocated bytes are not reserved/device-wide memory."
     )
     return modes
 
@@ -91,9 +130,9 @@ def _coverage_errors(report: dict) -> list[str]:
     if not isinstance(coverage, dict):
         return ["coverage: invalid coverage object"]
     cases = coverage.get("cases", [])
-    if coverage.get("expected_cases") != 24 or not isinstance(cases, list):
+    expected = contract.coverage_cases()
+    if coverage.get("expected_cases") != len(expected) or not isinstance(cases, list):
         return ["coverage: invalid expected case matrix"]
-    expected = {(seed, variant) for seed in range(3) for variant in VARIANTS}
     observed = []
     errors = []
     for case in cases:
@@ -105,8 +144,8 @@ def _coverage_errors(report: dict) -> list[str]:
             errors.append("coverage: invalid seed or variant")
             continue
         observed.append((seed, variant))
-        if not _completed_updates(case, 8):
-            errors.append(f"coverage: {seed}/{variant} did not complete eight FP32 updates")
+        if not _completed_updates(case, contract.COVERAGE_UPDATES):
+            errors.append(f"coverage: {seed}/{variant} did not complete {contract.COVERAGE_UPDATES} FP32 updates")
     if len(observed) != len(expected) or set(observed) != expected:
         errors.append("coverage: missing, duplicate, or unexpected seed/variant cases")
     return errors
@@ -145,6 +184,8 @@ def aggregate_reports(output_root: Path, *, expected_git_head: str, source_run: 
         for key, value in expected.items():
             if report.get(key) != value or type(report.get(key)) is not type(value):
                 errors.append(f"{job}: invalid {key}")
+        if "workload_contract" in report and report["workload_contract"] != contract.workload_contract():
+            errors.append(f"{job}: workload contract differs from this diagnostic revision")
     invalid_provenance = bool(errors)
     for job, report in reports.items():
         if report.get("status") != "DIAGNOSTIC_COMPLETE":
@@ -223,8 +264,8 @@ def aggregate_reports(output_root: Path, *, expected_git_head: str, source_run: 
         elif report.get("failure_reproduced") is True and replay["status"] != "FAILURE_REPRODUCED":
             errors.append(f"{job}: contradictory replay verdict")
         trajectory = report.get("fp32_trajectory", {})
-        if not isinstance(trajectory, dict) or not _completed_updates(trajectory, 294):
-            errors.append(f"{job}: FP32 trajectory did not complete 294 updates")
+        if not isinstance(trajectory, dict) or not _completed_updates(trajectory, contract.fp32_updates()):
+            errors.append(f"{job}: FP32 trajectory did not complete {contract.fp32_updates()} updates")
         if isinstance(trajectory, dict):
             failure = trajectory.get("failure", {})
             if not isinstance(failure, dict):
@@ -285,6 +326,7 @@ def aggregate_reports(output_root: Path, *, expected_git_head: str, source_run: 
         "diagnostic_git_head": expected_git_head,
         "source_run": source_run,
         "source_git_head": SOURCE_HEAD,
+        "workload_contract": contract.workload_contract(),
         "runner_exit_code": runner_exit_code,
         "errors": errors,
         "observed_findings": findings,

@@ -14,6 +14,7 @@ from experiments.stage5 import runtime
 from experiments.stage5.checkpoints import capture_rng_state
 from models.CTCF.controller import STAGE5_VARIANTS
 from tools.analysis import diagnose_stage5_precision as diagnostic
+from tools.analysis.stage5 import precision_contract as contract, precision_probes as probes
 
 
 def small_step():
@@ -34,6 +35,19 @@ def small_step():
 
 
 class PrecisionUpdateTests(unittest.TestCase):
+    def test_all_diagnostic_paths_classify_backend_allocation_failures_consistently(self):
+        errors = (
+            torch.cuda.OutOfMemoryError(),
+            RuntimeError("CUDA out of memory"),
+            RuntimeError("cuDNN error: CUDNN_STATUS_ALLOC_FAILED"),
+            RuntimeError("CUBLAS_STATUS_ALLOC_FAILED when calling cublasCreate"),
+        )
+        for error in errors:
+            with self.subTest(error=repr(error)):
+                self.assertEqual(diagnostic._failure(error, stage="fp32_update")["kind"], "OOM")
+                self.assertEqual(probes._error_status(error), "OOM")
+        self.assertEqual(diagnostic._failure(RuntimeError("bad dimensions"), stage="worker")["kind"], "ERROR")
+
     def test_rejected_scaled_gradient_never_updates_optimizer_or_scaler(self):
         step = small_step()
         before = diagnostic.training_snapshot(step)
@@ -88,6 +102,29 @@ class PrecisionUpdateTests(unittest.TestCase):
 
 
 class CoverageTests(unittest.TestCase):
+    def test_worker_trajectory_length_uses_shared_epoch_contract(self):
+        pairs = [{"subject_a": "a", "subject_b": "b"}, {"subject_a": "c", "subject_b": "d"}]
+        report = {}
+        with (
+            mock.patch.object(contract, "FP32_EPOCHS", 3),
+            mock.patch.object(contract, "TRAINING_SUBJECTS", 4),
+            mock.patch.object(diagnostic, "prepare_step", return_value=small_step()),
+            mock.patch.object(runtime, "controller_epoch_pairs", return_value=pairs),
+            mock.patch.object(runtime, "_prepare_controller_pair", return_value=None),
+            mock.patch.object(diagnostic, "advance_pair", return_value={}) as advance,
+            mock.patch.object(diagnostic, "_sync"),
+            mock.patch.object(torch.cuda, "reset_peak_memory_stats"),
+            mock.patch.object(torch.cuda, "max_memory_allocated", return_value=1),
+            mock.patch.object(torch.cuda, "empty_cache"),
+        ):
+            diagnostic.run_trajectory(
+                SimpleNamespace(job="F0"), report, SimpleNamespace(subjects=("a", "b", "c", "d")), lambda: None
+            )
+        self.assertEqual(advance.call_count, 6)
+        self.assertEqual(report["fp32_trajectory"]["expected_updates"], 6)
+        self.assertEqual(report["fp32_trajectory"]["completed_updates"], 6)
+        self.assertNotIn("current", report["fp32_trajectory"])
+
     def test_all_variants_and_seeds_start_from_same_per_seed_initial_state(self):
         starts = []
         subjects = tuple(str(index) for index in range(16))

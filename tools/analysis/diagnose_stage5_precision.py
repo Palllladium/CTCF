@@ -30,23 +30,18 @@ from experiments.stage5.checkpoints import (
     restore_rng_state,
 )
 from experiments.stage5.config import ControllerTrainingConfig, U0TrainingConfig, build_stage5_controller
-from models.CTCF.controller import STAGE5_VARIANTS
 from tools.analysis.diagnose_stage5_amp import require_readonly_checkpoint
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.run_stage5 import assert_clean_exact_git
+from tools.analysis.stage5 import precision_contract as contract
 from tools.analysis.stage5.artifacts import load_canonical_json
 from tools.analysis.stage5.contracts import canonical_sha256, validate_protocol_contract
+from tools.analysis.stage5.precision_contract import JOBS, SOURCE_HEAD, SOURCE_RUN, error_status
 from tools.analysis.stage5.precision_probes import compare_pair, precision_context
 
-SOURCE_RUN = "S5_DEVELOPMENT_20260907T202438Z_ffd3090f6129"
-SOURCE_HEAD = "ffd3090f6129a48960d849ac345d2fc981dec063"
 SOURCE_PROTOCOL_SHA = "77956f111bc8410b7817b732b7fd2afdfe200ab4060bb9d8ec4fd64334ec6de8"
 SOURCE_MANIFEST = "A_20260907T203312Z_2417900"
 SOURCE_MANIFEST_SHA = "ac92165be46a8c17f3460e7631cf0b3794fef28e1e1c46ae6e494fe3479f76ec"
-FP32_EPOCHS = 2
-COVERAGE_UPDATES = 8
-BENCHMARK_REPEATS = 3
-JOBS = ("F0", "F2V", "F2P", "coverage")
 
 
 class NonfiniteGradientError(FloatingPointError):
@@ -83,12 +78,8 @@ def restore_snapshot(step, state):
 
 
 def _failure(exc, *, stage):
-    if isinstance(exc, torch.cuda.OutOfMemoryError):
-        kind = "OOM"
-    elif isinstance(exc, FloatingPointError):
-        kind = "NUMERICAL"
-    else:
-        kind = "ERROR"
+    status = error_status(exc)
+    kind = "NUMERICAL" if status == "MATH_ERROR" else status
     return {
         "kind": kind,
         "stage": stage,
@@ -159,8 +150,8 @@ class Sources:
             raise RuntimeError("Image-only cache belongs to a different data contract")
         self.remember(args.data_contract)
         self.subjects = runtime._training_subjects(self.store)
-        if len(self.subjects) != 294:
-            raise RuntimeError("Expected exactly the frozen 294 training subjects")
+        if len(self.subjects) != contract.TRAINING_SUBJECTS:
+            raise RuntimeError(f"Expected exactly the frozen {contract.TRAINING_SUBJECTS} training subjects")
         report.update(
             protocol_sha256=SOURCE_PROTOCOL_SHA,
             data_contract_sha256=self.store.runtime.contract_sha256,
@@ -381,6 +372,7 @@ def replay_failure(args, report, sources, save):
             del inputs
     else:
         replay["status"] = "NOT_REPRODUCED"
+    replay["last_pair"] = replay.pop("current")
     save()
     if last_inputs is None:
         raise RuntimeError("Replay produced no prepared inputs to compare")
@@ -401,15 +393,15 @@ def run_trajectory(args, report, sources, save):
     record = report["fp32_trajectory"] = {
         "status": "RUNNING",
         "initialization": "COMMON_INITIAL_CONTROLLER_FROM_ZERO",
-        "epochs": FP32_EPOCHS,
-        "expected_updates": FP32_EPOCHS * len(sources.subjects) // 2,
+        "epochs": contract.FP32_EPOCHS,
+        "expected_updates": contract.fp32_updates(),
         "completed_updates": 0,
         "metrics": [],
         "full_step_seconds": [],
         "peak_allocated_bytes": 0,
     }
     failed = False
-    for epoch in range(FP32_EPOCHS):
+    for epoch in range(contract.FP32_EPOCHS):
         pairs = runtime.controller_epoch_pairs(sources.subjects, seed=0, epoch=epoch)
         for index, pair in enumerate(pairs):
             context = {"variant": args.job, "seed": 0, "epoch": epoch + 1, "pair_index": index + 1, "pair": pair}
@@ -451,6 +443,7 @@ def run_trajectory(args, report, sources, save):
             break
     if not failed:
         record["status"] = "COMPLETE"
+    record["last_pair"] = record.pop("current")
     save()
     del step
     gc.collect()
@@ -466,12 +459,18 @@ def benchmark(args, report, sources, save):
         "paired_inputs": True,
         "timing_kind": "SHARED_PREPARATION_PLUS_MEASURED_MODE_STEP",
         "warmup_iterations": 1,
-        "repeats": BENCHMARK_REPEATS,
+        "repeats": contract.BENCHMARK_REPEATS,
+        "memory_kind": "PHASE_PEAKS_AND_INCREMENT_ABOVE_LIVE_MODE_INPUTS",
+        "preparation_seconds": [],
+        "preparation_peak_allocated_bytes": [],
         "fp16": {
             "completed_steps": 0,
             "full_step_seconds": [],
             "compute_seconds": [],
             "peak_allocated_bytes": 0,
+            "mode_peak_allocated_bytes": [],
+            "mode_start_allocated_bytes": [],
+            "mode_incremental_peak_bytes": [],
             "gradient_status": [],
         },
         "fp32_strict": {
@@ -479,10 +478,13 @@ def benchmark(args, report, sources, save):
             "full_step_seconds": [],
             "compute_seconds": [],
             "peak_allocated_bytes": 0,
+            "mode_peak_allocated_bytes": [],
+            "mode_start_allocated_bytes": [],
+            "mode_incremental_peak_bytes": [],
             "gradient_status": [],
         },
     }
-    for iteration in range(BENCHMARK_REPEATS + 1):
+    for iteration in range(contract.BENCHMARK_REPEATS + 1):
         restore_snapshot(step, initial)
         _sync(step.device)
         torch.cuda.reset_peak_memory_stats(step.device)
@@ -491,6 +493,9 @@ def benchmark(args, report, sources, save):
         _sync(step.device)
         preparation_seconds = time.perf_counter() - started
         preparation_peak = torch.cuda.max_memory_allocated(step.device)
+        if iteration:
+            record["preparation_seconds"].append(preparation_seconds)
+            record["preparation_peak_allocated_bytes"].append(preparation_peak)
         prepared_rng = capture_rng_state()
         # Alternate order to reduce systematic warm-cache / contention bias.
         modes = (False, True) if iteration % 2 == 0 else (True, False)
@@ -500,6 +505,7 @@ def benchmark(args, report, sources, save):
             restore_rng_state(prepared_rng)
             _sync(step.device)
             torch.cuda.reset_peak_memory_stats(step.device)
+            mode_start_bytes = torch.cuda.memory_allocated(step.device)
             started = time.perf_counter()
             status = "FINITE"
             try:
@@ -515,8 +521,12 @@ def benchmark(args, report, sources, save):
                 measured["compute_seconds"].append(elapsed)
                 measured["gradient_status"].append(status)
                 measured["completed_steps"] += 1
+                mode_peak_bytes = torch.cuda.max_memory_allocated(step.device)
+                measured["mode_peak_allocated_bytes"].append(mode_peak_bytes)
+                measured["mode_start_allocated_bytes"].append(mode_start_bytes)
+                measured["mode_incremental_peak_bytes"].append(max(0, mode_peak_bytes - mode_start_bytes))
                 measured["peak_allocated_bytes"] = max(
-                    measured["peak_allocated_bytes"], preparation_peak, torch.cuda.max_memory_allocated(step.device)
+                    measured["peak_allocated_bytes"], preparation_peak, mode_peak_bytes
                 )
         del inputs
         save()
@@ -531,20 +541,24 @@ def benchmark(args, report, sources, save):
 
 
 def run_coverage(args, report, sources, save):
-    coverage = report["coverage"] = {"expected_cases": 24, "expected_updates_per_case": COVERAGE_UPDATES, "cases": []}
-    for seed in (0, 1, 2):
+    coverage = report["coverage"] = {
+        "expected_cases": len(contract.coverage_cases()),
+        "expected_updates_per_case": contract.COVERAGE_UPDATES,
+        "cases": [],
+    }
+    for seed in contract.SEEDS:
         # Reuse the immutable U0 model for the seed; reset every controller/optimizer/RNG.
         step = prepare_step(sources, variant="F0", seed=seed)
         initial = training_snapshot(step)
-        pairs = runtime.controller_epoch_pairs(sources.subjects, seed=seed, epoch=0)[:COVERAGE_UPDATES]
-        for variant in STAGE5_VARIANTS:
+        pairs = runtime.controller_epoch_pairs(sources.subjects, seed=seed, epoch=0)[: contract.COVERAGE_UPDATES]
+        for variant in contract.VARIANTS:
             restore_snapshot(step, initial)
             step = replace(step, variant=variant)
             record = {
                 "seed": seed,
                 "variant": variant,
                 "status": "RUNNING",
-                "expected_updates": COVERAGE_UPDATES,
+                "expected_updates": contract.COVERAGE_UPDATES,
                 "completed_updates": 0,
                 "metrics": [],
             }
@@ -577,8 +591,9 @@ def run_coverage(args, report, sources, save):
                 record["metrics"].append({"pair_index": index + 1, "pair": pair, "values": logs})
                 record["completed_updates"] += 1
                 del inputs
-            if record["completed_updates"] == COVERAGE_UPDATES:
+            if record["completed_updates"] == contract.COVERAGE_UPDATES:
                 record["status"] = "COMPLETE"
+            record["last_pair"] = record.pop("current_pair")
             print(f"[PRECISION COVERAGE] seed={seed} variant={variant} {record['status']}", flush=True)
             save()
             step.optimizer.zero_grad(set_to_none=True)
@@ -617,7 +632,7 @@ def main():
     with args.output.open("x", encoding="utf-8"):
         pass
     report = {
-        "schema": "ctcf-stage5-precision-diagnostic-v1",
+        "schema": contract.WORKER_SCHEMA,
         "job": args.job,
         "source_run": SOURCE_RUN,
         "source_git_head": SOURCE_HEAD,
@@ -631,7 +646,8 @@ def main():
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "python": platform.python_version(),
-        "limits": {"fp32_epochs": FP32_EPOCHS, "coverage_updates": COVERAGE_UPDATES},
+        "limits": {"fp32_epochs": contract.FP32_EPOCHS, "coverage_updates": contract.COVERAGE_UPDATES},
+        "workload_contract": contract.workload_contract(),
         "production_training_validated": False,
     }
 
@@ -674,6 +690,12 @@ def main():
         report.update(status="EXCEPTION", failure=_failure(exc, stage="worker"), traceback=traceback.format_exc())
         exit_code = 1
     finally:
+        records = [report.get(key, {}) for key in ("replay", "fp32_trajectory")]
+        records.extend(report.get("coverage", {}).get("cases", []))
+        for record in records:
+            for key in ("current", "current_pair"):
+                if key in record:
+                    record["last_pair"] = record.pop(key)
         if sources is not None:
             try:
                 sources.verify_unchanged()

@@ -12,8 +12,9 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
-from tools.analysis.stage5 import precision_report as report
+from tools.analysis.stage5 import precision_contract as contract, precision_report as report
 
 HEAD = "a" * 40
 
@@ -33,11 +34,17 @@ def complete_worker(job: str) -> dict:
     }
     if job == "coverage":
         value["coverage"] = {
-            "expected_cases": 24,
+            "expected_cases": len(contract.coverage_cases()),
             "cases": [
-                {"seed": seed, "variant": variant, "status": "COMPLETE", "expected_updates": 8, "completed_updates": 8}
-                for seed in range(3)
-                for variant in report.VARIANTS
+                {
+                    "seed": seed,
+                    "variant": variant,
+                    "status": "COMPLETE",
+                    "expected_updates": contract.COVERAGE_UPDATES,
+                    "completed_updates": contract.COVERAGE_UPDATES,
+                }
+                for seed in contract.SEEDS
+                for variant in contract.VARIANTS
             ],
         }
         return value
@@ -62,7 +69,11 @@ def complete_worker(job: str) -> dict:
                 ],
             ],
         },
-        fp32_trajectory={"status": "COMPLETE", "expected_updates": 294, "completed_updates": 294},
+        fp32_trajectory={
+            "status": "COMPLETE",
+            "expected_updates": contract.fp32_updates(),
+            "completed_updates": contract.fp32_updates(),
+        },
         benchmark={
             "status": "COMPLETE",
             "paired_inputs": True,
@@ -104,7 +115,55 @@ class PrecisionReportTest(unittest.TestCase):
         self.assertFalse(result["production_training_validated"])
         self.assertFalse(result["development_evaluation_authorized"])
         self.assertEqual(result["cost_acceptable"], "USER_DECISION_REQUIRED")
-        self.assertAlmostEqual(result["benchmarks"]["F0"]["fp32_to_fp16_time_ratio"], 11 / 9)
+        self.assertAlmostEqual(result["benchmarks"]["F0"]["fp32_to_fp16_full_step_time_ratio"], 11 / 9)
+
+    def test_one_workload_owner_drives_changed_epochs_and_coverage(self):
+        with (
+            mock.patch.object(contract, "FP32_EPOCHS", 3),
+            mock.patch.object(contract, "COVERAGE_UPDATES", 5),
+            mock.patch.object(contract, "SEEDS", (0, 1)),
+        ):
+            self.workers = {job: complete_worker(job) for job in report.JOBS}
+            result = self.aggregate()
+            self.assertEqual(result["branch"], "FP32_CANDIDATE_COST_REVIEW")
+            self.assertEqual(result["workload_contract"]["fp32_updates"], 441)
+            self.assertEqual(result["workload_contract"]["coverage_cases"], 16)
+            self.workers["F0"]["fp32_trajectory"]["completed_updates"] = 294
+            self.assertEqual(self.aggregate()["branch"], "INCOMPLETE")
+
+    def test_explicit_workload_drift_is_reported(self):
+        self.workers["F0"]["workload_contract"] = {**contract.workload_contract(), "fp32_epochs": 99}
+        result = self.aggregate()
+        self.assertEqual(result["branch"], "INCOMPLETE")
+        self.assertTrue(any("workload contract" in error for error in result["errors"]))
+
+    def test_shared_preparation_does_not_hide_compute_and_incremental_memory(self):
+        benchmark = self.workers["F0"]["benchmark"]
+        benchmark.update(
+            memory_kind="PHASE_PEAKS_AND_INCREMENT_ABOVE_LIVE_MODE_INPUTS",
+            preparation_seconds=[10, 10, 10],
+            preparation_peak_allocated_bytes=[1000, 1000, 1000],
+        )
+        for mode, compute, peak in (("fp16", 1, 120), ("fp32_strict", 2, 220)):
+            benchmark[mode].update(
+                full_step_seconds=[10 + compute] * 3,
+                compute_seconds=[compute] * 3,
+                peak_allocated_bytes=1000,
+                mode_peak_allocated_bytes=[peak] * 3,
+                mode_start_allocated_bytes=[100] * 3,
+                mode_incremental_peak_bytes=[peak - 100] * 3,
+            )
+        result = self.aggregate()["benchmarks"]["F0"]
+        self.assertEqual(result["fp32_to_fp16_full_step_peak_ratio"], 1)
+        self.assertEqual(result["fp32_to_fp16_compute_time_ratio"], 2)
+        self.assertEqual(result["fp32_to_fp16_incremental_peak_ratio"], 6)
+        self.assertAlmostEqual(result["fp32_to_fp16_full_step_time_ratio"], 12 / 11)
+        self.assertEqual(result["preparation"]["peak_allocated_bytes"], 1000)
+
+    def test_legacy_memory_breakdown_is_unknown_and_not_fabricated(self):
+        result = self.aggregate()["benchmarks"]["F0"]
+        self.assertEqual(result["memory_breakdown_status"], "NOT_RECORDED")
+        self.assertIsNone(result["fp32_to_fp16_incremental_peak_ratio"])
 
     def test_missing_worker_never_yields_candidate(self):
         del self.workers["F2P"]

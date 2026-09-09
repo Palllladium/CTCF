@@ -3,11 +3,8 @@
 set -Eeuo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 cd "$REPO_ROOT"
-readonly PYBIN="${PYBIN:-/data/mooncake/P/envs/ctcf/bin/python}"
+readonly PYBIN="${PYBIN:-python}"
 readonly EXPECTED_GIT_HEAD="${EXPECTED_GIT_HEAD:?Set the diagnostic commit SHA}"
-readonly SOURCE_RUN="S5_DEVELOPMENT_20260907T202438Z_ffd3090f6129"
-readonly SOURCE_ROOT="results/stage5/$SOURCE_RUN"
-readonly CHECKPOINT_ROOT="results/stage5_heavy/$SOURCE_RUN/checkpoints"
 readonly DATA_CONTRACT="results/stage5_data/manifests/data_contract.json"
 readonly IMAGE_ROOT="results/stage5_data/image_only"
 readonly GPU_LIST="${GPU_LIST:-0,1,2,3}"
@@ -19,7 +16,18 @@ IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 [[ "$EXPECTED_GIT_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "[FAIL] Invalid expected SHA"; exit 2; }
 [[ "$(git rev-parse HEAD)" == "$EXPECTED_GIT_HEAD" ]] || { echo "[FAIL] Wrong HEAD"; exit 2; }
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || { echo "[FAIL] Dirty tree"; exit 2; }
-[[ ${#GPUS[@]} == 4 ]] || { echo "[FAIL] Exactly four distinct GPU indices required"; exit 2; }
+command -v "$PYBIN" >/dev/null || { echo "[FAIL] Python executable unavailable: $PYBIN"; exit 2; }
+contract_values="$("$PYBIN" -m tools.analysis.stage5.precision_contract --runner-values)" || {
+  echo "[FAIL] Cannot load diagnostic contract"; exit 2;
+}
+mapfile -t contract_lines <<< "$contract_values"
+readonly SOURCE_RUN="${contract_lines[0]}"
+jobs=("${contract_lines[@]:1}")
+[[ -n "$SOURCE_RUN" && ${#jobs[@]} -gt 0 && ${#GPUS[@]} == ${#jobs[@]} ]] || {
+  echo "[FAIL] One distinct GPU per diagnostic job is required"; exit 2;
+}
+readonly SOURCE_ROOT="results/stage5/$SOURCE_RUN"
+readonly CHECKPOINT_ROOT="results/stage5_heavy/$SOURCE_RUN/checkpoints"
 declare -A SEEN=()
 for gpu in "${GPUS[@]}"; do
   [[ "$gpu" =~ ^(0|[1-9][0-9]*)$ && -z "${SEEN[$gpu]:-}" ]] || {
@@ -27,7 +35,6 @@ for gpu in "${GPUS[@]}"; do
   }
   SEEN[$gpu]=1
 done
-[[ -x "$PYBIN" ]] || { echo "[FAIL] Python executable unavailable: $PYBIN"; exit 2; }
 command -v flock >/dev/null || { echo "[FAIL] flock is required"; exit 2; }
 # Opening read-only avoids modifying the source run's lock file.
 exec 9<"$SOURCE_ROOT/stage5.lock"
@@ -82,7 +89,6 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$OUTPUT/started_at.txt"
 printf 'PYBIN=%q GPU_LIST=%q EXPECTED_GIT_HEAD=%q bash tools/runners/train/stage5_precision_diagnostic.sh\n' \
   "$PYBIN" "$GPU_LIST" "$EXPECTED_GIT_HEAD" > "$OUTPUT/command.sh"
 nvidia-smi > "$OUTPUT/nvidia-smi.txt" 2>&1
-jobs=(F0 F2V F2P coverage)
 pids=()
 printf 'job\tgpu\tpid\n' > "$OUTPUT/jobs.tsv"
 for i in "${!jobs[@]}"; do

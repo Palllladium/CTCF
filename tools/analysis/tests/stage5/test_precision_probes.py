@@ -46,6 +46,44 @@ class IndependentNCCTest(unittest.TestCase):
         self.assertLess(result["value_absolute_error"], 2e-6)
         self.assertGreater(result["gradient_comparisons"][0]["relative_l2"], 0.09)
 
+        changed = copy.deepcopy(probes.COMPARISON_TOLERANCES["ncc_crop"])
+        changed["gradient"]["relative"] = 0.2
+        with (
+            mock.patch.dict(probes.COMPARISON_TOLERANCES, ncc_crop=changed),
+            mock.patch.object(_BoxSum, "backward", wrong_backward),
+        ):
+            relaxed = probes.audit_ncc_crop(first, second, (3, 3, 3))
+        self.assertEqual(relaxed["status"], "PASS")
+        self.assertEqual(relaxed["tolerances"], changed)
+        self.assertEqual(relaxed["gradient_comparisons"][0]["tolerances"], changed["gradient"])
+        changed["gradient"]["relative"] = 0.5
+        self.assertEqual(relaxed["tolerances"]["gradient"]["relative"], 0.2)
+
+    def test_ncc_value_tolerance_controls_audit_and_is_reported(self):
+        generator = torch.Generator().manual_seed(2309)
+        first = torch.randn(1, 1, 5, 5, 5, generator=generator)
+        second = torch.randn(first.shape, generator=generator)
+        original = ControllerNCC.forward
+
+        def biased_value(module, first, second):
+            return original(module, first, second) + 1e-5
+
+        with mock.patch.object(ControllerNCC, "forward", biased_value):
+            strict = probes.audit_ncc_crop(first, second, (3, 3, 3))
+            with mock.patch.dict(probes.COMPARISON_TOLERANCES["ncc_crop"], value_absolute=2e-5):
+                relaxed = probes.audit_ncc_crop(first, second, (3, 3, 3))
+        self.assertEqual(strict["status"], "FAIL")
+        self.assertEqual(relaxed["status"], "PASS")
+        self.assertEqual(relaxed["tolerances"]["value_absolute"], 2e-5)
+
+    def test_named_gradient_comparison_uses_current_mixed_tolerances(self):
+        first, second = {"weight": torch.tensor([1.1])}, {"weight": torch.ones(1)}
+        self.assertFalse(probes._compare_named(first, second)["within_heuristic_tolerance"])
+        with mock.patch.dict(probes.COMPARISON_TOLERANCES["mixed_precision_gradient"], relative=0.2):
+            result = probes._compare_named(first, second)
+        self.assertTrue(result["within_heuristic_tolerance"])
+        self.assertEqual(result["tolerances"]["relative"], 0.2)
+
     def test_explicit_reference_cannot_allocate_full_volume_windows(self):
         value = torch.zeros(1, 1, 32, 32, 32)
         with self.assertRaisesRegex(ValueError, "small crops"):
@@ -147,6 +185,34 @@ class IncompleteAuditTest(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertFalse(result["complete"])
 
+    def test_crop_math_guard_is_failure_even_with_finite_full_volume_probe(self):
+        def captured(capture):
+            value = self.inputs.psi_ab
+            capture.calls = 2
+            capture.crops = [({"direction_call": 1}, (value, value), (3, 3, 3))]
+            return capture
+
+        with (
+            mock.patch.object(probes, "_run_probe", side_effect=self._probe_result),
+            mock.patch.object(probes._NCCCapture, "__enter__", captured),
+            mock.patch.object(probes._NCCCapture, "__exit__", return_value=False),
+            mock.patch.object(ControllerNCC, "forward", side_effect=FloatingPointError("NCC outside valid range")),
+            mock.patch.object(probes, "_component_audit", return_value={"status": "PASS"}),
+        ):
+            result = probes.compare_pair(self.step, self.inputs)
+        self.assertEqual(result["probes"][0]["status"], "FINITE")
+        self.assertEqual(result["ncc_audit"]["status"], "FAIL")
+        self.assertTrue(result["ncc_audit"]["complete"])
+        self.assertTrue(all(case["status"] == "MATH_ERROR" for case in result["ncc_audit"]["cases"]))
+        self.assertEqual(result["status"], "COMPLETE")
+        snapshot = copy.deepcopy(result["comparison_tolerances"])
+        with mock.patch.dict(probes.COMPARISON_TOLERANCES["ncc_crop"]["gradient"], cosine_minimum=0.8):
+            self.assertEqual(result["comparison_tolerances"], snapshot)
+        partial = probes._ncc_audit_outcome([{"status": "MATH_ERROR"}, {"status": "OOM"}], 1, "FINITE")
+        self.assertEqual(partial["status"], "FAIL")
+        self.assertFalse(partial["complete"])
+        json.dumps(result, allow_nan=False)
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for actual controller probes")
 class ControllerProbeTest(unittest.TestCase):
@@ -202,6 +268,12 @@ class ControllerProbeTest(unittest.TestCase):
         self.assertEqual(result["probes"][0]["status"], "FINITE")
         self.assertEqual(result["ncc_audit"]["status"], "PASS")
         self.assertEqual(result["component_gradient_audit"]["status"], "PASS")
+        self.assertEqual(
+            result["component_gradient_audit"]["tolerances"],
+            result["comparison_tolerances"]["component_gradient_sum"],
+        )
+        for comparison in result["component_gradient_audit"]["weighted_gradient_sum_vs_total"]:
+            self.assertEqual(comparison["tolerances"], result["comparison_tolerances"]["component_gradient_sum"])
         self.assertTrue(all(result["state_preserved"].values()))
         events = result["probes"][1]["trace"]
         self.assertTrue(
@@ -235,6 +307,9 @@ class ControllerProbeTest(unittest.TestCase):
         original = F.interpolate
         for error, status in (
             (torch.OutOfMemoryError("synthetic OOM"), "OOM"),
+            (RuntimeError("CUDA out of memory"), "OOM"),
+            (RuntimeError("cuDNN error: CUDNN_STATUS_ALLOC_FAILED"), "OOM"),
+            (RuntimeError("CUDA error: CUBLAS_STATUS_ALLOC_FAILED"), "OOM"),
             (FloatingPointError("synthetic invalid NCC"), "MATH_ERROR"),
         ):
             with mock.patch.object(runtime, "_controller_pair_loss", side_effect=error):
