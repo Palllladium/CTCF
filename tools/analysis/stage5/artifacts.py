@@ -9,6 +9,7 @@ import torch
 
 from experiments.stage5.checkpoints import STAGE5_TRAINING_STATE_SCHEMA, state_dict_sha256
 from experiments.stage5.config import ControllerTrainingConfig, build_stage5_controller
+from experiments.stage5.precision import controller_precision_contract
 from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.search.pyramid import array_sha256
 from tools.analysis.search.transaction import load_flow_npz
@@ -91,6 +92,11 @@ def checkpoint_metadata(
     role = str(payload.get("role"))
     variant = str(payload.get("variant_id"))
     if role == "CONTROLLER":
+        if (
+            payload.get("controller_precision") != controller_precision_contract()
+            or payload.get("scaler_state") is not None
+        ):
+            raise RuntimeError("Stage5 training barrier requires strict FP32 controller checkpoints")
         parameter_count = sum(int(value.numel()) for value in state.values())
         reference_count = sum(
             parameter.numel() for parameter in build_stage5_controller(ControllerTrainingConfig()).parameters()

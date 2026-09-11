@@ -71,7 +71,7 @@ def build_training_state(
     training_contract_sha256: str,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.amp.GradScaler,
+    scaler: torch.amp.GradScaler | None,
     pair_schedule_sha256: str,
     metrics_sha256: str,
     base_checkpoint_sha256: str | None = None,
@@ -103,7 +103,7 @@ def build_training_state(
         "model_state": model_state,
         "model_state_sha256": state_dict_sha256(model_state),
         "optimizer_state": optimizer.state_dict(),
-        "scaler_state": scaler.state_dict(),
+        "scaler_state": scaler.state_dict() if scaler is not None else None,
         "rng_state": capture_rng_state(),
     }
 

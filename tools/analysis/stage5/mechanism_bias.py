@@ -242,7 +242,8 @@ def _probe(step, inputs, *, fp32, scale, disable_tf32):
     with strict_fp32(disable_tf32), _BoundaryTrace(step.controller, scale) as trace:
         record["backend_flags"] = backend_flags()
         try:
-            loss, logs = runtime._controller_pair_loss(step, inputs, diagnostic_fp32=fp32)
+            with torch.autocast(device_type=step.device.type, dtype=torch.float16, enabled=not fp32):
+                loss, logs = runtime._controller_pair_loss(step, inputs)
             record["metrics"] = {
                 key: float(value) if math.isfinite(float(value)) else None for key, value in logs.items()
             }

@@ -63,8 +63,6 @@ class ControllerTrainingConfig:
     free_residual_limit_voxels: float = 2.0
     width: int = 16
     loss: ControllerLossConfig = field(default_factory=ControllerLossConfig)
-    amp_initial_scale: float = STAGE5_AMP_INITIAL_SCALE
-    amp_growth_interval: int = STAGE5_AMP_GROWTH_INTERVAL
 
     def __post_init__(self) -> None:
         # ControllerLossConfig validates its own weights; re-checking them here would put
@@ -72,11 +70,22 @@ class ControllerTrainingConfig:
         endpoint = f"the frozen {STAGE5_CONTROLLER_FIXED_EPOCH}-epoch controller endpoint"
         if require_int(self.fixed_epoch, endpoint, error=ValueError) != STAGE5_CONTROLLER_FIXED_EPOCH:
             raise ValueError(f"Stage5 controllers must use the frozen {STAGE5_CONTROLLER_FIXED_EPOCH}-epoch endpoint")
-        for name in ("learning_rate", "weight_decay", "free_residual_limit_voxels", "amp_initial_scale"):
+        for name in ("learning_rate", "weight_decay", "free_residual_limit_voxels"):
             require_finite(getattr(self, name), f"Stage5 controller {name}", minimum=0.0, error=ValueError)
         if self.learning_rate <= 0.0 or self.free_residual_limit_voxels <= 0.0:
             raise ValueError("invalid Stage5 controller optimizer contract")
         require_int(self.width, "Stage5 controller width", minimum=4, error=ValueError)
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyControllerTrainingConfig(ControllerTrainingConfig):
+    """Frozen pre-FP32 configuration, exclusively for historical diagnostic replay."""
+
+    amp_initial_scale: float = STAGE5_AMP_INITIAL_SCALE
+    amp_growth_interval: int = STAGE5_AMP_GROWTH_INTERVAL
+
+    def __post_init__(self) -> None:
+        ControllerTrainingConfig.__post_init__(self)
         if self.amp_initial_scale != STAGE5_AMP_INITIAL_SCALE:
             raise ValueError("Stage5 controllers must use the frozen AMP initial scale")
         growth = require_int(
@@ -115,6 +124,7 @@ __all__ = [
     "STAGE5_SEEDS",
     "STAGE5_U0_FIXED_EPOCH",
     "ControllerTrainingConfig",
+    "LegacyControllerTrainingConfig",
     "U0TrainingConfig",
     "build_stage5_controller",
     "config_sha256",

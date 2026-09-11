@@ -18,7 +18,10 @@ import torch
 
 from experiments.stage5 import runtime
 from experiments.stage5.checkpoints import capture_rng_state, state_dict_sha256
-from experiments.stage5.config import ControllerTrainingConfig, build_stage5_controller
+from experiments.stage5.config import (
+    LegacyControllerTrainingConfig,
+    build_stage5_controller,
+)
 from tools.analysis.diagnose_stage5_precision import (
     Sources,
     _try_capture,
@@ -83,18 +86,20 @@ class CaptureSources:
             raise RuntimeError(f"Source changed while being read: {path}")
         return digest
 
-    def load_failure(self, job, *, device):
+    def load_failure(self, job, *, device, capture_root: Path | None = None):
         previous = self.workers[job]
         captures = previous.get("heavy_captures", [])
         if previous.get("failure_reproduced") is not True or len(captures) != 1:
             raise RuntimeError("Expected exactly one reviewed failure capture")
         capture = captures[0]
         expected_root = self.repo / "results/stage5_heavy" / contract.PRECISION_RUN / job / "historical_failure"
+        actual_root = expected_root if capture_root is None else capture_root.resolve() / job / "historical_failure"
         members = {}
         for record in capture["records"]:
             path = self.contained(self.repo, record["path"])
             if path.parent != expected_root.resolve() or path.name in members:
                 raise RuntimeError("Unexpected or duplicate captured tensor path")
+            path = self.contained(actual_root, path.name)
             if path.stat().st_size != record["bytes"] or self.remember(path) != record["sha256"]:
                 raise RuntimeError(f"Saved failure bytes differ: {path}")
             members[path.name] = path
@@ -102,7 +107,7 @@ class CaptureSources:
         expected.update(f"tensors_{direction}_{index}.pth" for direction in ("ab", "ba") for index in range(5))
         if set(members) != expected or capture.get("exact_prepared_inputs_saved") is not True:
             raise RuntimeError("Failure capture is incomplete")
-        manifest_path = expected_root / "manifest.json"
+        manifest_path = self.contained(actual_root, "manifest.json")
         self.remember(manifest_path)
         if json.loads(manifest_path.read_text()) != capture:
             raise RuntimeError("Failure manifest differs from reviewed compact record")
@@ -118,7 +123,7 @@ class CaptureSources:
         training = state["training_state"]
         if state_dict_sha256(training["model"]) != previous["comparison"]["initial_model_sha256"]:
             raise RuntimeError("Saved model differs from the reviewed same-state probe")
-        config = ControllerTrainingConfig()
+        config = LegacyControllerTrainingConfig()
         controller = build_stage5_controller(config).to(device).train()
         optimizer = torch.optim.AdamW(
             controller.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
@@ -186,7 +191,7 @@ def run_audits(step, inputs, report, save):
 
 
 class ReplayObserver:
-    """Observe production boundaries without changing its optimizer/scaler path."""
+    """Observe the historical AMP path without changing its optimizer/scaler."""
 
     def __init__(self, step):
         self.step = step
@@ -219,7 +224,7 @@ class ReplayObserver:
         if bad:
             self.capture_state()
         self.current["stage"] = "optimizer"
-        # Preserve the actual production behavior, including its fail-fast skip.
+        # Preserve the historical AMP behavior, including its fail-fast skip.
         return self.original_update(scaler, optimizer, phase=phase)
 
     def __enter__(self):
@@ -235,7 +240,7 @@ class ReplayObserver:
 
 
 def replay_f2p(args, sources, report, save):
-    """Run the production step, observing gradients before its strict scaler step."""
+    """Replay the historical AMP step, observing gradients before its scaler step."""
     attempts = report["f2p_replay"] = []
     for attempt in range(1, contract.F2P_ATTEMPTS + 1):
         step = prepare_step(sources, variant="F2P", seed=0)
@@ -263,9 +268,9 @@ def replay_f2p(args, sources, report, save):
                 )
                 save()
                 try:
-                    metrics = runtime._controller_pair_step(step, pair, 0)
+                    metrics = runtime._legacy_controller_pair_step(step, pair, 0)
                     if not current.get("gradient_observation"):
-                        raise RuntimeError("Production step returned without the required gradient observation")
+                        raise RuntimeError("Legacy AMP step returned without the required gradient observation")
                 except Exception as exc:
                     if error_status(exc) == "MATH_ERROR" and current.get("stage") == "forward_or_backward":
                         observer.capture_state()

@@ -52,9 +52,9 @@ class PrecisionUpdateTests(unittest.TestCase):
         step = small_step()
         before = diagnostic.training_snapshot(step)
 
-        def loss(_step, _inputs, *, diagnostic_fp32):
+        def loss(_step, _inputs):
             value = _step.controller(torch.ones(1, 1))
-            if not diagnostic_fp32:
+            if torch.is_autocast_enabled("cpu"):
                 value = value.half().float()
             return value.sum() * 2, {"loss": float(value.detach().sum() * 2)}
 

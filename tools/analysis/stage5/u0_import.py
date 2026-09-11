@@ -1,4 +1,4 @@
-"""Import original U0 endpoints across the bootstrap and controller-NCC hotfixes.
+"""Import completed U0 endpoints into the strict-FP32 controller protocol.
 
 The legacy ``git_head``/``protocol_sha256`` fields become the target *binding*.
 Actual training provenance stays in ``training_git_head`` and the authenticated
@@ -16,7 +16,12 @@ from typing import Any
 import torch
 
 from experiments.stage5.checkpoints import STAGE5_TRAINING_STATE_SCHEMA, atomic_torch_save, state_dict_sha256
-from experiments.stage5.config import STAGE5_SEEDS, ControllerTrainingConfig, U0TrainingConfig
+from experiments.stage5.config import (
+    STAGE5_SEEDS,
+    ControllerTrainingConfig,
+    LegacyControllerTrainingConfig,
+    U0TrainingConfig,
+)
 from experiments.stage5.runtime import _validate_runtime_checkpoint_metadata
 from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.stage5.contracts import CHECKPOINT_SELECTION_POLICY, validate_protocol_contract
@@ -31,10 +36,18 @@ from tools.analysis.stage5.primitives import (
     write_immutable_bytes,
     write_immutable_json,
 )
-from tools.analysis.stage5.protocol import bootstrap_parameters, controller_training_contract, u0_training_contract
+from tools.analysis.stage5.protocol import (
+    bootstrap_parameters,
+    controller_training_contract,
+    legacy_controller_training_contract,
+    u0_training_contract,
+)
 
 SOURCE_GIT_HEAD = "68df5b24104272fd137106fb51959907502db2a9"
-IMPORT_SCHEMA = "ctcf-stage5-completed-u0-import-v1"
+POST_NCC_SOURCE_GIT_HEAD = "ffd3090f6129a48960d849ac345d2fc981dec063"
+SOURCE_GIT_HEADS = (SOURCE_GIT_HEAD, POST_NCC_SOURCE_GIT_HEAD)
+IMPORT_SCHEMA = "ctcf-stage5-completed-u0-import-v2"
+LEGACY_IMPORT_SCHEMA = "ctcf-stage5-completed-u0-import-v1"
 OLD_REPAIR_ID = "CTCF_DIGITAL_THEN_TRILINEAR_COLLAR_REPAIR_V1"
 NEW_REPAIR_ID = "CTCF_DIGITAL_THEN_TRILINEAR_COLLAR_REPAIR_V2"
 _BINDING_FIELDS = frozenset({"git_head", "protocol_sha256", "training_git_head", "u0_import_lineage"})
@@ -72,8 +85,8 @@ def _validate_hotfix(
     source_controller: dict[str, Any],
     target_controller: dict[str, Any],
 ) -> None:
-    if source["git_head"] != SOURCE_GIT_HEAD or target["git_head"] == SOURCE_GIT_HEAD:
-        raise RuntimeError("Stage5 U0 import only supports the named historical revision into a new revision")
+    if source["git_head"] not in SOURCE_GIT_HEADS or target["git_head"] in SOURCE_GIT_HEADS:
+        raise RuntimeError("Stage5 U0 import only supports the named historical revisions into a new revision")
     parameters = bootstrap_parameters()
     if (
         parameters.get("repair_operator_id") != NEW_REPAIR_ID
@@ -87,23 +100,97 @@ def _validate_hotfix(
     # U0's training objective and state are deliberately outside this transition.
     with torch.random.fork_rng(devices=[]):
         expected_controller = controller_training_contract(ControllerTrainingConfig())
-    if (
-        expected_controller.get("schema") != "ctcf-stage5-controller-training-contract-v3"
-        or "objective_numerics" not in expected_controller
-        or target_controller != expected_controller
-    ):
-        raise RuntimeError("Stage5 U0 import target controller contract is not the exact NCC hotfix")
-    expected_controller["schema"] = "ctcf-stage5-controller-training-contract-v2"
-    del expected_controller["objective_numerics"]
-    if source_controller != expected_controller:
-        raise RuntimeError("Stage5 U0 import source controller contract is not the frozen historical V2 contract")
+        version = 2 if source["git_head"] == SOURCE_GIT_HEAD else 3
+        expected_legacy = legacy_controller_training_contract(LegacyControllerTrainingConfig(), version=version)
+    if target_controller != expected_controller:
+        raise RuntimeError("Stage5 U0 import target controller contract is not the exact strict FP32 contract")
+    if source_controller != expected_legacy:
+        raise RuntimeError("Stage5 U0 import source controller contract is not the frozen historical contract")
     expected_source = copy.deepcopy(target)
-    expected_source["git_head"] = SOURCE_GIT_HEAD
+    expected_source["git_head"] = source["git_head"]
     expected_source["controller_training_contract_sha256"] = source["controller_training_contract_sha256"]
-    expected_source["bootstrap"]["parameters"]["repair_operator_id"] = OLD_REPAIR_ID
-    del expected_source["bootstrap"]["parameters"]["repair_parameters"]["digital_residual_policy"]
+    if source["git_head"] == SOURCE_GIT_HEAD:
+        expected_source["bootstrap"]["parameters"]["repair_operator_id"] = OLD_REPAIR_ID
+        del expected_source["bootstrap"]["parameters"]["repair_parameters"]["digital_residual_policy"]
     if source != expected_source:
-        raise RuntimeError("Stage5 U0 import protocols differ beyond git_head and the exact bootstrap/NCC hotfixes")
+        raise RuntimeError("Stage5 U0 import protocols differ beyond git_head and the exact bootstrap/NCC/FP32 changes")
+
+
+def _load_source_import_manifest(source_path: Path, source: dict[str, Any]) -> dict[str, Any] | None:
+    if source["git_head"] == SOURCE_GIT_HEAD:
+        return None
+    path = _plain_path(source_path.parent.parent / "imports" / "u0_import.json")
+    require_regular_file(path, "historical U0 import manifest")
+    manifest = load_json_object(path)
+    expected = {
+        "schema": LEGACY_IMPORT_SCHEMA,
+        "status": "COMPLETE",
+        "operation": "IMPORT_COMPLETED_U0_WITHOUT_TRAINING",
+        "training_git_head": SOURCE_GIT_HEAD,
+        "target_binding_git_head": source["git_head"],
+        "target_protocol_sha256": canonical_sha256(source),
+        "target_protocol_file_sha256": sha256_file(source_path),
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Stage5 U0 source import manifest binding changed")
+    original = copy.deepcopy(source)
+    original["git_head"] = SOURCE_GIT_HEAD
+    with torch.random.fork_rng(devices=[]):
+        legacy = legacy_controller_training_contract(LegacyControllerTrainingConfig(), version=2)
+    original["controller_training_contract_sha256"] = canonical_sha256(legacy)
+    original["bootstrap"]["parameters"]["repair_operator_id"] = OLD_REPAIR_ID
+    del original["bootstrap"]["parameters"]["repair_parameters"]["digital_residual_policy"]
+    # These pinned historical revisions wrote protocol.json as canonical JSON
+    # bytes, so its file digest equals the canonical object digest. This equality
+    # is a historical serialization contract, not a rule for arbitrary JSON files.
+    if (
+        manifest.get("source_protocol") != original
+        or manifest.get("source_protocol_sha256") != canonical_sha256(original)
+        or manifest.get("source_protocol_file_sha256") != canonical_sha256(original)
+    ):
+        raise RuntimeError("Stage5 U0 source import manifest original protocol changed")
+    for name in ("source_checkpoints", "target_checkpoints"):
+        records = manifest.get(name)
+        if not isinstance(records, list) or [row.get("seed") for row in records] != list(STAGE5_SEEDS):
+            raise RuntimeError("Stage5 U0 source import manifest endpoint inventory is incomplete")
+    return manifest
+
+
+def _validate_source_lineage(
+    payload: dict[str, Any], record: dict[str, Any], manifest: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if manifest is None:
+        if "u0_import_lineage" in payload or "training_git_head" in payload:
+            raise RuntimeError("Stage5 U0 original source must not contain recursive imports")
+        return None
+    seed = record["seed"]
+    original = manifest["source_checkpoints"][seed]
+    if manifest["target_checkpoints"][seed] != record:
+        raise RuntimeError("Stage5 U0 source import manifest does not authenticate the current checkpoint")
+    preserved_fields = (
+        "seed",
+        "epoch_completed",
+        "model_state_sha256",
+        "metrics_sha256",
+        "metrics_payload_sha256",
+        "preserved_training_state_sha256",
+    )
+    if any(original.get(key) != record[key] for key in preserved_fields):
+        raise RuntimeError("Stage5 U0 source import changed preserved training state")
+    expected_lineage = {
+        "schema": LEGACY_IMPORT_SCHEMA,
+        "operation": "IMPORT_COMPLETED_U0_WITHOUT_TRAINING",
+        "source_training_git_head": SOURCE_GIT_HEAD,
+        "source_protocol": manifest["source_protocol"],
+        "source_protocol_sha256": manifest["source_protocol_sha256"],
+        "source_checkpoint": original,
+        "target_binding_git_head": POST_NCC_SOURCE_GIT_HEAD,
+        "target_protocol_sha256": manifest["target_protocol_sha256"],
+        "legacy_git_head_field_semantics": "TARGET_BINDING_NOT_TRAINING_REVISION",
+    }
+    if payload.get("training_git_head") != SOURCE_GIT_HEAD or payload.get("u0_import_lineage") != expected_lineage:
+        raise RuntimeError("Stage5 U0 source training lineage does not match its authenticated import manifest")
+    return expected_lineage
 
 
 class _HashWriter:
@@ -238,13 +325,13 @@ def import_completed_u0(
     source, source_config, source_controller = _load_protocol(source_protocol)
     target, target_config, target_controller = _load_protocol(target_protocol)
     _validate_hotfix(source, target, source_controller, target_controller)
+    source_import = _load_source_import_manifest(source_protocol, source)
 
     source_records = []
     for seed in STAGE5_SEEDS:
         source_path = source_root / "u0" / f"seed_{seed}" / "last.pth"
         payload, record = _load_endpoint(source_path, seed=seed, protocol=source, config=source_config)
-        if "u0_import_lineage" in payload or "training_git_head" in payload:
-            raise RuntimeError("Stage5 U0 recursive imports are not supported")
+        _validate_source_lineage(payload, record, source_import)
         source_records.append(record)
         del payload
 
@@ -259,11 +346,12 @@ def import_completed_u0(
         "target_protocol_path": str(target_protocol),
         "target_protocol_file_sha256": sha256_file(target_protocol),
         "target_protocol_sha256": canonical_sha256(target),
-        "training_git_head": source["git_head"],
+        "training_git_head": SOURCE_GIT_HEAD,
         "target_binding_git_head": target["git_head"],
         "source_checkpoint_root": str(source_root),
         "target_checkpoint_root": str(target_root),
         "source_checkpoints": source_records,
+        "source_import_manifest": source_import,
     }
     existing = output_manifest.exists()
     if existing:
@@ -281,21 +369,24 @@ def import_completed_u0(
         payload, checked = _load_endpoint(source_path, seed=seed, protocol=source, config=source_config)
         if checked != source_record:
             raise RuntimeError("Stage5 U0 import source changed after preflight")
+        parent_lineage = _validate_source_lineage(payload, checked, source_import)
         lineage = {
             "schema": IMPORT_SCHEMA,
             "operation": "IMPORT_COMPLETED_U0_WITHOUT_TRAINING",
-            "source_training_git_head": source["git_head"],
+            "source_training_git_head": SOURCE_GIT_HEAD,
+            "source_binding_git_head": source["git_head"],
             "source_protocol": source,
             "source_protocol_sha256": canonical_sha256(source),
             "source_checkpoint": source_record,
             "target_binding_git_head": target["git_head"],
             "target_protocol_sha256": canonical_sha256(target),
             "legacy_git_head_field_semantics": "TARGET_BINDING_NOT_TRAINING_REVISION",
+            "parent_import_lineage": parent_lineage,
         }
         target_path = _plain_path(target_root / "u0" / f"seed_{seed}" / "last.pth")
         payload["git_head"] = target["git_head"]
         payload["protocol_sha256"] = canonical_sha256(target)
-        payload["training_git_head"] = source["git_head"]
+        payload["training_git_head"] = SOURCE_GIT_HEAD
         payload["u0_import_lineage"] = lineage
         if not existing:
             if target_path.exists() or target_path.parent.exists():
@@ -315,7 +406,7 @@ def import_completed_u0(
             )
         del payload
         copied, target_record = _load_endpoint(target_path, seed=seed, protocol=target, config=target_config)
-        if copied.get("u0_import_lineage") != lineage or copied.get("training_git_head") != source["git_head"]:
+        if copied.get("u0_import_lineage") != lineage or copied.get("training_git_head") != SOURCE_GIT_HEAD:
             raise RuntimeError("Stage5 U0 import target training lineage changed")
         if target_record["preserved_training_state_sha256"] != source_record["preserved_training_state_sha256"]:
             raise RuntimeError("Stage5 U0 import changed preserved model, optimizer, scaler, RNG, or metric state")

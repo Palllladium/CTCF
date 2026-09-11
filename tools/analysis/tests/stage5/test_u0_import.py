@@ -13,14 +13,25 @@ import numpy as np
 import torch
 
 from experiments.stage5.checkpoints import atomic_torch_save, build_training_state, load_training_state
-from experiments.stage5.config import ControllerTrainingConfig, U0TrainingConfig
+from experiments.stage5.config import ControllerTrainingConfig, LegacyControllerTrainingConfig, U0TrainingConfig
 from experiments.stage5.runtime import _attach_runtime_checkpoint_metadata
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.stage5.artifacts import checkpoint_metadata
 from tools.analysis.stage5.contracts import CHECKPOINT_SELECTION_POLICY, build_protocol_contract
 from tools.analysis.stage5.primitives import canonical_sha256, readable_json_bytes, write_immutable_json
-from tools.analysis.stage5.protocol import bootstrap_parameters, controller_training_contract, u0_training_contract
-from tools.analysis.stage5.u0_import import SOURCE_GIT_HEAD, import_completed_u0
+from tools.analysis.stage5.protocol import (
+    bootstrap_parameters,
+    controller_training_contract,
+    legacy_controller_training_contract,
+    u0_training_contract,
+)
+from tools.analysis.stage5.u0_import import (
+    LEGACY_IMPORT_SCHEMA,
+    POST_NCC_SOURCE_GIT_HEAD,
+    SOURCE_GIT_HEAD,
+    _load_endpoint,
+    import_completed_u0,
+)
 
 
 class CompletedU0ImportTest(unittest.TestCase):
@@ -39,11 +50,12 @@ class CompletedU0ImportTest(unittest.TestCase):
         for seed in (0, 1, 2):
             self._write_source(seed)
 
-    def _write_protocol(self, path: Path, head: str, *, old: bool) -> dict:
+    def _write_protocol(self, path: Path, head: str, *, old: bool, post_ncc: bool = False) -> dict:
         controller_contract = controller_training_contract(ControllerTrainingConfig())
-        if old:
-            controller_contract["schema"] = "ctcf-stage5-controller-training-contract-v2"
-            controller_contract.pop("objective_numerics")
+        if old or post_ncc:
+            controller_contract = legacy_controller_training_contract(
+                LegacyControllerTrainingConfig(), version=2 if old else 3
+            )
         contracts = {
             "u0_training_contract": u0_training_contract(self.config),
             "controller_training_contract": controller_contract,
@@ -162,6 +174,57 @@ class CompletedU0ImportTest(unittest.TestCase):
         protocol[f"{name}_sha256"] = sha256_file(contract_path)
         atomic_write_json(protocol_path, protocol)
 
+    def _prepare_post_ncc_source(self) -> dict:
+        """Build the v1 import produced by the historical ffd3090 implementation."""
+        post_root = self.root / "post-ncc" / "checkpoints"
+        post_path = self.root / "post-ncc" / "protocol" / "protocol.json"
+        post = self._write_protocol(post_path, POST_NCC_SOURCE_GIT_HEAD, old=False, post_ncc=True)
+        source_records, target_records = [], []
+        for seed in (0, 1, 2):
+            payload, source_record = _load_endpoint(
+                self._checkpoint(seed), seed=seed, protocol=self.source, config=self.config
+            )
+            payload["u0_import_lineage"] = {
+                "schema": LEGACY_IMPORT_SCHEMA,
+                "operation": "IMPORT_COMPLETED_U0_WITHOUT_TRAINING",
+                "source_training_git_head": SOURCE_GIT_HEAD,
+                "source_protocol": self.source,
+                "source_protocol_sha256": canonical_sha256(self.source),
+                "source_checkpoint": source_record,
+                "target_binding_git_head": POST_NCC_SOURCE_GIT_HEAD,
+                "target_protocol_sha256": canonical_sha256(post),
+                "legacy_git_head_field_semantics": "TARGET_BINDING_NOT_TRAINING_REVISION",
+            }
+            payload["git_head"] = POST_NCC_SOURCE_GIT_HEAD
+            payload["training_git_head"] = SOURCE_GIT_HEAD
+            payload["protocol_sha256"] = canonical_sha256(post)
+            target_path = post_root / "u0" / f"seed_{seed}" / "last.pth"
+            self._seal(target_path, payload)
+            _, target_record = _load_endpoint(target_path, seed=seed, protocol=post, config=self.config)
+            source_records.append(source_record)
+            target_records.append(target_record)
+        manifest = {
+            "schema": LEGACY_IMPORT_SCHEMA,
+            "status": "COMPLETE",
+            "operation": "IMPORT_COMPLETED_U0_WITHOUT_TRAINING",
+            "source_protocol": self.source,
+            "source_protocol_path": str(self.source_protocol_path),
+            "source_protocol_file_sha256": sha256_file(self.source_protocol_path),
+            "source_protocol_sha256": canonical_sha256(self.source),
+            "target_protocol_path": str(post_path),
+            "target_protocol_file_sha256": sha256_file(post_path),
+            "target_protocol_sha256": canonical_sha256(post),
+            "training_git_head": SOURCE_GIT_HEAD,
+            "target_binding_git_head": POST_NCC_SOURCE_GIT_HEAD,
+            "source_checkpoint_root": str(self.source_root),
+            "target_checkpoint_root": str(post_root),
+            "source_checkpoints": source_records,
+            "target_checkpoints": target_records,
+        }
+        write_immutable_json(post_path.parent.parent / "imports" / "u0_import.json", manifest)
+        self.source, self.source_root, self.source_protocol_path = post, post_root, post_path
+        return manifest
+
     def test_import_preserves_training_state_and_source_bytes_and_is_idempotent(self) -> None:
         self.assertNotEqual(
             self.source["controller_training_contract_sha256"], self.target["controller_training_contract_sha256"]
@@ -225,6 +288,72 @@ class CompletedU0ImportTest(unittest.TestCase):
             protocol=self.target,
         )
         self.assertEqual(metadata["checkpoint_file"]["sha256"], sha256_file(path))
+
+    def test_post_ncc_source_preserves_original_training_revision_and_full_lineage(self) -> None:
+        source_manifest = self._prepare_post_ncc_source()
+        result = self._import()
+        self.assertEqual(result["training_git_head"], SOURCE_GIT_HEAD)
+        self.assertEqual(result["source_import_manifest"], source_manifest)
+        for seed in (0, 1, 2):
+            source = torch.load(self._checkpoint(seed), weights_only=False)
+            target = torch.load(self._checkpoint(seed, target=True), weights_only=False)
+            self.assertEqual(target["training_git_head"], SOURCE_GIT_HEAD)
+            lineage = target["u0_import_lineage"]
+            self.assertEqual(lineage["source_binding_git_head"], POST_NCC_SOURCE_GIT_HEAD)
+            self.assertEqual(lineage["parent_import_lineage"], source["u0_import_lineage"])
+            self.assertEqual(
+                result["target_checkpoints"][seed]["preserved_training_state_sha256"],
+                source_manifest["source_checkpoints"][seed]["preserved_training_state_sha256"],
+            )
+        self.assertEqual(result, self._import())
+
+    def test_post_ncc_source_requires_its_historical_import_manifest(self) -> None:
+        self._prepare_post_ncc_source()
+        (self.source_protocol_path.parent.parent / "imports" / "u0_import.json").unlink()
+        with self.assertRaisesRegex(RuntimeError, "historical U0 import manifest"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_post_ncc_source_rejects_resealed_checkpoint_drift(self) -> None:
+        self._prepare_post_ncc_source()
+        self._mutate_source("training_git_head", POST_NCC_SOURCE_GIT_HEAD)
+        with self.assertRaisesRegex(RuntimeError, "authenticate the current checkpoint"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_post_ncc_source_rejects_broken_lineage_even_with_matching_manifest_digest(self) -> None:
+        manifest = self._prepare_post_ncc_source()
+        path = self._checkpoint(1)
+        payload = torch.load(path, weights_only=False)
+        payload["u0_import_lineage"]["source_training_git_head"] = POST_NCC_SOURCE_GIT_HEAD
+        self._seal(path, payload)
+        _, record = _load_endpoint(path, seed=1, protocol=self.source, config=self.config)
+        manifest["target_checkpoints"][1] = record
+        atomic_write_json(self.source_protocol_path.parent.parent / "imports" / "u0_import.json", manifest)
+        with self.assertRaisesRegex(RuntimeError, "source training lineage"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_post_ncc_source_rejects_changed_original_protocol(self) -> None:
+        manifest = self._prepare_post_ncc_source()
+        manifest["source_protocol"]["data_contract_sha256"] = "f" * 64
+        atomic_write_json(self.source_protocol_path.parent.parent / "imports" / "u0_import.json", manifest)
+        with self.assertRaisesRegex(RuntimeError, "original protocol changed"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_post_ncc_source_rejects_resealed_optimizer_drift(self) -> None:
+        manifest = self._prepare_post_ncc_source()
+        path = self._checkpoint(1)
+        payload = torch.load(path, weights_only=False)
+        payload["optimizer_state"]["state"][0]["exp_avg"].add_(1)
+        self._seal(path, payload)
+        _, record = _load_endpoint(path, seed=1, protocol=self.source, config=self.config)
+        manifest["target_checkpoints"][1] = record
+        atomic_write_json(self.source_protocol_path.parent.parent / "imports" / "u0_import.json", manifest)
+        with self.assertRaisesRegex(RuntimeError, "changed preserved training state"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
 
     def test_missing_source_metrics_are_restored_only_in_target(self) -> None:
         source_metrics = self._checkpoint(1).with_name("metrics.json")
@@ -298,6 +427,13 @@ class CompletedU0ImportTest(unittest.TestCase):
     def test_resealed_different_ncc_contract_is_rejected(self) -> None:
         controller = controller_training_contract(ControllerTrainingConfig())
         controller["objective_numerics"]["ncc_moments_dtype"] = "float32"
+        self._replace_contract(self.target_protocol_path, "controller_training_contract", controller)
+        with self.assertRaisesRegex(RuntimeError, "target controller contract"):
+            self._import()
+        self.assertFalse(self.target_root.exists())
+
+    def test_target_with_legacy_amp_numerics_is_rejected(self) -> None:
+        controller = legacy_controller_training_contract(LegacyControllerTrainingConfig())
         self._replace_contract(self.target_protocol_path, "controller_training_contract", controller)
         with self.assertRaisesRegex(RuntimeError, "target controller contract"):
             self._import()

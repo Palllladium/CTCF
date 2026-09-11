@@ -22,18 +22,27 @@ from experiments.core.helpers import select_lr_policy
 from experiments.stage5.checkpoints import (
     atomic_torch_save,
     build_training_state,
+    capture_rng_state,
     load_training_state,
     state_dict_sha256,
 )
 from experiments.stage5.config import (
     ControllerTrainingConfig,
+    LegacyControllerTrainingConfig,
     U0TrainingConfig,
     build_stage5_controller,
     config_sha256,
     require_seed,
 )
+from experiments.stage5.failures import (
+    ControllerFailureRecorder,
+    cpu_snapshot,
+    require_finite_optimizer,
+    require_finite_parameters,
+)
 from experiments.stage5.features import build_stage5_features
 from experiments.stage5.losses import controller_objective
+from experiments.stage5.precision import controller_precision, controller_precision_contract
 from experiments.stage5.safety import (
     BOOTSTRAP_POLICIES,
     WORK_EPS,
@@ -41,6 +50,7 @@ from experiments.stage5.safety import (
     construct_initial_field,
     prepare_initial_field,
 )
+from experiments.stage5.telemetry import TrainingTelemetry, parameter_telemetry
 from experiments.train_CTCF import Runner
 from models.CTCF.controller import STAGE5_VARIANTS, Stage5SpatialController
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
@@ -207,6 +217,8 @@ def _attach_runtime_checkpoint_metadata(
     payload["metrics_payload"] = metrics_payload
     payload["metrics_payload_sha256"] = canonical_sha256(metrics_payload)
     payload["execution_determinism"] = _execution_determinism_contract()
+    if type(config) is ControllerTrainingConfig:
+        payload["controller_precision"] = controller_precision_contract()
 
 
 def _validate_runtime_checkpoint_metadata(
@@ -227,6 +239,11 @@ def _validate_runtime_checkpoint_metadata(
         raise RuntimeError("Stage5 checkpoint training configuration changed")
     if payload.get("execution_determinism") != _execution_determinism_contract():
         raise RuntimeError("Stage5 checkpoint execution-determinism contract changed")
+    if role == "CONTROLLER" and type(config) is ControllerTrainingConfig:
+        if payload.get("controller_precision") != controller_precision_contract():
+            raise RuntimeError("Stage5 checkpoint controller precision contract changed")
+        if payload.get("scaler_state") is not None:
+            raise RuntimeError("Stage5 strict FP32 controller checkpoint must not contain a GradScaler")
     if expected_git_head is not None and payload.get("git_head") != expected_git_head:
         raise RuntimeError("Stage5 resume checkpoint belongs to another Git revision")
     if payload.get("base_checkpoint_sha256") != expected_base_checkpoint_sha256:
@@ -305,7 +322,7 @@ def _adopt_existing_endpoint(
     config: U0TrainingConfig | ControllerTrainingConfig,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.amp.GradScaler,
+    scaler: torch.amp.GradScaler | None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Restore an interrupted run in place, refusing an output tree it cannot account for.
 
@@ -368,10 +385,11 @@ def _commit_epoch(
     config: U0TrainingConfig | ControllerTrainingConfig,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.amp.GradScaler,
+    scaler: torch.amp.GradScaler | None,
     epoch: int,
     row: dict[str, Any],
     epochs: list[dict[str, Any]],
+    recovery_acknowledgements: list[dict[str, str]] | None = None,
 ) -> None:
     """Persist one completed epoch: metrics first, then the checkpoint that authenticates them."""
     metrics_path = output_root / "metrics.json"
@@ -397,6 +415,8 @@ def _commit_epoch(
         source_contract_sha256=identity.source_contract_sha256,
     )
     _attach_runtime_checkpoint_metadata(state, config=config, metrics_payload=payload)
+    if identity.role == "CONTROLLER" and recovery_acknowledgements is not None:
+        state["recovery_acknowledgements"] = recovery_acknowledgements
     _write_checkpoint_with_sidecar(output_root / "last.pth", state)
 
 
@@ -418,7 +438,7 @@ def _strict_scaler_step(
 
 
 def _stage5_grad_scaler(
-    config: U0TrainingConfig | ControllerTrainingConfig,
+    config: U0TrainingConfig | LegacyControllerTrainingConfig,
     *,
     device_type: str = "cuda",
 ) -> torch.amp.GradScaler:
@@ -1110,7 +1130,7 @@ class _ControllerStep:
     base_runner: Runner
     controller: Stage5SpatialController
     optimizer: torch.optim.Optimizer
-    scaler: torch.amp.GradScaler
+    scaler: torch.amp.GradScaler | None
     device: torch.device
     variant: str
     bootstrap_policy: str
@@ -1155,41 +1175,114 @@ def _prepare_controller_pair(step: _ControllerStep, pair: Mapping[str, str], epo
 
 
 def _controller_pair_loss(
-    step: _ControllerStep, inputs: _ControllerPairInputs, *, diagnostic_fp32: bool = False
+    step: _ControllerStep, inputs: _ControllerPairInputs
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Production uses FP16; FP32 is an explicit, diagnostic-only comparison."""
+    """Shared formula only: callers explicitly own controller precision contexts."""
     input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = inputs.tensors_ab
     input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = inputs.tensors_ba
-    # The controller runs under FP16 autocast; the objective owns its FP32 warp
-    # and regularizers, and the checked FP64 NCC moments recorded in the protocol.
-    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=not diagnostic_fp32):
-        output_ab = step.controller(input_ab, step.variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
-        output_ba = step.controller(input_ba, step.variant, s2_proposal=s2_ba, s4_proposal=s4_ba)
-        loss, logs = controller_objective(
-            fixed_norm_ab,
-            moving_norm_ab,
-            fixed_norm_ba,
-            moving_norm_ba,
-            inputs.psi_ab,
-            inputs.psi_ba,
-            output_ab.requested_delta,
-            output_ba.requested_delta,
-            config=step.config.loss,
-        )
+    # The objective owns its FP32 warp/regularizers and checked FP64 NCC moments.
+    output_ab = step.controller(input_ab, step.variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
+    output_ba = step.controller(input_ba, step.variant, s2_proposal=s2_ba, s4_proposal=s4_ba)
+    loss, logs = controller_objective(
+        fixed_norm_ab,
+        moving_norm_ab,
+        fixed_norm_ba,
+        moving_norm_ba,
+        inputs.psi_ab,
+        inputs.psi_ba,
+        output_ab.requested_delta,
+        output_ba.requested_delta,
+        config=step.config.loss,
+    )
     return loss, logs
 
 
-def _controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch: int) -> dict[str, float]:
-    """Take one optimizer step on one unordered pair, seen in both directions."""
+def _legacy_controller_pair_step(step: _ControllerStep, pair: Mapping[str, str], epoch: int) -> dict[str, float]:
+    """Replay the former AMP update for historical diagnostics only."""
     inputs = _prepare_controller_pair(step, pair, epoch)
     step.optimizer.zero_grad(set_to_none=True)
-    loss, logs = _controller_pair_loss(step, inputs)
+    with torch.autocast(device_type=step.device.type, dtype=torch.float16, enabled=True):
+        loss, logs = _controller_pair_loss(step, inputs)
     if not bool(torch.isfinite(loss)):
         raise FloatingPointError(f"non-finite Stage5 controller loss at epoch {epoch}")
     step.scaler.scale(loss).backward()
     _strict_scaler_step(step.scaler, step.optimizer, phase=f"controller {step.variant}")
     logs["bootstrap_digital_residual_percent"] = inputs.bootstrap_residual
     return logs
+
+
+def _controller_pair_step(
+    step: _ControllerStep,
+    pair: Mapping[str, str],
+    epoch: int,
+    *,
+    recorder: ControllerFailureRecorder | None = None,
+    pair_index: int = 0,
+    successful_updates: int = 0,
+    telemetry: TrainingTelemetry | None = None,
+) -> dict[str, float]:
+    """Update once in strict FP32; preserve failures, never skip or retry a pair."""
+    if step.scaler is not None or type(step.config) is not ControllerTrainingConfig:
+        raise RuntimeError("Production Stage5 controllers require strict FP32 without GradScaler")
+    state = {
+        "pair": dict(pair),
+        "epoch_one_based": epoch + 1,
+        "pair_index_one_based": pair_index + 1,
+        "successful_updates_before_pair": successful_updates,
+        "phase": "prepare_inputs",
+        "rng_before_pair": capture_rng_state(),
+        "rng_before_controller": None,
+        "inputs": None,
+        "before_update": None,
+    }
+    try:
+        # Frozen U0 and feature construction retain their original arithmetic.
+        inputs = _prepare_controller_pair(step, pair, epoch)
+        state["inputs"] = inputs
+        state["rng_before_controller"] = capture_rng_state()
+        step.optimizer.zero_grad(set_to_none=True)
+        with controller_precision(step.device):
+            state["phase"] = "forward"
+            require_finite_parameters(step.controller, gradients=False)
+            loss, logs = _controller_pair_loss(step, inputs)
+            if not bool(torch.isfinite(loss)):
+                raise FloatingPointError("non-finite Stage5 controller loss")
+            logs["bootstrap_digital_residual_percent"] = inputs.bootstrap_residual
+            if any(not math.isfinite(float(value)) for value in logs.values()):
+                raise FloatingPointError("non-finite Stage5 controller metric before update")
+            state["phase"] = "backward"
+            loss.backward()
+            require_finite_parameters(step.controller, gradients=True)
+            # This small copy also preserves the pre-update state if AdamW fails.
+            state["before_update"] = {
+                "model": cpu_snapshot(step.controller.state_dict()),
+                "optimizer": cpu_snapshot(step.optimizer.state_dict()),
+            }
+            state["phase"] = "optimizer_step"
+            step.optimizer.step()
+            require_finite_parameters(step.controller, gradients=False)
+            require_finite_optimizer(step.optimizer)
+        if telemetry is not None:
+            state["phase"] = "telemetry"
+            measurements = parameter_telemetry(step.controller, before_update=state["before_update"]["model"])
+            telemetry.write_step(
+                context={
+                    "pair": dict(pair),
+                    "epoch_one_based": epoch + 1,
+                    "pair_index_one_based": pair_index + 1,
+                    "successful_update_index": successful_updates + 1,
+                },
+                metrics=logs,
+                telemetry=measurements,
+            )
+        return logs
+    except Exception as error:
+        if recorder is not None:
+            try:
+                recorder.capture(error=error, state=state, step=step)
+            except Exception as capture_error:
+                print(f"[STAGE5 CAPTURE ERROR] {type(capture_error).__name__}: {capture_error}", flush=True)
+        raise
 
 
 def train_controller(
@@ -1229,7 +1322,7 @@ def train_controller(
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    scaler = _stage5_grad_scaler(config)
+    scaler = None
     base_sha = _verify_checkpoint_sidecar(base_checkpoint)
     base_runner = load_frozen_u0(
         base_checkpoint,
@@ -1269,6 +1362,21 @@ def train_controller(
         initial_controller_state_sha256=initial_sha,
         source_contract_sha256=source_contract_sha256,
     )
+    recorder = ControllerFailureRecorder(
+        output_root,
+        {
+            **asdict(identity),
+            "config": asdict(config),
+            "data_contract": str(data_contract.resolve()),
+            "image_root": str(image_root.resolve()),
+            "base_checkpoint": str(base_checkpoint.resolve()),
+            "initial_controller": str(initial_controller.resolve()),
+            "bootstrap_policy": bootstrap_policy,
+            "torch_version": str(torch.__version__),
+            "device_name": torch.cuda.get_device_name(device),
+        },
+    )
+    recovery_acknowledgements = recorder.require_no_previous_failure(resume=resume)
     start_epoch, metrics = _adopt_existing_endpoint(
         output_root,
         resume,
@@ -1281,6 +1389,7 @@ def train_controller(
     if start_epoch == config.fixed_epoch:
         return checkpoint_path
 
+    telemetry = TrainingTelemetry(output_root, asdict(identity), start_epoch=start_epoch)
     step = _ControllerStep(
         store=store,
         base_runner=base_runner,
@@ -1298,14 +1407,30 @@ def train_controller(
         ordered = controller_epoch_pairs(training_subjects, seed=seed, epoch=epoch)
         totals: dict[str, float] = {}
         completed = 0
+        progress_interval = max(1, math.ceil(len(ordered) / 10))
         for pair in ordered:
-            logs = _controller_pair_step(step, pair, epoch)
+            logs = _controller_pair_step(
+                step,
+                pair,
+                epoch,
+                recorder=recorder,
+                pair_index=completed,
+                successful_updates=epoch * len(ordered) + completed,
+                telemetry=telemetry,
+            )
             for key, value in logs.items():
                 value = float(value)
                 if not math.isfinite(value):
                     raise FloatingPointError(f"non-finite Stage5 controller metric: {key}")
                 totals[key] = totals.get(key, 0.0) + value
             completed += 1
+            if completed % progress_interval == 0 or completed == len(ordered):
+                print(
+                    f"[STAGE5 CONTROLLER PROGRESS] seed={seed} variant={variant} "
+                    f"epoch={epoch + 1}/{config.fixed_epoch} pairs={completed}/{len(ordered)} "
+                    f"elapsed_seconds={time.perf_counter() - epoch_started:.1f} loss={logs['loss']:.6g}",
+                    flush=True,
+                )
         if completed != len(ordered) or completed * 2 != len(training_subjects):
             raise RuntimeError("Stage5 controller epoch did not consume one perfect matching")
         row = {
@@ -1313,6 +1438,7 @@ def train_controller(
             "pairs": completed,
             "pair_schedule_sha256": canonical_sha256(ordered),
             "metrics": {key: value / completed for key, value in sorted(totals.items())},
+            "telemetry": telemetry.summarize_epoch(epoch + 1),
         }
         metrics.append(row)
         _commit_epoch(
@@ -1325,7 +1451,9 @@ def train_controller(
             epoch=epoch,
             row=row,
             epochs=metrics,
+            recovery_acknowledgements=recovery_acknowledgements,
         )
+        telemetry.commit_epoch(epoch + 1, checkpoint_path, row["pair_schedule_sha256"])
         metric_text = " ".join(f"{key}={value:.6g}" for key, value in row["metrics"].items())
         print(
             f"[STAGE5 CONTROLLER EPOCH] seed={seed} variant={variant} "
@@ -1412,11 +1540,11 @@ def _smoke_controller_step(
         lr=controller_config.learning_rate,
         weight_decay=controller_config.weight_decay,
     )
-    scaler = _stage5_grad_scaler(controller_config)
+    scaler = None
     optimizer.zero_grad(set_to_none=True)
     input_ab, s2_ab, s4_ab, fixed_norm_ab, moving_norm_ab = _controller_training_tensors(features_ab)
     input_ba, s2_ba, s4_ba, fixed_norm_ba, moving_norm_ba = _controller_training_tensors(features_ba)
-    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+    with controller_precision(device):
         output_ab = controller(input_ab, variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
         output_ba = controller(input_ba, variant, s2_proposal=s2_ba, s4_proposal=s4_ba)
         loss, logs = controller_objective(
@@ -1432,8 +1560,12 @@ def _smoke_controller_step(
         )
     if not bool(torch.isfinite(loss)):
         raise FloatingPointError(f"non-finite Stage5 {variant} smoke loss")
-    scaler.scale(loss).backward()
-    _strict_scaler_step(scaler, optimizer, phase=f"controller smoke {variant}")
+    with controller_precision(device):
+        loss.backward()
+        require_finite_parameters(controller, gradients=True)
+        optimizer.step()
+        require_finite_parameters(controller, gradients=False)
+        require_finite_optimizer(optimizer)
     parameters_after = state_dict_sha256(dict(controller.named_parameters()))
     if parameters_after == parameters_before:
         raise RuntimeError(f"Stage5 {variant} smoke optimizer step did not change any trainable parameter")
@@ -1442,7 +1574,7 @@ def _smoke_controller_step(
     measurement["metrics"] = {key: float(value) for key, value in logs.items()}
     controller.eval()
     decision_started = _cuda_measurement_start(device)
-    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+    with torch.inference_mode(), controller_precision(device):
         post_step = controller(input_ab, variant, s2_proposal=s2_ab, s4_proposal=s4_ab)
     requested_delta_rms = float(post_step.requested_delta.float().square().mean().sqrt().item())
     if not math.isfinite(requested_delta_rms) or (variant == "F24P" and requested_delta_rms <= 0.0):
@@ -1518,7 +1650,7 @@ def _smoke_controller_step(
         lr=controller_config.learning_rate,
         weight_decay=controller_config.weight_decay,
     )
-    reloaded_scaler = _stage5_grad_scaler(controller_config)
+    reloaded_scaler = None
     reloaded_controller_state = load_training_state(
         controller_checkpoint,
         model=reloaded_controller,

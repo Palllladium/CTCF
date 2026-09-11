@@ -93,14 +93,14 @@ class ControllerNCCTest(unittest.TestCase):
         self.assertEqual(loss.dtype, torch.float32)
         self.assertEqual(x.grad.dtype, torch.float32)
 
-    def test_contract_changes_controller_only_and_keeps_amp(self):
+    def test_contract_keeps_fp64_ncc_and_u0_while_controllers_use_fp32(self):
         config = ControllerTrainingConfig()
         controller = controller_training_contract(config)
         u0 = u0_training_contract(U0TrainingConfig())
-        self.assertEqual(controller["schema"], "ctcf-stage5-controller-training-contract-v3")
+        self.assertEqual(controller["schema"], "ctcf-stage5-controller-training-contract-v4")
         self.assertEqual(controller["objective_numerics"], ncc.controller_ncc_contract())
         self.assertEqual(controller["objective_numerics"]["ncc_out_of_range_policy"], "RAISE_WITHOUT_CLIPPING")
-        self.assertEqual(config.amp_initial_scale, 65536)
+        self.assertFalse(controller["precision"]["gradient_scaler"])
         self.assertEqual(u0["schema"], "ctcf-stage5-u0-training-contract-v2")
         self.assertNotIn("objective_numerics", u0)
         self.assertIs(losses.ControllerNCC, ncc.ControllerNCC)
@@ -118,7 +118,7 @@ class ControllerNCCTest(unittest.TestCase):
         self.assertIs(losses.ControllerNCC, ncc.ControllerNCC)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for controller AMP")
-    def test_all_eight_controllers_take_a_real_strict_amp_step(self):
+    def test_all_eight_controllers_take_a_real_strict_fp32_step(self):
         torch.manual_seed(91)
         config = ControllerTrainingConfig()
         shape = (16, 16, 16)
@@ -139,14 +139,18 @@ class ControllerNCCTest(unittest.TestCase):
         for variant in runtime.STAGE5_VARIANTS:
             controller = runtime.build_stage5_controller(config).cuda()
             optimizer = torch.optim.AdamW(controller.parameters(), lr=config.learning_rate)
-            scaler = runtime._stage5_grad_scaler(config)
-            step = mock.Mock(controller=controller, variant=variant, config=config)
+            step = mock.Mock(
+                controller=controller,
+                variant=variant,
+                config=config,
+                optimizer=optimizer,
+                scaler=None,
+                device=torch.device("cuda"),
+            )
             before = {name: value.detach().clone() for name, value in controller.named_parameters()}
-            loss, metrics = runtime._controller_pair_loss(step, inputs)
+            with mock.patch.object(runtime, "_prepare_controller_pair", return_value=inputs):
+                metrics = runtime._controller_pair_step(step, {}, 0)
             self.assertTrue(-1.000001 <= metrics["ncc"] <= 0)
-            scaler.scale(loss).backward()
-            runtime._strict_scaler_step(scaler, optimizer, phase=variant)
-            self.assertEqual(scaler.get_scale(), 65536)
             self.assertTrue(any(not torch.equal(value, before[name]) for name, value in controller.named_parameters()))
 
 

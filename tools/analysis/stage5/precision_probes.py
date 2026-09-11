@@ -116,13 +116,11 @@ def strict_fp32(enabled=True):
     try:
         if enabled:
             torch.set_float32_matmul_precision("highest")
-            torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.allow_tf32 = False
         yield
     finally:
-        torch.set_float32_matmul_precision(previous["float32_matmul_precision"])
-        torch.backends.cuda.matmul.allow_tf32 = previous["matmul_allow_tf32"]
         torch.backends.cudnn.allow_tf32 = previous["cudnn_allow_tf32"]
+        torch.set_float32_matmul_precision(previous["float32_matmul_precision"])
 
 
 def precision_context(fp32):
@@ -317,7 +315,8 @@ def _run_probe(step, inputs, *, fp32, scale):
     with strict_fp32(fp32), GradientTrace(step.controller, scale) as trace:
         result["backend_flags"] = backend_flags()
         try:
-            loss, logs = runtime._controller_pair_loss(step, inputs, diagnostic_fp32=fp32)
+            with torch.autocast(device_type=step.device.type, dtype=torch.float16, enabled=not fp32):
+                loss, logs = runtime._controller_pair_loss(step, inputs)
             result["metrics"] = {name: _finite_float(value) for name, value in logs.items()}
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError("non-finite objective")

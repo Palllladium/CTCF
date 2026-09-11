@@ -85,6 +85,7 @@ RUN_ID_RE = re.compile(r"S5_[A-Z0-9]+_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{12}")
 
 DISK_TARGET_GIB = {
     "data": 16,
+    "comparison": 40,
     "source": 230,
     "decision": 470,
     "full": 730,
@@ -977,6 +978,57 @@ def command_finalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_package(args: argparse.Namespace) -> int:
+    from tools.analysis.stage5.packaging import package_run_zip
+
+    head = assert_clean_exact_git(args.repo_root, args.expected_git_head)
+    if RUN_ID_RE.fullmatch(args.run_id) is None or re.fullmatch(r"[A-Za-z0-9_-]+", args.attempt_id) is None:
+        raise ValueError("Invalid Stage5 run or attempt ID")
+    manifest = load_canonical_json(args.run_root / "manifests" / f"{args.attempt_id}.json")
+    expected = {"run_id": args.run_id, "attempt_id": args.attempt_id, "status": args.status, "git_head": head}
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Stage5 package does not match the finalized attempt")
+    archive, digest = package_run_zip(
+        args.run_root,
+        args.export_root,
+        root_name=args.run_id,
+        archive_stem=f"{args.run_id}__{args.attempt_id}__{args.status}",
+    )
+    print(f"[PACKAGE] {archive}")
+    print(f"[PACKAGE SIDECAR] {archive}.sha256")
+    print(f"{digest}  {archive.name}")
+    return 0
+
+
+def command_compare_precision(args: argparse.Namespace) -> int:
+    from tools.analysis.stage5.comparison_execution import execute_comparison
+
+    _, protocol = _protocol_context(args)
+    if RUN_ID_RE.fullmatch(args.run_id) is None or not args.run_id.endswith(args.expected_git_head[:12]):
+        raise ValueError("Comparison run ID must bind the expected Git HEAD")
+    summary = execute_comparison(args, protocol=protocol)
+    return 0 if summary["status"] == "DIAGNOSTIC_COMPLETE" else 1
+
+
+def command_acknowledge_controller_failure(args: argparse.Namespace) -> int:
+    from tools.analysis.stage5.recovery import acknowledge_controller_failure, locked_stopped_stage5_run
+
+    with locked_stopped_stage5_run(protocol_path=args.protocol):
+        head, protocol = _protocol_context(args)
+        output_root = args.checkpoint_root / "controllers" / f"seed_{args.seed}" / args.variant
+        path = acknowledge_controller_failure(
+            output_root=output_root,
+            failure_id=args.failure_id,
+            failure_sha256=args.failure_sha256,
+            checkpoint_sha256=args.checkpoint_sha256,
+            reason=args.reason,
+            expected_git_head=head,
+            expected_protocol_sha256=canonical_sha256(protocol),
+        )
+    print(f"[STAGE5 CONTROLLER FAILURE ACKNOWLEDGED] {path}")
+    return 0
+
+
 def _add_git(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--expected-git-head", required=True)
@@ -1090,6 +1142,27 @@ def build_parser() -> argparse.ArgumentParser:
     controller.add_argument("--seed", type=int, choices=BASE_SEEDS, required=True)
     controller.add_argument("--variant", choices=STAGE5_VARIANTS, required=True)
 
+    comparison = action("compare-precision", command_compare_precision)
+    _add_protocol(comparison)
+    _add_data(comparison)
+    comparison.add_argument("--checkpoint-root", type=Path, required=True)
+    comparison.add_argument("--output-root", type=Path, required=True)
+    comparison.add_argument("--heavy-root", type=Path, required=True)
+    comparison.add_argument("--run-id", required=True)
+    comparison.add_argument("--gpu-list", required=True)
+    comparison.add_argument("--precision-source-root", type=Path, required=True)
+    comparison.add_argument("--capture-root", type=Path, required=True)
+
+    acknowledgement = action("acknowledge-controller-failure", command_acknowledge_controller_failure)
+    _add_protocol(acknowledgement)
+    acknowledgement.add_argument("--checkpoint-root", type=Path, required=True)
+    acknowledgement.add_argument("--seed", type=int, choices=BASE_SEEDS, required=True)
+    acknowledgement.add_argument("--variant", choices=STAGE5_VARIANTS, required=True)
+    acknowledgement.add_argument("--failure-id", required=True)
+    acknowledgement.add_argument("--failure-sha256", required=True)
+    acknowledgement.add_argument("--checkpoint-sha256", required=True)
+    acknowledgement.add_argument("--reason", required=True)
+
     training = action("freeze-training", command_freeze_training)
     _add_protocol(training)
     _add_smoke_gate(training)
@@ -1152,6 +1225,14 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--exit-code", type=int, required=True)
     finalize.add_argument("--started-at-utc", required=True)
     finalize.add_argument("--remote-heavy-locator", required=True)
+
+    package = action("package", command_package)
+    _add_git(package)
+    package.add_argument("--run-root", type=Path, required=True)
+    package.add_argument("--run-id", required=True)
+    package.add_argument("--attempt-id", required=True)
+    package.add_argument("--status", choices=("COMPLETE", "PARTIAL", "FAILED"), required=True)
+    package.add_argument("--export-root", type=Path, required=True)
     return parser
 
 

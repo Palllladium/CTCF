@@ -14,6 +14,8 @@ readonly REMOTE_HEAVY_LOCATOR="${REMOTE_HEAVY_LOCATOR:-PENDING_UPLOAD}"
 readonly IMPORT_U0_RUN_ID="${IMPORT_U0_RUN_ID:-}"
 readonly IMPORT_U0_COMPACT_ROOT="${IMPORT_U0_COMPACT_ROOT:-results/stage5/$IMPORT_U0_RUN_ID}"
 readonly IMPORT_U0_HEAVY_ROOT="${IMPORT_U0_HEAVY_ROOT:-results/stage5_heavy/$IMPORT_U0_RUN_ID}"
+readonly PRECISION_SOURCE_ROOT="${PRECISION_SOURCE_ROOT:-results/stage5_diagnostics/S5_PRECISIONDIAG_20260909T140904Z_3575584_cdede42ac60c}"
+readonly PRECISION_CAPTURE_ROOT="${PRECISION_CAPTURE_ROOT:-results/stage5_heavy/S5_PRECISIONDIAG_20260909T140904Z_3575584_cdede42ac60c}"
 
 readonly COMPACT_ROOT="${COMPACT_ROOT:-results/stage5/$RUN_ID}"
 readonly HEAVY_ROOT="${HEAVY_ROOT:-results/stage5_heavy/$RUN_ID}"
@@ -42,16 +44,15 @@ readonly -a SEEDS=(0 1 2)
 readonly -a VARIANTS=(F0 F2V F2S F2P F4P F24P A2P A24P)
 readonly -a ALL_VARIANTS=(U0 F0 F2V F2S F2P F4P F24P A2P A24P)
 ACTIVE_PIDS=()
-IFS=',' read -r -a GPUS <<< "$GPU_LIST"
-
-if [[ ${#GPUS[@]} -lt ${#SEEDS[@]} || ${#GPUS[@]} -gt 8 ]]; then
-  echo "[FAIL] Stage5 needs at least one GPU per seed (${#SEEDS[@]}) and at most eight." >&2
+if [[ ! "$GPU_LIST" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]]; then
+  echo "[FAIL] GPU_LIST must contain one or more unique non-negative integer GPU indices." >&2
   exit 2
 fi
+IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 declare -A SEEN_GPUS=()
 for gpu in "${GPUS[@]}"; do
-  if [[ ! "$gpu" =~ ^[0-9]+$ ]] || [[ -n "${SEEN_GPUS[$gpu]:-}" ]]; then
-    echo "[FAIL] GPU_LIST must contain three to eight unique non-negative integers." >&2
+  if [[ -n "${SEEN_GPUS[$gpu]:-}" ]]; then
+    echo "[FAIL] GPU_LIST contains a duplicate GPU index: $gpu" >&2
     exit 2
   fi
   SEEN_GPUS[$gpu]=1
@@ -65,16 +66,16 @@ if [[ "${RUN_ID##*_}" != "${EXPECTED_GIT_HEAD:0:12}" ]]; then
   exit 2
 fi
 case "$PHASE" in
-  all|prepare|smoke|import-u0|train-u0|materialize-source|train-controller|decide|evaluate|package) ;;
+  all|prepare|smoke|import-u0|train-u0|compare-precision|materialize-source|train-controller|decide|evaluate|package) ;;
   *) echo "[FAIL] Unknown PHASE=$PHASE" >&2; exit 2 ;;
 esac
 if [[ -n "$IMPORT_U0_RUN_ID" ]]; then
-  if [[ ! "$IMPORT_U0_RUN_ID" =~ ^S5_[A-Z0-9]+_[0-9]{8}T[0-9]{6}Z_68df5b241042$ || "$IMPORT_U0_RUN_ID" == "$RUN_ID" ]]; then
-    echo "[FAIL] U0 import requires a distinct source run from the supported pre-hotfix revision." >&2
+  if [[ ! "$IMPORT_U0_RUN_ID" =~ ^S5_[A-Z0-9]+_[0-9]{8}T[0-9]{6}Z_(68df5b241042|ffd3090f6129)$ || "$IMPORT_U0_RUN_ID" == "$RUN_ID" ]]; then
+    echo "[FAIL] U0 import requires a distinct source run from a supported U0 revision." >&2
     exit 2
   fi
-elif [[ "$PHASE" == "import-u0" ]]; then
-  echo "[FAIL] PHASE=import-u0 requires IMPORT_U0_RUN_ID." >&2
+elif [[ "$PHASE" == "import-u0" || "$PHASE" == "compare-precision" ]]; then
+  echo "[FAIL] PHASE=$PHASE requires IMPORT_U0_RUN_ID." >&2
   exit 2
 fi
 
@@ -96,6 +97,11 @@ run_cli() {
 run_logged() {
   local log_file="$1"
   shift
+  if [[ "$BASHPID" != "$$" ]]; then
+    # A trapped TERM waits for the foreground worker to finish exiting before
+    # this background shell is reaped and its logs are packaged.
+    trap 'exit 143' TERM
+  fi
   mkdir -p "$(dirname "$log_file")"
   echo "[START] $log_file"
   if "$@" >"$log_file" 2>&1; then
@@ -140,6 +146,8 @@ capture_provenance() {
     printf 'IMPORT_U0_RUN_ID=%q ' "$IMPORT_U0_RUN_ID"
     printf 'IMPORT_U0_COMPACT_ROOT=%q ' "$IMPORT_U0_COMPACT_ROOT"
     printf 'IMPORT_U0_HEAVY_ROOT=%q ' "$IMPORT_U0_HEAVY_ROOT"
+    printf 'PRECISION_SOURCE_ROOT=%q ' "$PRECISION_SOURCE_ROOT"
+    printf 'PRECISION_CAPTURE_ROOT=%q ' "$PRECISION_CAPTURE_ROOT"
     printf 'COMPACT_ROOT=%q ' "$COMPACT_ROOT"
     printf 'HEAVY_ROOT=%q ' "$HEAVY_ROOT"
     printf 'DATA_ROOT=%q ' "$DATA_ROOT"
@@ -183,16 +191,33 @@ terminate_active_children() {
   ACTIVE_PIDS=()
 }
 
-# Wait for one batch of background jobs. ACTIVE_PIDS is published first so the exit trap can
-# still terminate the batch, and cleared afterwards; the phase fails if any single job failed.
+# Poll only our worker PIDs, without requiring Bash 5.1 wait -n -p. A failed
+# worker has finished its capture before it exits; stop its siblings immediately.
 wait_for_batch() {
-  local pid failed=0
+  local pid index
+  local -a remaining=("$@")
   ACTIVE_PIDS=("$@")
-  for pid in "$@"; do
-    wait "$pid" || failed=1
+  while [[ "${#remaining[@]}" -gt 0 ]]; do
+    for index in "${!remaining[@]}"; do
+      pid="${remaining[$index]}"
+      if kill -0 "$pid" 2>/dev/null; then
+        continue
+      fi
+      if wait "$pid"; then
+        unset 'remaining[index]'
+      else
+        unset 'remaining[index]'
+        ACTIVE_PIDS=("${remaining[@]}")
+        terminate_active_children
+        return 1
+      fi
+      ACTIVE_PIDS=("${remaining[@]}")
+    done
+    if [[ "${#remaining[@]}" -gt 0 ]]; then
+      sleep 1
+    fi
   done
   ACTIVE_PIDS=()
-  [[ "$failed" -eq 0 ]]
 }
 
 copy_compact_attestations() {
@@ -214,7 +239,10 @@ copy_compact_attestations() {
       local relative="${path#"$CHECKPOINT_ROOT"/}"
       mkdir -p "$COMPACT_ROOT/training_attestations/$(dirname "$relative")"
       cp -f "$path" "$COMPACT_ROOT/training_attestations/$relative"
-    done < <(find "$CHECKPOINT_ROOT" -type f \( -name 'metrics.json' -o -name '*.sha256.json' \) -print0)
+    done < <(find "$CHECKPOINT_ROOT" -type f \( \
+      -name 'metrics.json' -o -name '*.sha256.json' -o -name 'failure.json' -o -name 'acknowledgement.json' \
+      -o -path '*/telemetry/*/attempt.json' -o -path '*/telemetry/*/steps.jsonl' -o -path '*/telemetry/*/epochs.jsonl' \
+    \) -print0)
   fi
   if [[ -d "$SOURCE_ROOT" ]]; then
     while IFS= read -r -d '' path; do
@@ -251,14 +279,13 @@ package_attempt() {
     --started-at-utc "$STARTED_AT_UTC" \
     --remote-heavy-locator "$REMOTE_HEAVY_LOCATOR"
   local export_root="results/exports"
-  local archive_name="${RUN_ID}__${ATTEMPT_ID}__${status}.tar.gz"
-  mkdir -p "$export_root"
-  tar -czf "$export_root/.${archive_name}.part" -C "$(dirname "$COMPACT_ROOT")" "$(basename "$COMPACT_ROOT")"
-  mv "$export_root/.${archive_name}.part" "$export_root/$archive_name"
-  (cd "$export_root" && sha256sum "$archive_name" >"$archive_name.sha256")
-  echo "[PACKAGE] $export_root/$archive_name"
-  echo "[PACKAGE SIDECAR] $export_root/$archive_name.sha256"
-  cat "$export_root/$archive_name.sha256"
+  run_cli package \
+    "${GIT_ARGS[@]}" \
+    --run-root "$COMPACT_ROOT" \
+    --run-id "$RUN_ID" \
+    --attempt-id "$ATTEMPT_ID" \
+    --status "$status" \
+    --export-root "$export_root"
   echo "[HEAVY RETAINED] $HEAVY_ROOT"
 }
 
@@ -348,21 +375,32 @@ import_u0_phase() {
 }
 
 train_u0_phase() {
-  run_cli disk-preflight "${GIT_ARGS[@]}" --phase source --target-root "$HEAVY_ROOT"
+  local disk_phase="source"
+  if [[ "$PHASE" == "compare-precision" ]]; then
+    disk_phase="comparison"
+  fi
+  run_cli disk-preflight "${GIT_ARGS[@]}" --phase "$disk_phase" --target-root "$HEAVY_ROOT"
   local -a pids=()
-  local slot seed
-  # One GPU per declared seed. Do not reuse the slot index as the seed: the two only
-  # coincide while SEEDS happens to be (0 1 2).
-  for slot in "${!SEEDS[@]}"; do
-    seed="${SEEDS[$slot]}"
+  local slot=0 seed
+  # Seeds are logical experiment identities; GPU indices only choose worker devices.
+  for seed in "${SEEDS[@]}"; do
     CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_logged "$LOG_ROOT/u0_seed_${seed}.log" run_cli train-u0 \
       "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
       --checkpoint-root "$CHECKPOINT_ROOT" \
       --seed "$seed" \
       --device cuda:0 &
     pids+=("$!")
+    ACTIVE_PIDS=("${pids[@]}")
+    slot=$((slot + 1))
+    if [[ "$slot" -eq "${#GPUS[@]}" ]]; then
+      wait_for_batch "${pids[@]}"
+      pids=()
+      slot=0
+    fi
   done
-  wait_for_batch "${pids[@]}"
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    wait_for_batch "${pids[@]}"
+  fi
 }
 
 materialize_source_phase() {
@@ -372,7 +410,6 @@ materialize_source_phase() {
   local seed_count="${#SEEDS[@]}"
   local base=$((gpu_count / seed_count))
   local remainder=$((gpu_count % seed_count))
-  local next_slot=0
   local index seed shard count slot
   # Spread the GPUs over the declared seeds; the first `remainder` seeds get one extra
   # shard. Indexing by position, not by the seed value, keeps this correct if SEEDS changes.
@@ -382,15 +419,18 @@ materialize_source_phase() {
     if [[ "$index" -lt "$remainder" ]]; then
       count=$((count + 1))
     fi
+    if [[ "$count" -eq 0 ]]; then
+      count=1
+    fi
     for ((shard = 0; shard < count; shard++)); do
-      jobs+=("$seed $shard $count $next_slot")
-      next_slot=$((next_slot + 1))
+      jobs+=("$seed $shard $count")
     done
   done
   local -a pids=()
   local job
+  slot=0
   for job in "${jobs[@]}"; do
-    read -r seed shard count slot <<< "$job"
+    read -r seed shard count <<< "$job"
     CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_logged "$LOG_ROOT/source_s${seed}_${shard}of${count}.log" \
       run_cli materialize-source \
       "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
@@ -401,8 +441,17 @@ materialize_source_phase() {
       --num-shards "$count" \
       --device cuda:0 &
     pids+=("$!")
+    ACTIVE_PIDS=("${pids[@]}")
+    slot=$((slot + 1))
+    if [[ "$slot" -eq "$gpu_count" ]]; then
+      wait_for_batch "${pids[@]}"
+      pids=()
+      slot=0
+    fi
   done
-  wait_for_batch "${pids[@]}"
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    wait_for_batch "${pids[@]}"
+  fi
 }
 
 # One wave: the variants at VARIANTS[start .. start+#GPUS-1], one per GPU, trained together.
@@ -427,6 +476,7 @@ train_controller_wave() {
       --variant "$variant" \
       --device cuda:0 &
     pids+=("$!")
+    ACTIVE_PIDS=("${pids[@]}")
   done
   wait_for_batch "${pids[@]}"
 }
@@ -448,21 +498,61 @@ train_controller_phase() {
     --output "$TRAINING_BARRIER"
 }
 
+compare_precision_phase() {
+  prepare_phase
+  # Import validates all completed U0 endpoints before the train-u0 command
+  # adopts them. The comparison must never start a fresh 400-epoch U0 run.
+  import_u0_phase
+  train_u0_phase
+  local seed
+  for seed in "${SEEDS[@]}"; do
+    run_cli init-controller "${PROTOCOL_ARGS[@]}" --checkpoint-root "$CHECKPOINT_ROOT" --seed "$seed"
+  done
+  run_logged "$LOG_ROOT/compare_precision.log" run_cli compare-precision \
+    "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
+    --checkpoint-root "$CHECKPOINT_ROOT" \
+    --output-root "$COMPACT_ROOT/comparison" \
+    --heavy-root "$HEAVY_ROOT/comparison" \
+    --run-id "$RUN_ID" \
+    --gpu-list "$GPU_LIST" \
+    --precision-source-root "$PRECISION_SOURCE_ROOT" \
+    --capture-root "$PRECISION_CAPTURE_ROOT" &
+  ACTIVE_PIDS=("$!")
+  wait_for_batch "${ACTIVE_PIDS[@]}"
+  echo "[PRECISION COMPARISON COMPLETE] $COMPACT_ROOT/comparison/summary.json"
+  echo "[PRECISION COMPARISON STOP] No production training, decisions, or evaluation were started."
+}
+
 decision_worker() {
+  trap 'exit 143' TERM
   local slot="$1"
   local queue_root="$2"
   local pending="$queue_root/pending"
   local claimed="$queue_root/claimed"
   local done_root="$queue_root/done"
   while true; do
-    local task
-    task="$(find "$pending" -maxdepth 1 -type f -printf '%f\n' | sort | head -n 1)"
+    if compgen -G "$queue_root/FAILED.*" >/dev/null; then
+      return 1
+    fi
+    local task="" candidate
+    for candidate in "$pending"/*; do
+      [[ -f "$candidate" ]] || continue
+      task="${candidate##*/}"
+      break
+    done
     if [[ -z "$task" ]]; then
       return 0
     fi
-    local claim="$claimed/${task}.gpu${GPUS[$slot]}"
-    if ! mv "$pending/$task" "$claim" 2>/dev/null; then
+    # Claim with atomic directory creation before moving the task. In particular,
+    # concurrent mv on a vanished source is not a reliable lock on every platform.
+    local claim_root="$claimed/$task"
+    if ! mkdir "$claim_root" 2>/dev/null; then
       continue
+    fi
+    local claim="$claim_root/task.gpu${GPUS[$slot]}"
+    if ! mv "$pending/$task" "$claim"; then
+      echo "$task" >"$queue_root/FAILED.gpu${GPUS[$slot]}"
+      return 1
     fi
     local seed variant
     read -r seed variant <"$claim"
@@ -500,6 +590,7 @@ decide_phase() {
   for slot in "${!GPUS[@]}"; do
     decision_worker "$slot" "$queue_root" &
     pids+=("$!")
+    ACTIVE_PIDS=("${pids[@]}")
   done
   wait_for_batch "${pids[@]}"
   run_cli freeze-decision \
@@ -530,6 +621,7 @@ evaluate_phase() {
       --num-shards "${#GPUS[@]}" \
       --device cuda:0 &
     pids+=("$!")
+    ACTIVE_PIDS=("${pids[@]}")
   done
   wait_for_batch "${pids[@]}"
   run_cli freeze-evaluation \
@@ -567,6 +659,7 @@ case "$PHASE" in
   smoke) smoke_phase ;;
   import-u0) import_u0_phase ;;
   train-u0) train_u0_phase ;;
+  compare-precision) compare_precision_phase ;;
   materialize-source) materialize_source_phase ;;
   train-controller) train_controller_phase ;;
   decide) decide_phase ;;

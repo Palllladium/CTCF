@@ -7,6 +7,7 @@ from typing import Any
 from datasets.OASIS100 import load_stage5_runtime_contract
 from experiments.stage5.config import (
     ControllerTrainingConfig,
+    LegacyControllerTrainingConfig,
     U0TrainingConfig,
     build_stage5_controller,
 )
@@ -20,6 +21,7 @@ from experiments.stage5.features import (
     SEARCH_STRIDES,
 )
 from experiments.stage5.ncc import controller_ncc_contract
+from experiments.stage5.precision import controller_precision_contract
 from experiments.stage5.safety import CLAIM_EPS, CLIP_SWEEPS, WORK_EPS
 from models.CTCF.controller import (
     STAGE5_INPUT_CHANNEL_COUNT,
@@ -58,10 +60,35 @@ def u0_training_contract(config: U0TrainingConfig) -> dict[str, Any]:
 
 
 def controller_training_contract(config: ControllerTrainingConfig) -> dict[str, Any]:
+    if isinstance(config, LegacyControllerTrainingConfig):
+        raise ValueError("production controller contract requires strict FP32 configuration")
+    contract = _controller_training_contract(config)
+    contract.update(
+        schema="ctcf-stage5-controller-training-contract-v4",
+        precision=controller_precision_contract(),
+        numerical_failure_policy="FAIL_CLOSED_CAPTURE_STATE_NO_SKIPPED_OR_RETRIED_UPDATES",
+        technical_recovery_policy="EXPLICIT_ACK_BOUND_TO_FAILURE_AND_LAST_COMPLETED_EPOCH",
+        telemetry_schema="ctcf-stage5-parameter-telemetry-v1",
+    )
+    return contract
+
+
+def legacy_controller_training_contract(config: LegacyControllerTrainingConfig, *, version: int = 3) -> dict[str, Any]:
+    """Reconstruct the exact historical controller contract for provenance checks."""
+    if not isinstance(config, LegacyControllerTrainingConfig) or version not in (2, 3):
+        raise ValueError("legacy controller contract requires its frozen AMP configuration and version 2 or 3")
+    contract = _controller_training_contract(config)
+    contract["schema"] = f"ctcf-stage5-controller-training-contract-v{version}"
+    contract["amp_overflow_policy"] = "FAIL_CLOSED_NO_SKIPPED_OPTIMIZER_UPDATES"
+    if version == 2:
+        del contract["objective_numerics"]
+    return contract
+
+
+def _controller_training_contract(config: ControllerTrainingConfig) -> dict[str, Any]:
     controller = build_stage5_controller(config)
     parameter_count = sum(parameter.numel() for parameter in controller.parameters())
     return {
-        "schema": "ctcf-stage5-controller-training-contract-v3",
         "objective_numerics": controller_ncc_contract(),
         "dataset_split": "training",
         "labels_reachable": False,
@@ -80,7 +107,6 @@ def controller_training_contract(config: ControllerTrainingConfig) -> dict[str, 
         "development_access_during_training": False,
         "training_metrics_are_diagnostic_only": True,
         "best_checkpoint_written": False,
-        "amp_overflow_policy": "FAIL_CLOSED_NO_SKIPPED_OPTIMIZER_UPDATES",
     }
 
 
@@ -190,6 +216,7 @@ __all__ = [
     "STAGE5_METRIC_IDS",
     "bootstrap_parameters",
     "controller_training_contract",
+    "legacy_controller_training_contract",
     "prepare_protocol_bundle",
     "search_contract",
     "u0_training_contract",

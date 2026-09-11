@@ -13,6 +13,7 @@ from datasets.OASIS100 import Stage5OasisImageStore
 from experiments.stage5.checkpoints import load_training_state
 from experiments.stage5.config import ControllerTrainingConfig, build_stage5_controller
 from experiments.stage5.features import build_stage5_features
+from experiments.stage5.precision import controller_precision, controller_precision_contract
 from experiments.stage5.runtime import validate_certified_source_artifact
 from experiments.stage5.safety import commit_controller_delta
 from models.CTCF.controller import STAGE5_VARIANTS, Stage5SpatialController
@@ -153,6 +154,8 @@ def _load_controller(
     )
     if int(state["epoch_completed"]) != int(protocol["controller_fixed_epoch"]):
         raise RuntimeError("Stage5 controller is not the frozen endpoint")
+    if state.get("controller_precision") != controller_precision_contract() or state.get("scaler_state") is not None:
+        raise RuntimeError("Stage5 decision checkpoint must use the strict FP32 controller contract")
     controller.eval().requires_grad_(False)
     return controller
 
@@ -256,19 +259,11 @@ def _controller_outcome(
         raise RuntimeError("Stage5 controller decision requested without a loaded controller")
     moving, fixed = _case_images(context.store, case, context.device)
     source_device = source.to(device=context.device, dtype=torch.float32)
-    # The frozen S2/S4 feature contract is FP32.  Controller convolutions may use AMP, but
-    # constructing the search posterior under autocast would make deployment consume different
-    # inputs from controller training.
+    # Construct the same frozen FP32 features used during training, before entering
+    # the controller's strict FP32 boundary.
     with torch.inference_mode():
         features = build_stage5_features(fixed, moving, source_device)
-    with (
-        torch.inference_mode(),
-        torch.autocast(
-            device_type="cuda",
-            dtype=torch.float16,
-            enabled=context.device.type == "cuda",
-        ),
-    ):
+    with torch.inference_mode(), controller_precision(context.device):
         output = controller(
             features.controller_input,
             context.variant,

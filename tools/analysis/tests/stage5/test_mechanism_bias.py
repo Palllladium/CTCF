@@ -95,10 +95,9 @@ class BiasCudaTest(unittest.TestCase):
         rng = capture_rng_state()
         flags = backend_flags()
 
-        def loss(current, prepared, *, diagnostic_fp32):
-            with torch.autocast("cuda", dtype=torch.float16, enabled=not diagnostic_fp32):
-                first = current.controller(prepared.tensors_ab[0])
-                second = current.controller(prepared.tensors_ba[0])
+        def loss(current, prepared):
+            first = current.controller(prepared.tensors_ab[0])
+            second = current.controller(prepared.tensors_ba[0])
             total = (first.float().sum() + second.float().sum()) * 1e-10
             return total, {"loss": float(total.detach())}
 

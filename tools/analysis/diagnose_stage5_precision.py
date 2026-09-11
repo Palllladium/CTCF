@@ -29,7 +29,11 @@ from experiments.stage5.checkpoints import (
     load_training_state,
     restore_rng_state,
 )
-from experiments.stage5.config import ControllerTrainingConfig, U0TrainingConfig, build_stage5_controller
+from experiments.stage5.config import (
+    LegacyControllerTrainingConfig,
+    U0TrainingConfig,
+    build_stage5_controller,
+)
 from tools.analysis.diagnose_stage5_amp import require_readonly_checkpoint
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.run_stage5 import assert_clean_exact_git
@@ -92,7 +96,8 @@ def advance_pair(step, inputs, *, fp32):
     """One diagnostic update; reject bad gradients before any optimizer mutation."""
     step.optimizer.zero_grad(set_to_none=True)
     with precision_context(fp32):
-        loss, logs = runtime._controller_pair_loss(step, inputs, diagnostic_fp32=fp32)
+        with torch.autocast(device_type=step.device.type, dtype=torch.float16, enabled=not fp32):
+            loss, logs = runtime._controller_pair_loss(step, inputs)
         if not bool(torch.isfinite(loss)):
             raise FloatingPointError("non-finite controller objective")
         if fp32:
@@ -193,7 +198,7 @@ class Sources:
 
 def prepare_step(sources, *, variant, seed, resume_f0=False):
     runtime._seed_everything(seed)
-    config = ControllerTrainingConfig()
+    config = LegacyControllerTrainingConfig()
     device = torch.device("cuda:0")
     base, base_sha = sources.checkpoint(f"u0/seed_{seed}/last.pth")
     initial, _ = sources.checkpoint(f"controller_initial/seed_{seed}/initial.pth")

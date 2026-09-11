@@ -46,7 +46,7 @@ class RuntimeConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "AMP initial scale"):
             runtime.U0TrainingConfig(amp_initial_scale=32768.0)
         with self.assertRaisesRegex(ValueError, "AMP growth interval"):
-            runtime.ControllerTrainingConfig(amp_growth_interval=2000)
+            runtime.LegacyControllerTrainingConfig(amp_growth_interval=2000)
 
     def test_runner_namespace_is_label_free_and_complete(self) -> None:
         args = runtime._u0_args(runtime.U0TrainingConfig(), seed=7)
@@ -512,7 +512,7 @@ class CertifiedSourceTest(unittest.TestCase):
 class TrainingMechanicsTest(unittest.TestCase):
     def test_frozen_amp_scale_cannot_grow_during_any_training_endpoint(self) -> None:
         u0 = runtime.U0TrainingConfig()
-        controller = runtime.ControllerTrainingConfig()
+        controller = runtime.LegacyControllerTrainingConfig()
         maximum_u0_updates = u0.fixed_epoch * 294
         maximum_controller_updates = controller.fixed_epoch * (294 // 2)
         self.assertGreater(u0.amp_growth_interval, maximum_u0_updates)

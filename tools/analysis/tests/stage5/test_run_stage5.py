@@ -71,6 +71,8 @@ class ParserContractTest(unittest.TestCase):
                 "materialize-source",
                 "init-controller",
                 "train-controller",
+                "compare-precision",
+                "acknowledge-controller-failure",
                 "freeze-training",
                 "decide",
                 "freeze-decision",
@@ -78,6 +80,7 @@ class ParserContractTest(unittest.TestCase):
                 "freeze-evaluation",
                 "aggregate",
                 "finalize",
+                "package",
             },
         )
 
@@ -507,16 +510,16 @@ class ShellContractTest(unittest.TestCase):
         self.assertIn("readonly -a SEEDS=(0 1 2)", self.source)
         self.assertIn("source_s${seed}_${shard}of${count}", self.source)
         block = self.source.split("train_u0_phase()", 1)[1].split("materialize_source_phase()", 1)[0]
-        self.assertIn('for slot in "${!SEEDS[@]}"', block)
-        self.assertIn('seed="${SEEDS[$slot]}"', block)
+        self.assertIn('for seed in "${SEEDS[@]}"', block)
+        self.assertIn("slot=$((slot + 1))", block)
         self.assertIn('--seed "$seed"', block)
         # The slot index must not double as the seed: they coincide only for (0 1 2).
         self.assertNotIn("for slot in 0 1 2", self.source)
         self.assertNotIn('--seed "$slot"', self.source)
 
     def test_gpu_range_and_sharding_are_derived_from_the_seed_array(self) -> None:
-        self.assertIn("${#GPUS[@]} -lt ${#SEEDS[@]}", self.source)
-        self.assertIn("${#GPUS[@]} -gt 8", self.source)
+        self.assertIn("one or more unique non-negative integer GPU indices", self.source)
+        self.assertIn('if [[ "$count" -eq 0 ]]', self.source)
         self.assertIn('seed_count="${#SEEDS[@]}"', self.source)
         self.assertIn("base=$((gpu_count / seed_count))", self.source)
         self.assertIn("remainder=$((gpu_count % seed_count))", self.source)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,6 +103,26 @@ class CaptureReaderTests(unittest.TestCase):
         ):
             source.load_failure("F0", device=torch.device("cpu"))
 
+    def test_custom_capture_root_keeps_reviewed_hashes_and_original_record_prefix(self):
+        relocated = self.root / "retained-elsewhere"
+        shutil.copytree(self.heavy, relocated / "F0/historical_failure")
+        (self.heavy / "state.pth").write_bytes(b"do not read original location")
+        source = worker.CaptureSources(self.root, self.compact, {})
+        with (
+            mock.patch.object(
+                worker, "build_stage5_controller", side_effect=lambda config: torch.nn.Linear(1, 1, bias=False)
+            ),
+            mock.patch.object(
+                worker.runtime, "_stage5_grad_scaler", side_effect=lambda config: torch.amp.GradScaler("cpu")
+            ),
+        ):
+            loaded, _ = source.load_failure("F0", device=torch.device("cpu"), capture_root=relocated)
+        self.assertTrue(torch.equal(loaded.controller.weight, self.step.controller.weight))
+        source.verify_unchanged()
+        (relocated / "F0/historical_failure/state.pth").write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError, "bytes differ"):
+            source.load_failure("F0", device=torch.device("cpu"), capture_root=relocated)
+
     def test_compact_changes_and_path_escapes_rejected(self):
         (self.compact / "F0.json").write_text("{}")
         with self.assertRaisesRegex(RuntimeError, "member differs"):
@@ -119,6 +140,7 @@ class F2PReplayTests(unittest.TestCase):
             optimizer=torch.optim.AdamW(model.parameters()),
             scaler=torch.amp.GradScaler("cpu", init_scale=65536),
             variant="F2P",
+            device=torch.device("cpu"),
         )
         before = worker.training_snapshot(step)
 
@@ -134,7 +156,7 @@ class F2PReplayTests(unittest.TestCase):
             worker.ReplayObserver(step) as observer,
             self.assertRaises(FloatingPointError),
         ):
-            worker.runtime._controller_pair_step(step, {}, 0)
+            worker.runtime._legacy_controller_pair_step(step, {}, 0)
         self.assertEqual(step.scaler.get_scale(), 32768)
         saved = observer.current["failure_state"]
         self.assertEqual(saved["scaler"]["scale"], 65536)
@@ -186,7 +208,7 @@ class F2PReplayTests(unittest.TestCase):
             mock.patch.object(worker, "prepare_step", side_effect=make_step),
             mock.patch.object(worker.runtime, "controller_epoch_pairs", return_value=pairs),
             mock.patch.object(worker.runtime, "_prepare_controller_pair", return_value=SimpleNamespace()),
-            mock.patch.object(worker.runtime, "_controller_pair_step", side_effect=production_step),
+            mock.patch.object(worker.runtime, "_legacy_controller_pair_step", side_effect=production_step),
             mock.patch.object(worker.runtime, "_strict_scaler_step", side_effect=strict_step),
             mock.patch.object(worker, "_try_capture") as capture,
             mock.patch.object(worker, "run_audits") as audit,

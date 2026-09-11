@@ -144,12 +144,14 @@ class ProductionStepParityTest(unittest.TestCase):
             scaler=torch.amp.GradScaler("cpu"),
             store=None,
             variant="F0",
+            device=torch.device("cpu"),
         )
         pairs = ({"subject_a": "a", "subject_b": "b"}, {"subject_a": "c", "subject_b": "d"})
 
-        def pair_loss(_step, pair, *, diagnostic_fp32=False):
-            output = model(torch.ones(1, 1))
-            if pair is pairs[1] and not diagnostic_fp32:
+        def pair_loss(_step, pair):
+            with torch.autocast("cpu", enabled=False):
+                output = model(torch.ones(1, 1))
+            if pair is pairs[1] and torch.is_autocast_enabled("cpu"):
                 output = output.half().float()
             return output.sum() * 2, {}
 
@@ -197,7 +199,7 @@ class ProductionStepParityTest(unittest.TestCase):
             result = diagnostic.probe(
                 controller,
                 optimizer,
-                lambda mode: runtime._controller_pair_loss(step, inputs, diagnostic_fp32=mode),
+                lambda mode: runtime._controller_pair_loss(step, inputs),
                 device_type="cuda",
                 scale=1.0,
                 fp32=fp32,
@@ -206,10 +208,12 @@ class ProductionStepParityTest(unittest.TestCase):
             self.assertTrue(any("requested_delta" in event["tensor"] for event in result["tensor_events"]))
             self.assertTrue(any(event["stage"] == "scaled_backward" for event in result["tensor_events"]))
 
-    def test_production_still_uses_default_precision_and_strict_optimizer_step(self):
+    def test_legacy_replay_keeps_amp_and_strict_optimizer_step(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))
         optimizer = torch.optim.SGD([parameter], lr=0.1)
-        step = SimpleNamespace(optimizer=optimizer, scaler=torch.amp.GradScaler("cpu"), variant="F0")
+        step = SimpleNamespace(
+            optimizer=optimizer, scaler=torch.amp.GradScaler("cpu"), variant="F0", device=torch.device("cpu")
+        )
         inputs = SimpleNamespace(bootstrap_residual=0.125)
         with (
             mock.patch.object(runtime, "_prepare_controller_pair", return_value=inputs),
@@ -217,7 +221,7 @@ class ProductionStepParityTest(unittest.TestCase):
                 runtime, "_controller_pair_loss", return_value=(parameter.square(), {"ncc": 1.0})
             ) as loss,
         ):
-            logs = runtime._controller_pair_step(step, {"subject_a": "a", "subject_b": "b"}, 0)
+            logs = runtime._legacy_controller_pair_step(step, {"subject_a": "a", "subject_b": "b"}, 0)
         loss.assert_called_once_with(step, inputs)
         self.assertAlmostEqual(float(parameter.detach()), 0.8)
         self.assertEqual(logs["bootstrap_digital_residual_percent"], 0.125)
@@ -225,7 +229,7 @@ class ProductionStepParityTest(unittest.TestCase):
     def test_source_protocol_binding_is_exact(self):
         self.assertEqual(diagnostic.SOURCE_HEAD, "458489f77fc6f7c792ba1411bb763f4bb06310c5")
         self.assertEqual(diagnostic.VARIANTS, ("F0", "F2V", "F2S", "F2P"))
-        self.assertEqual(runtime.ControllerTrainingConfig().amp_initial_scale, 65536)
+        self.assertEqual(runtime.LegacyControllerTrainingConfig().amp_initial_scale, 65536)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,11 @@ import torch
 from datasets.OASIS100 import Stage5OasisImageStore
 from experiments.stage5 import runtime
 from experiments.stage5.checkpoints import capture_rng_state, restore_rng_state, state_dict_sha256
-from experiments.stage5.config import ControllerTrainingConfig, U0TrainingConfig, build_stage5_controller
+from experiments.stage5.config import (
+    LegacyControllerTrainingConfig,
+    U0TrainingConfig,
+    build_stage5_controller,
+)
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.run_stage5 import assert_clean_exact_git
 from tools.analysis.stage5.artifacts import load_canonical_json
@@ -114,7 +118,8 @@ def probe(model, optimizer, loss_fn, *, device_type, scale, fp32):
     result = {"mode": "controller_fp32" if fp32 else "controller_fp16", "scale": scale}
     with GradientTrace(model) as trace:
         try:
-            loss, logs = loss_fn(fp32)
+            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=not fp32):
+                loss, logs = loss_fn(fp32)
             finite_loss = bool(torch.isfinite(loss))
             result["loss"] = float(loss.detach()) if finite_loss else None
             result["metrics"] = {k: float(v) if math.isfinite(float(v)) else None for k, v in logs.items()}
@@ -189,7 +194,7 @@ def prepare_step(args, report):
     source_hashes[str(protocol_path)] = sha256_file(protocol_path)
     runtime._seed_everything(0)
     device = torch.device("cuda:0")
-    config = ControllerTrainingConfig()
+    config = LegacyControllerTrainingConfig()
     store = Stage5OasisImageStore(args.data_contract, args.image_root)
     if store.runtime.contract_sha256 != protocol["data_contract_sha256"]:
         raise RuntimeError("Image-only data contract differs from the failed run")
@@ -318,7 +323,8 @@ def _diagnose_legacy_source(args, report):
         rng = capture_rng_state()
         step.optimizer.zero_grad(set_to_none=True)
         try:
-            loss, _logs = runtime._controller_pair_loss(step, inputs)
+            with torch.autocast(device_type=step.device.type, dtype=torch.float16, enabled=True):
+                loss, _logs = runtime._controller_pair_loss(step, inputs)
             report["replay_metrics"].append({"pair": pair, "metrics": _logs})
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError("non-finite controller loss during diagnostic replay")
@@ -342,9 +348,7 @@ def _diagnose_legacy_source(args, report):
                 trial = probe(
                     step.controller,
                     step.optimizer,
-                    lambda use_fp32, pair_inputs=inputs: runtime._controller_pair_loss(
-                        step, pair_inputs, diagnostic_fp32=use_fp32
-                    ),
+                    lambda use_fp32, pair_inputs=inputs: runtime._controller_pair_loss(step, pair_inputs),
                     device_type="cuda",
                     scale=scale,
                     fp32=fp32,

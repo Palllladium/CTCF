@@ -224,7 +224,11 @@ def capture_controller_images(step, inputs):
             images.append((first.detach().clone(), second.detach().clone()))
             return super().forward(first, second)
 
-    with torch.no_grad(), patch.object(losses, "ControllerNCC", CaptureNCC):
+    with (
+        torch.no_grad(),
+        patch.object(losses, "ControllerNCC", CaptureNCC),
+        torch.autocast(device_type=step.device.type, dtype=torch.float16, enabled=True),
+    ):
         _, metrics = runtime._controller_pair_loss(step, inputs)
     if len(images) != 2:
         raise RuntimeError("Expected exactly two directed NCC calls")
@@ -267,7 +271,7 @@ def audit_pair(step, inputs, pair, rng, *, probe_fn, save):
             trial = probe_fn(
                 step.controller,
                 step.optimizer,
-                lambda mode: runtime._controller_pair_loss(step, inputs, diagnostic_fp32=mode),
+                lambda mode: runtime._controller_pair_loss(step, inputs),
                 device_type=step.device.type,
                 scale=scale,
                 fp32=fp32,
