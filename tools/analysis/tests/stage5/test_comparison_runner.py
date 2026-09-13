@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import csv
+import io
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,7 @@ from tools.analysis.run_artifacts import sha256_file
 from tools.analysis.stage5.comparison_execution import (
     ComparisonExecutor,
     ComparisonJob,
+    _device_interval_metrics,
     build_job_plan,
     execute_comparison,
     parse_gpu_list,
@@ -25,6 +28,16 @@ from tools.analysis.stage5.comparison_execution import (
     write_json,
 )
 from tools.analysis.tests.stage5.test_production_runner import BASH, SOURCE, shell_function
+
+# Verbatim rows from S5_COMPARISON_20260912T061525Z_632e518a15c9,
+# comparison/attempts/20260912T061712_4a6d4760/gpu.csv. Keep the units:
+# the original regression used bare numbers, unlike the recorded --format=csv.
+H100_CSV = """timestamp, index, uuid, name, utilization.gpu [%], utilization.memory [%], memory.used [MiB], memory.total [MiB], temperature.gpu, power.draw [W]
+2026/09/12 06:17:26.305, 2, GPU-107f0d10-2c02-7c73-7b9f-680acd29b484, NVIDIA H100 80GB HBM3, 100 %, 1 %, 29089 MiB, 81559 MiB, 35, 154.88 W
+2026/09/12 06:17:26.305, 3, GPU-8c958eaa-b244-64cb-6283-d37792aac963, NVIDIA H100 80GB HBM3, 100 %, 3 %, 29089 MiB, 81559 MiB, 29, 158.86 W
+2026/09/12 06:17:28.306, 3, GPU-8c958eaa-b244-64cb-6283-d37792aac963, NVIDIA H100 80GB HBM3, 100 %, 0 %, 36227 MiB, 81559 MiB, 29, 162.00 W
+2026/09/12 06:17:29.306, 2, GPU-107f0d10-2c02-7c73-7b9f-680acd29b484, NVIDIA H100 80GB HBM3, 100 %, 0 %, 36227 MiB, 81559 MiB, 36, 150.74 W
+"""
 
 FIXTURE = r"""
 import argparse, hashlib, json, os, time
@@ -265,6 +278,100 @@ class ComparisonSchedulerTest(unittest.TestCase):
         self.assertEqual(record["gpu_summary"]["3"]["samples"], 2)
         with self.assertRaisesRegex(ValueError, "no data samples"):
             read_monitor_samples(path, "gpu", ("2", "3"))
+
+    def monitored_interval(self, text, *, gpu="2"):
+        path = self.root / "gpu.csv"
+        path.write_text(text, encoding="utf-8")
+        manifest = self.root / "monitor.json"
+        write_json(
+            manifest,
+            [
+                {
+                    "name": "gpu",
+                    "status": "RECORDED",
+                    "path": str(path),
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256_file(path),
+                    "timestamp_utc_offset_seconds": 0,
+                }
+            ],
+        )
+        record = {
+            "spec": {"job": {"gpu": gpu}},
+            "monitor_root": str(self.root),
+            "monitor_ref": {"path": str(manifest), "sha256": sha256_file(manifest)},
+        }
+        start = datetime(2026, 9, 12, tzinfo=timezone.utc).timestamp()
+        return _device_interval_metrics([record], [(start, start + 86400)], {})
+
+    def test_real_h100_units_in_both_monitor_aggregation_paths(self):
+        path = self.root / "gpu.csv"
+        path.write_text(H100_CSV, encoding="utf-8")
+        summary = read_monitor_samples(path, "gpu", ("2", "3"), timestamp_utc_offset_seconds=0)
+        self.assertEqual(summary["sample_rows"], 4)
+        for gpu, power, temperature in (("2", 154.88, 36), ("3", 162.0, 29)):
+            with self.subTest(gpu=gpu):
+                overall = summary["gpu_summary"][gpu]
+                interval = self.monitored_interval(H100_CSV, gpu=gpu)
+                self.assertEqual(interval["status"], "RECORDED")
+                for record in (overall, interval):
+                    self.assertEqual(record["samples"], 2)
+                    self.assertEqual(record["peak_memory_used_mib"], 36227)
+                    self.assertEqual(record["peak_utilization_percent"], 100)
+                    self.assertEqual(record["peak_power_w"], power)
+                    self.assertEqual(record["peak_temperature_c"], temperature)
+                    self.assertTrue(
+                        all(field["status"] == "RECORDED" for field in record["measurement_coverage"].values())
+                    )
+
+    def test_invalid_units_and_numbers_are_rejected_even_for_optional_sensors(self):
+        original = next(csv.DictReader(io.StringIO(H100_CSV), skipinitialspace=True))
+        fields = {"memory.used [MiB]": "MiB", "utilization.gpu [%]": "%", "temperature.gpu": "", "power.draw [W]": "W"}
+        for field, unit in fields.items():
+            for invalid in ("1 bananas", "1 GiB", "nan", "inf", "-1", "1e999", f"-1 {unit}".strip()):
+                with self.subTest(field=field, invalid=invalid):
+                    stream = io.StringIO()
+                    writer = csv.DictWriter(stream, fieldnames=original)
+                    writer.writeheader()
+                    writer.writerow({**original, field: invalid})
+                    text = stream.getvalue()
+                    interval = self.monitored_interval(text)
+                    self.assertEqual(interval["status"], "UNAVAILABLE")
+                    self.assertNotIn("peak_memory_used_mib", interval)
+                    with self.assertRaises(ValueError):
+                        read_monitor_samples(self.root / "gpu.csv", "gpu", ("2",), timestamp_utc_offset_seconds=0)
+
+    def test_optional_unavailable_sensors_have_explicit_coverage(self):
+        header = "timestamp,index,uuid,memory.used [MiB],utilization.gpu [%],temperature.gpu,power.draw [W]\n"
+        text = (
+            header
+            + "2026/09/12 06:17:26.305,2,GPU-fixture,1 MiB,0 %,N/A,[Not Supported]\n"
+            + "2026/09/12 06:17:27.305,2,GPU-fixture,2,1,35,[N/A]\n"
+        )
+        interval = self.monitored_interval(text)
+        overall = read_monitor_samples(self.root / "gpu.csv", "gpu", ("2",), timestamp_utc_offset_seconds=0)[
+            "gpu_summary"
+        ]["2"]
+        for result in (overall, interval):
+            self.assertEqual(result["peak_temperature_c"], 35)
+            self.assertIsNone(result["peak_power_w"])
+            self.assertEqual(
+                result["measurement_coverage"]["peak_temperature_c"],
+                {"status": "PARTIAL", "valid_samples": 1, "unavailable_samples": 1, "unavailable_reasons": {"n/a": 1}},
+            )
+            self.assertEqual(result["measurement_coverage"]["peak_power_w"]["status"], "UNAVAILABLE")
+            self.assertEqual(result["measurement_coverage"]["peak_power_w"]["unavailable_samples"], 2)
+        self.assertEqual(interval["status"], "RECORDED")
+        # Missing optional columns are explicitly unavailable, not fabricated zeroes.
+        text = "timestamp,index,uuid,memory.used [MiB],utilization.gpu [%]\n2026/09/12 06:17:26.305,2,GPU-fixture,1 MiB,0 %\n"
+        result = self.monitored_interval(text)
+        self.assertIsNone(result["peak_power_w"])
+        self.assertEqual(result["measurement_coverage"]["peak_power_w"]["unavailable_reasons"], {"MISSING": 1})
+        for missing in ("N/A", "[Not Supported]", ""):
+            interval = self.monitored_interval(text.replace("1 MiB", missing))
+            self.assertEqual(interval["status"], "UNAVAILABLE")
+            with self.assertRaisesRegex(ValueError, "no finite"):
+                read_monitor_samples(self.root / "gpu.csv", "gpu", ("2",), timestamp_utc_offset_seconds=0)
 
     def test_authenticated_failed_monitor_still_prevents_reuse(self):
         executor = self.executor()

@@ -97,7 +97,7 @@ class ControllerNCCTest(unittest.TestCase):
         config = ControllerTrainingConfig()
         controller = controller_training_contract(config)
         u0 = u0_training_contract(U0TrainingConfig())
-        self.assertEqual(controller["schema"], "ctcf-stage5-controller-training-contract-v4")
+        self.assertEqual(controller["schema"], "ctcf-stage5-controller-training-contract-v5")
         self.assertEqual(controller["objective_numerics"], ncc.controller_ncc_contract())
         self.assertEqual(controller["objective_numerics"]["ncc_out_of_range_policy"], "RAISE_WITHOUT_CLIPPING")
         self.assertFalse(controller["precision"]["gradient_scaler"])

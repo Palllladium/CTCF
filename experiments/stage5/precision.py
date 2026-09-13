@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import torch
 
 PRECISION_MODES = ("fp32_strict", "tf32", "bf16")
+CONTROLLER_PRECISION_MODE = "tf32"
 
 
 def precision_mode_contract(mode: str) -> dict:
@@ -27,13 +28,8 @@ def precision_mode_contract(mode: str) -> dict:
 
 def controller_precision_contract() -> dict:
     return {
-        "schema": "ctcf-stage5-controller-precision-v1",
-        "parameter_dtype": "float32",
-        "autocast": False,
-        "cudnn_allow_tf32": False,
-        "matmul_allow_tf32": False,
-        "gradient_scaler": False,
-        "objective_numerics": "SEE_CONTROLLER_NCC_CONTRACT",
+        **precision_mode_contract(CONTROLLER_PRECISION_MODE),
+        "schema": "ctcf-stage5-controller-precision-v2",
     }
 
 
@@ -59,6 +55,6 @@ def precision_context(device: torch.device, mode: str = "fp32_strict"):
 
 @contextmanager
 def controller_precision(device: torch.device):
-    """Production remains strict FP32 regardless of comparison modes."""
-    with precision_context(device, "fp32_strict"):
+    """Use the validated TF32 mode for controller training and inference only."""
+    with precision_context(device, CONTROLLER_PRECISION_MODE):
         yield

@@ -38,6 +38,16 @@ from tools.analysis.stage5.primitives import canonical_sha256, write_immutable_j
 
 OBSERVED_STATUSES = frozenset(("COMPLETE", "CANDIDATE_FAILURE", "UNSUPPORTED"))
 GATE_TIMEOUT_SECONDS = 900
+GPU_MEASUREMENTS = (
+    ("memory.used [MiB]", "peak_memory_used_mib", "MiB", True),
+    ("utilization.gpu [%]", "peak_utilization_percent", "%", True),
+    ("temperature.gpu", "peak_temperature_c", None, False),
+    ("power.draw [W]", "peak_power_w", "W", False),
+)
+GPU_UNAVAILABLE_VALUES = frozenset(
+    ("n/a", "[n/a]", "not supported", "[not supported]", "not available", "[not available]")
+)
+GPU_NUMBER = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?:\s*(\S+))?")
 
 
 def utc_now() -> str:
@@ -187,6 +197,43 @@ class GpuMonitor:
         return self.records
 
 
+def _accumulate_gpu_measurements(target: dict, row: dict) -> None:
+    """Parse both nvidia-smi CSV formats; distinguish absent sensors from corrupt data."""
+    for field, key, unit, mandatory in GPU_MEASUREMENTS:
+        raw = row.get(field)
+        text = raw.strip() if isinstance(raw, str) else ""
+        unavailable = "MISSING" if not text else text.lower() if text.lower() in GPU_UNAVAILABLE_VALUES else None
+        if unavailable is not None:
+            if mandatory:
+                raise ValueError(f"Monitoring CSV has no finite {field}: {raw!r}")
+            value = None
+        else:
+            match = GPU_NUMBER.fullmatch(text)
+            if match is None or match.group(2) not in (None, unit):
+                raise ValueError(f"Invalid GPU measurement or unit for {field}: {raw!r}")
+            value = float(match.group(1))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"Non-finite or negative GPU measurement for {field}: {raw!r}")
+        coverage = target.setdefault("measurement_coverage", {}).setdefault(
+            key, {"valid_samples": 0, "unavailable_samples": 0, "unavailable_reasons": {}}
+        )
+        target.setdefault(key, None)
+        if value is None:
+            coverage["unavailable_samples"] += 1
+            reasons = coverage["unavailable_reasons"]
+            reasons[unavailable] = reasons.get(unavailable, 0) + 1
+        else:
+            coverage["valid_samples"] += 1
+            target[key] = max(value, target[key] or 0)
+        coverage["status"] = (
+            "UNAVAILABLE"
+            if not coverage["valid_samples"]
+            else "PARTIAL"
+            if coverage["unavailable_samples"]
+            else "RECORDED"
+        )
+
+
 def read_monitor_samples(
     path: Path, name: str, gpus: tuple[str, ...], *, timestamp_utc_offset_seconds: int | None = None
 ) -> dict:
@@ -217,22 +264,7 @@ def read_monitor_samples(
         summary = summaries.setdefault(gpu, {"samples": 0, "uuid": row["uuid"], "first_sample_local": row["timestamp"]})
         summary["samples"] += 1
         summary["last_sample_local"] = row["timestamp"]
-        for field, key, mandatory in (
-            ("memory.used [MiB]", "peak_memory_used_mib", True),
-            ("utilization.gpu [%]", "peak_utilization_percent", True),
-            ("temperature.gpu", "peak_temperature_c", False),
-            ("power.draw [W]", "peak_power_w", False),
-        ):
-            try:
-                value = float(row[field])
-                if not math.isfinite(value) or value < 0:
-                    raise ValueError("Non-finite or negative GPU measurement")
-            except (KeyError, TypeError, ValueError):
-                if mandatory:
-                    raise ValueError(f"Monitoring CSV has no finite {field}") from None
-                summary.setdefault(key, None)
-                continue
-            summary[key] = max(value, summary.get(key) or 0)
+        _accumulate_gpu_measurements(summary, row)
     if set(summaries) != set(gpus):
         raise ValueError("Monitoring CSV has no data samples for every selected GPU")
     return {
@@ -598,22 +630,7 @@ def _device_interval_metrics(records: list[dict], intervals: list[tuple[float, f
         times = []
         for stamp, row in selected.values():
             times.append(stamp)
-            for field, key, mandatory in (
-                ("memory.used [MiB]", "peak_memory_used_mib", True),
-                ("utilization.gpu [%]", "peak_utilization_percent", True),
-                ("temperature.gpu", "peak_temperature_c", False),
-                ("power.draw [W]", "peak_power_w", False),
-            ):
-                try:
-                    value = float(row[field])
-                    if not math.isfinite(value) or value < 0:
-                        raise ValueError("Invalid GPU measurement")
-                except (KeyError, TypeError, ValueError):
-                    if mandatory:
-                        raise ValueError(f"No finite GPU measurement: {field}") from None
-                    result.setdefault(key, None)
-                    continue
-                result[key] = max(value, result.get(key) or 0)
+            _accumulate_gpu_measurements(result, row)
         result.update(
             status="RECORDED",
             samples=len(selected),

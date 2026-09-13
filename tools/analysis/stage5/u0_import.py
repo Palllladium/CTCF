@@ -1,4 +1,4 @@
-"""Import completed U0 endpoints into the strict-FP32 controller protocol.
+"""Import completed U0 endpoints into the TF32 controller protocol.
 
 The legacy ``git_head``/``protocol_sha256`` fields become the target *binding*.
 Actual training provenance stays in ``training_git_head`` and the authenticated
@@ -103,7 +103,7 @@ def _validate_hotfix(
         version = 2 if source["git_head"] == SOURCE_GIT_HEAD else 3
         expected_legacy = legacy_controller_training_contract(LegacyControllerTrainingConfig(), version=version)
     if target_controller != expected_controller:
-        raise RuntimeError("Stage5 U0 import target controller contract is not the exact strict FP32 contract")
+        raise RuntimeError("Stage5 U0 import target controller contract is not the exact production TF32 contract")
     if source_controller != expected_legacy:
         raise RuntimeError("Stage5 U0 import source controller contract is not the frozen historical contract")
     expected_source = copy.deepcopy(target)
@@ -113,7 +113,9 @@ def _validate_hotfix(
         expected_source["bootstrap"]["parameters"]["repair_operator_id"] = OLD_REPAIR_ID
         del expected_source["bootstrap"]["parameters"]["repair_parameters"]["digital_residual_policy"]
     if source != expected_source:
-        raise RuntimeError("Stage5 U0 import protocols differ beyond git_head and the exact bootstrap/NCC/FP32 changes")
+        raise RuntimeError(
+            "Stage5 U0 import protocols differ beyond git_head and the exact bootstrap/NCC/controller precision changes"
+        )
 
 
 def _load_source_import_manifest(source_path: Path, source: dict[str, Any]) -> dict[str, Any] | None:

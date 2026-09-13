@@ -34,12 +34,12 @@ class ControllerPrecisionTest(unittest.TestCase):
                     actual = torch.mm(torch.ones(2, 2), torch.ones(2, 2))
                     self.assertEqual(actual.dtype, torch.bfloat16 if mode == "bf16" else torch.float32)
                 self.assertFalse(torch.is_autocast_enabled("cpu"))
-                self.assertFalse(torch.backends.cudnn.allow_tf32)
-                self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
+                self.assertTrue(torch.backends.cudnn.allow_tf32)
+                self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
             with self.assertRaisesRegex(ValueError, "unknown"), precision_context(device, "automatic"):
                 self.fail("unknown mode entered")
 
-    def test_shared_loss_never_reenables_autocast_inside_strict_context(self):
+    def test_shared_loss_never_reenables_autocast_inside_production_context(self):
         observations = []
 
         def controller(*args, **kwargs):
@@ -63,13 +63,13 @@ class ControllerPrecisionTest(unittest.TestCase):
         try:
             torch.set_float32_matmul_precision("medium")
             with controller_precision(torch.device("cpu")):
-                self.assertEqual(torch.get_float32_matmul_precision(), "highest")
-                self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
+                self.assertEqual(torch.get_float32_matmul_precision(), "high")
+                self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
             self.assertEqual(torch.get_float32_matmul_precision(), "medium")
         finally:
             torch.set_float32_matmul_precision(before)
 
-    def test_context_disables_autocast_and_tf32_and_restores_on_exception(self):
+    def test_context_enables_tf32_without_autocast_and_restores_on_exception(self):
         before = (torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32)
         with (
             self.assertRaisesRegex(RuntimeError, "test error"),
@@ -77,8 +77,8 @@ class ControllerPrecisionTest(unittest.TestCase):
             controller_precision(torch.device("cpu")),
         ):
             self.assertFalse(torch.is_autocast_enabled("cpu"))
-            self.assertFalse(torch.backends.cudnn.allow_tf32)
-            self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
+            self.assertTrue(torch.backends.cudnn.allow_tf32)
+            self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
             self.assertEqual(torch.mm(torch.ones(2, 2), torch.ones(2, 2)).dtype, torch.float32)
             raise RuntimeError("test error")
         self.assertEqual(before, (torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32))
@@ -259,7 +259,7 @@ class ControllerPrecisionTest(unittest.TestCase):
                 self.assertEqual(observed, [expected, expected])
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-    def test_real_bidirectional_controller_step_uses_fp32_forward_and_backward(self):
+    def test_real_bidirectional_controller_step_uses_tf32_forward_and_backward(self):
         device = torch.device("cuda")
         for variant in ("F0", "F2V", "F24P"):
             config = runtime.ControllerTrainingConfig()
@@ -283,12 +283,12 @@ class ControllerPrecisionTest(unittest.TestCase):
 
             def observe(_module, _args, output, observed=observed):
                 observed.append(output.requested_delta.dtype)
-                self.assertFalse(torch.backends.cudnn.allow_tf32)
+                self.assertTrue(torch.backends.cudnn.allow_tf32)
                 output.requested_delta.register_hook(check_gradient)
 
             def check_gradient(gradient):
                 self.assertEqual(gradient.dtype, torch.float32)
-                self.assertFalse(torch.backends.cudnn.allow_tf32)
+                self.assertTrue(torch.backends.cudnn.allow_tf32)
                 return gradient
 
             hook = controller.register_forward_hook(observe)

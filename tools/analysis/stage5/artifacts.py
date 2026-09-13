@@ -96,7 +96,7 @@ def checkpoint_metadata(
             payload.get("controller_precision") != controller_precision_contract()
             or payload.get("scaler_state") is not None
         ):
-            raise RuntimeError("Stage5 training barrier requires strict FP32 controller checkpoints")
+            raise RuntimeError("Stage5 training barrier requires FP32 with TF32 controller checkpoints")
         parameter_count = sum(int(value.numel()) for value in state.values())
         reference_count = sum(
             parameter.numel() for parameter in build_stage5_controller(ControllerTrainingConfig()).parameters()

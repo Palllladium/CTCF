@@ -61,10 +61,10 @@ def u0_training_contract(config: U0TrainingConfig) -> dict[str, Any]:
 
 def controller_training_contract(config: ControllerTrainingConfig) -> dict[str, Any]:
     if isinstance(config, LegacyControllerTrainingConfig):
-        raise ValueError("production controller contract requires strict FP32 configuration")
+        raise ValueError("production controller contract requires FP32 configuration without AMP")
     contract = _controller_training_contract(config)
     contract.update(
-        schema="ctcf-stage5-controller-training-contract-v4",
+        schema="ctcf-stage5-controller-training-contract-v5",
         precision=controller_precision_contract(),
         numerical_failure_policy="FAIL_CLOSED_CAPTURE_STATE_NO_SKIPPED_OR_RETRIED_UPDATES",
         technical_recovery_policy="EXPLICIT_ACK_BOUND_TO_FAILURE_AND_LAST_COMPLETED_EPOCH",

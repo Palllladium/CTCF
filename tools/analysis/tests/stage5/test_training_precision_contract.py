@@ -32,7 +32,7 @@ class Stage5TrainingPrecisionContractTest(unittest.TestCase):
     def test_precision_transition_does_not_change_controller_architecture_or_objective(self) -> None:
         old = legacy_controller_training_contract(LegacyControllerTrainingConfig())
         current = controller_training_contract(ControllerTrainingConfig())
-        self.assertEqual(current.pop("schema"), "ctcf-stage5-controller-training-contract-v4")
+        self.assertEqual(current.pop("schema"), "ctcf-stage5-controller-training-contract-v5")
         self.assertEqual(current.pop("precision"), controller_precision_contract())
         self.assertEqual(
             current.pop("numerical_failure_policy"),
@@ -51,7 +51,7 @@ class Stage5TrainingPrecisionContractTest(unittest.TestCase):
 
     def test_production_contract_cannot_accept_legacy_amp_configuration(self) -> None:
         self.assertNotIn("amp_initial_scale", asdict(ControllerTrainingConfig()))
-        with self.assertRaisesRegex(ValueError, "strict FP32"):
+        with self.assertRaisesRegex(ValueError, "FP32 configuration without AMP"):
             controller_training_contract(LegacyControllerTrainingConfig())
         with self.assertRaisesRegex(ValueError, "frozen AMP configuration"):
             legacy_controller_training_contract(ControllerTrainingConfig())

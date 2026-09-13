@@ -155,7 +155,7 @@ def _load_controller(
     if int(state["epoch_completed"]) != int(protocol["controller_fixed_epoch"]):
         raise RuntimeError("Stage5 controller is not the frozen endpoint")
     if state.get("controller_precision") != controller_precision_contract() or state.get("scaler_state") is not None:
-        raise RuntimeError("Stage5 decision checkpoint must use the strict FP32 controller contract")
+        raise RuntimeError("Stage5 decision checkpoint must use the FP32 with TF32 controller contract")
     controller.eval().requires_grad_(False)
     return controller
 
@@ -260,7 +260,7 @@ def _controller_outcome(
     moving, fixed = _case_images(context.store, case, context.device)
     source_device = source.to(device=context.device, dtype=torch.float32)
     # Construct the same frozen FP32 features used during training, before entering
-    # the controller's strict FP32 boundary.
+    # the controller's FP32 with TF32 boundary.
     with torch.inference_mode():
         features = build_stage5_features(fixed, moving, source_device)
     with torch.inference_mode(), controller_precision(context.device):

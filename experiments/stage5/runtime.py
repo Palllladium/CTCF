@@ -243,7 +243,7 @@ def _validate_runtime_checkpoint_metadata(
         if payload.get("controller_precision") != controller_precision_contract():
             raise RuntimeError("Stage5 checkpoint controller precision contract changed")
         if payload.get("scaler_state") is not None:
-            raise RuntimeError("Stage5 strict FP32 controller checkpoint must not contain a GradScaler")
+            raise RuntimeError("Stage5 FP32 with TF32 controller checkpoint must not contain a GradScaler")
     if expected_git_head is not None and payload.get("git_head") != expected_git_head:
         raise RuntimeError("Stage5 resume checkpoint belongs to another Git revision")
     if payload.get("base_checkpoint_sha256") != expected_base_checkpoint_sha256:
@@ -1221,9 +1221,9 @@ def _controller_pair_step(
     successful_updates: int = 0,
     telemetry: TrainingTelemetry | None = None,
 ) -> dict[str, float]:
-    """Update once in strict FP32; preserve failures, never skip or retry a pair."""
+    """Update once in FP32 with TF32; preserve failures, never skip or retry a pair."""
     if step.scaler is not None or type(step.config) is not ControllerTrainingConfig:
-        raise RuntimeError("Production Stage5 controllers require strict FP32 without GradScaler")
+        raise RuntimeError("Production Stage5 controllers require FP32 with TF32 without GradScaler")
     state = {
         "pair": dict(pair),
         "epoch_one_based": epoch + 1,
