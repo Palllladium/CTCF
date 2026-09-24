@@ -14,7 +14,7 @@ from experiments.stage5.checkpoints import load_training_state
 from experiments.stage5.config import ControllerTrainingConfig, build_stage5_controller
 from experiments.stage5.features import build_stage5_features
 from experiments.stage5.precision import controller_precision, controller_precision_contract
-from experiments.stage5.runtime import validate_certified_source_artifact
+from experiments.stage5.runtime import development_case_inventory, validate_certified_source_artifact
 from experiments.stage5.safety import commit_controller_delta
 from models.CTCF.controller import STAGE5_VARIANTS, Stage5SpatialController
 from tools.analysis.run_artifacts import sha256_file
@@ -24,7 +24,6 @@ from tools.analysis.stage5.artifacts import (
     checkpoint_metadata,
     execution_sha256,
     field_record,
-    file_record,
     load_canonical_json,
     save_reload_attestation,
 )
@@ -34,12 +33,14 @@ from tools.analysis.stage5.contracts import (
     DECISION_RECORD_SCHEMA,
     build_decision_barrier,
     build_training_barrier,
+    canonical_json_bytes,
     canonical_sha256,
     validate_decision_barrier,
     validate_protocol_contract,
     validate_training_barrier,
     write_immutable_json,
 )
+from tools.analysis.stage5.controller_observations import observe_controller_output
 from utils.cert_exact import certify_flow_exact
 
 
@@ -192,6 +193,8 @@ class _DecisionContext:
     seed: int
     variant: str
     device: torch.device
+    execution_git_head: str | None = None
+    continuation_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +219,7 @@ class _StageOutcome:
     transaction_status: str
     rollback_source_sha256_equal: bool
     clip_report: Mapping[str, Any] | None
+    controller_observations: Mapping[str, Any] | None = None
 
 
 def _source_only_outcome(
@@ -286,6 +290,7 @@ def _controller_outcome(
         transaction_status=transaction.status,
         rollback_source_sha256_equal=transaction.rollback_byte_identical,
         clip_report=transaction.clip_report,
+        controller_observations=observe_controller_output(output, collar_width=controller.collar_width),
     )
 
 
@@ -337,15 +342,22 @@ def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str]
     else:
         peak_memory_bytes = 0
     runtime_seconds = time.perf_counter() - started
+    if stages.controller_observations is not None:
+        runtime_seconds -= float(stages.controller_observations["observation_seconds"])
+        peak_memory_bytes = int(stages.controller_observations["peak_memory_bytes_before_observation"])
 
     exact_payload = {
-        "schema": "ctcf-stage5-decision-exact-report-v1",
+        "schema": "ctcf-stage5-decision-exact-report-v2",
         "decision_id": decision_id,
         "source_field": source_record,
         "candidate_exact": stages.candidate_exact,
         "returned_exact": stages.returned_exact,
         "clip_report": stages.clip_report,
+        "controller_observations": stages.controller_observations,
         "execution": {
+            "training_git_head": context.protocol["git_head"],
+            "execution_git_head": context.execution_git_head or context.protocol["git_head"],
+            "continuation_sha256": context.continuation_sha256,
             "protocol_sha256": canonical_sha256(context.protocol),
             "training_barrier_sha256": canonical_sha256(context.training),
             "checkpoint_sha256": context.metadata["checkpoint_file"]["sha256"],
@@ -356,7 +368,6 @@ def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str]
         },
     }
     exact_path = context.decision_root / "exact_reports" / f"{decision_id}.json"
-    write_immutable_json(exact_path, exact_payload)
     returned_path = stages.candidate_path if accepted else source_path
     record = {
         "schema": DECISION_RECORD_SCHEMA,
@@ -384,7 +395,12 @@ def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str]
             in_memory_array_sha256=stages.returned_array_sha256,
             reloaded_path=returned_path,
         ),
-        "exact_report": file_record("decision_output_root", context.decision_root, exact_path),
+        "exact_report": {
+            "root_id": "decision_output_root",
+            "relative_path": exact_path.relative_to(context.decision_root).as_posix(),
+            "bytes": len(canonical_json_bytes(exact_payload)),
+            "sha256": canonical_sha256(exact_payload),
+        },
         "candidate_exact_status": stages.candidate_exact["status"],
         "candidate_exact_certified": stages.candidate_exact["certified"],
         "returned_exact_status": stages.returned_exact["status"],
@@ -414,7 +430,52 @@ def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str]
             }
         ),
     }
+    # Persist the complete outcome before publishing either immutable JSON. A
+    # stopped process can finish publication without rerunning inference or
+    # replacing already-certified fields (and without changing its timings).
+    commit = {"schema": "ctcf-stage5-decision-commit-v1", "record": record, "exact_report": exact_payload}
+    write_immutable_json(context.decision_root / "commits" / f"{decision_id}.json", commit)
+    write_immutable_json(exact_path, exact_payload)
     write_immutable_json(context.decision_root / "records" / f"{decision_id}.json", record)
+
+
+def _recover_decision_commit(context: _DecisionContext, decision_id: str) -> bool:
+    path = context.decision_root / "commits" / f"{decision_id}.json"
+    if not path.exists():
+        return False
+    commit = load_canonical_json(path)
+    if commit.get("schema") != "ctcf-stage5-decision-commit-v1":
+        raise RuntimeError("Invalid Stage5 decision publication journal")
+    record, exact = commit["record"], commit["exact_report"]
+    build_decision_barrier(context.protocol, context.training, [record])
+    if (
+        record["decision_id"] != decision_id
+        or record["seed"] != context.seed
+        or record["variant_id"] != context.variant
+        or exact.get("decision_id") != decision_id
+        or exact.get("execution", {}).get("execution_git_head")
+        != (context.execution_git_head or context.protocol["git_head"])
+        or exact["execution"].get("continuation_sha256") != context.continuation_sha256
+    ):
+        raise RuntimeError("Stage5 decision journal belongs to another execution")
+    roots = {"source_field_root": context.source_root, "decision_output_root": context.decision_root}
+    for name in ("certified_source_field", "requested_field", "candidate_field", "returned_field"):
+        saved = record[name]
+        root = roots[saved["root_id"]]
+        if field_record(saved["root_id"], root, root / saved["relative_path"]) != saved:
+            raise RuntimeError(f"Stage5 interrupted decision field changed: {name}")
+    exact_path = context.decision_root / "exact_reports" / f"{decision_id}.json"
+    expected_exact = {
+        "root_id": "decision_output_root",
+        "relative_path": exact_path.relative_to(context.decision_root).as_posix(),
+        "bytes": len(canonical_json_bytes(exact)),
+        "sha256": canonical_sha256(exact),
+    }
+    if record["exact_report"] != expected_exact:
+        raise RuntimeError("Stage5 decision journal exact report changed")
+    write_immutable_json(exact_path, exact)
+    write_immutable_json(context.decision_root / "records" / f"{decision_id}.json", record)
+    return True
 
 
 def materialize_decisions(
@@ -432,6 +493,8 @@ def materialize_decisions(
     num_shards: int,
     device: torch.device,
     controller_config: ControllerTrainingConfig | None = None,
+    execution_git_head: str | None = None,
+    continuation_sha256: str | None = None,
 ) -> int:
     if seed not in BASE_SEEDS or variant not in ("U0", *STAGE5_VARIANTS):
         raise ValueError("decision seed or variant is outside the frozen Stage5 matrix")
@@ -443,7 +506,7 @@ def materialize_decisions(
     store = Stage5OasisImageStore(data_contract_path, image_root)
     if store.runtime.contract_sha256 != protocol["data_contract_sha256"]:
         raise RuntimeError("Stage5 data contract differs from the protocol")
-    case_inventory = tuple(store.runtime.pairs["cases"])
+    case_inventory = development_case_inventory(store)
     if [case["case_id"] for case in case_inventory] != protocol["directed_case_ids"]:
         raise RuntimeError("Stage5 decision cases differ from the protocol")
     checkpoints = _checkpoint_index(training)
@@ -473,6 +536,8 @@ def materialize_decisions(
         seed=seed,
         variant=variant,
         device=device,
+        execution_git_head=execution_git_head,
+        continuation_sha256=continuation_sha256,
     )
 
     completed = 0
@@ -486,9 +551,13 @@ def materialize_decisions(
             build_decision_barrier(protocol, training, [existing])
             if existing.get("decision_id") != decision_id:
                 raise RuntimeError("existing Stage5 decision has another identity")
-        else:
+        elif not _recover_decision_commit(context, decision_id):
             _materialize_one_decision(context, case, decision_id)
         completed += 1
+        print(
+            f"[STAGE5 DECISION CASE] seed={seed} variant={variant} case={case['case_id']} completed={completed}",
+            flush=True,
+        )
     return completed
 
 

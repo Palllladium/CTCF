@@ -9,6 +9,7 @@ readonly PHASE="${PHASE:-all}"
 readonly GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 readonly OASIS_ALL_ROOT="${OASIS_ALL_ROOT:?Set OASIS_ALL_ROOT to the OASIS All394 directory. Test20 is forbidden.}"
 readonly EXPECTED_GIT_HEAD="${EXPECTED_GIT_HEAD:?Set EXPECTED_GIT_HEAD to the exact committed Stage5 Git SHA.}"
+readonly TRAINING_GIT_HEAD="${TRAINING_GIT_HEAD:-}"
 readonly RUN_ID="${RUN_ID:?Set one stable RUN_ID and reuse it for every restart.}"
 readonly REMOTE_HEAVY_LOCATOR="${REMOTE_HEAVY_LOCATOR:-PENDING_UPLOAD}"
 readonly IMPORT_U0_RUN_ID="${IMPORT_U0_RUN_ID:-}"
@@ -33,6 +34,7 @@ readonly BARRIER_ROOT="$COMPACT_ROOT/barriers"
 readonly TRAINING_BARRIER="$BARRIER_ROOT/training_barrier.json"
 readonly DECISION_BARRIER="$BARRIER_ROOT/decision_barrier.json"
 readonly EVALUATION_BARRIER="$BARRIER_ROOT/evaluation_barrier.json"
+readonly CONTINUATION="$COMPACT_ROOT/continuations/$EXPECTED_GIT_HEAD.json"
 readonly SMOKE_REPORT="$COMPACT_ROOT/smoke/smoke_report.json"
 readonly SMOKE_BARRIER="$BARRIER_ROOT/smoke_barrier.json"
 readonly STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -61,12 +63,23 @@ if [[ ! "$RUN_ID" =~ ^S5_[A-Z0-9]+_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{12}$ ]]; then
   echo "[FAIL] RUN_ID must be S5_<MODE>_<UTC>_<12-char-head>." >&2
   exit 2
 fi
-if [[ "${RUN_ID##*_}" != "${EXPECTED_GIT_HEAD:0:12}" ]]; then
-  echo "[FAIL] RUN_ID suffix must equal the first 12 characters of EXPECTED_GIT_HEAD." >&2
+run_identity_head="$EXPECTED_GIT_HEAD"
+if [[ "$PHASE" == "continue-evaluation" ]]; then
+  if [[ ! "${TRAINING_GIT_HEAD:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "[FAIL] continue-evaluation requires the exact TRAINING_GIT_HEAD." >&2
+    exit 2
+  fi
+  run_identity_head="$TRAINING_GIT_HEAD"
+elif [[ -n "${TRAINING_GIT_HEAD:-}" ]]; then
+  echo "[FAIL] TRAINING_GIT_HEAD is only accepted for continue-evaluation." >&2
+  exit 2
+fi
+if [[ "${RUN_ID##*_}" != "${run_identity_head:0:12}" ]]; then
+  echo "[FAIL] RUN_ID suffix must match the execution HEAD, or TRAINING_GIT_HEAD for continue-evaluation." >&2
   exit 2
 fi
 case "$PHASE" in
-  all|prepare|smoke|import-u0|train-u0|compare-precision|materialize-source|train-controller|decide|evaluate|package) ;;
+  all|prepare|smoke|import-u0|train-u0|compare-precision|materialize-source|train-controller|decide|evaluate|package|continue-evaluation) ;;
   *) echo "[FAIL] Unknown PHASE=$PHASE" >&2; exit 2 ;;
 esac
 if [[ -n "$IMPORT_U0_RUN_ID" ]]; then
@@ -87,7 +100,11 @@ if ! flock -n 9; then
 fi
 
 readonly -a GIT_ARGS=(--repo-root "$REPO_ROOT" --expected-git-head "$EXPECTED_GIT_HEAD")
-readonly -a PROTOCOL_ARGS=("${GIT_ARGS[@]}" --protocol "$PROTOCOL")
+PROTOCOL_ARGS=("${GIT_ARGS[@]}" --protocol "$PROTOCOL")
+if [[ "$PHASE" == "continue-evaluation" ]]; then
+  PROTOCOL_ARGS+=(--continuation "$CONTINUATION")
+fi
+readonly -a PROTOCOL_ARGS
 readonly -a DATA_ARGS=(--data-contract "$DATA_CONTRACT" --image-root "$IMAGE_ROOT")
 
 run_cli() {
@@ -141,6 +158,7 @@ capture_provenance() {
     printf 'GPU_LIST=%q ' "$GPU_LIST"
     printf 'OASIS_ALL_ROOT=%q ' "$OASIS_ALL_ROOT"
     printf 'EXPECTED_GIT_HEAD=%q ' "$EXPECTED_GIT_HEAD"
+    printf 'TRAINING_GIT_HEAD=%q ' "$TRAINING_GIT_HEAD"
     printf 'RUN_ID=%q ' "$RUN_ID"
     printf 'REMOTE_HEAVY_LOCATOR=%q ' "$REMOTE_HEAVY_LOCATOR"
     printf 'IMPORT_U0_RUN_ID=%q ' "$IMPORT_U0_RUN_ID"
@@ -269,8 +287,13 @@ package_attempt() {
   local status="$1"
   local exit_code="$2"
   copy_compact_attestations
+  local -a continuation_args=()
+  if [[ "$PHASE" == "continue-evaluation" && -f "$CONTINUATION" ]]; then
+    continuation_args=(--continuation "$CONTINUATION")
+  fi
   run_cli finalize \
     "${GIT_ARGS[@]}" \
+    "${continuation_args[@]}" \
     --run-root "$COMPACT_ROOT" \
     --run-id "$RUN_ID" \
     --attempt-id "$ATTEMPT_ID" \
@@ -646,6 +669,18 @@ evaluate_phase() {
     --device cuda:0
 }
 
+continue_evaluation_phase() {
+  run_logged "$LOG_ROOT/prepare_continuation.log" run_cli prepare-continuation \
+    "${GIT_ARGS[@]}" --protocol "$PROTOCOL" "${DATA_ARGS[@]}" \
+    --training-git-head "$TRAINING_GIT_HEAD" \
+    --training-barrier "$TRAINING_BARRIER" \
+    --checkpoint-root "$CHECKPOINT_ROOT" --source-root "$SOURCE_ROOT" \
+    --decision-root "$DECISION_ROOT" --evaluation-root "$EVALUATION_ROOT" \
+    --output "$CONTINUATION"
+  decide_phase
+  evaluate_phase
+}
+
 dependency_preflight
 git_guard
 capture_provenance
@@ -664,6 +699,7 @@ case "$PHASE" in
   train-controller) train_controller_phase ;;
   decide) decide_phase ;;
   evaluate) evaluate_phase ;;
+  continue-evaluation) continue_evaluation_phase ;;
   package) ;;
   all)
     prepare_phase

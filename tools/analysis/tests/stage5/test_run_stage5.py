@@ -74,6 +74,7 @@ class ParserContractTest(unittest.TestCase):
                 "compare-precision",
                 "acknowledge-controller-failure",
                 "freeze-training",
+                "prepare-continuation",
                 "decide",
                 "freeze-decision",
                 "evaluate",
@@ -325,7 +326,7 @@ class ResumeAndArtifactTest(unittest.TestCase):
             execution = {"labels_loaded": False}
             certificate = certify_flow_exact(flow, eps="0.001")
             exact = {
-                "schema": "ctcf-stage5-decision-exact-report-v1",
+                "schema": "ctcf-stage5-decision-exact-report-v2",
                 "decision_id": "case__S0__F0",
                 "source_field": source,
                 "candidate_exact": certificate,
@@ -416,7 +417,7 @@ class PackagingGuardTest(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "invalid scientific artifacts"),
             ):
                 run_stage5.command_finalize(args)
-            validate.assert_called_once_with(root, "a" * 40)
+            validate.assert_called_once_with(root, "a" * 40, None)
 
     @staticmethod
     def _args(root: Path) -> argparse.Namespace:

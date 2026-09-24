@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,8 @@ from tools.analysis.stage5.evaluation import (
     build_pair_evaluation,
     compute_geometry_bundle,
     evaluate_returned_decision,
+    field_stage_diagnostics_csv,
+    pair_metric_csv,
     write_decision_metrics,
     write_evaluation_products,
 )
@@ -411,7 +414,7 @@ class PairedAggregationTest(unittest.TestCase):
     def test_bootstrap_is_pair_blocked_seed_aware_deterministic_and_has_no_threshold(self):
         rows = self._rows()
         first = aggregate_pair_effects(self.context, rows)
-        second = aggregate_pair_effects(self.context, rows)
+        second = aggregate_pair_effects(self.context, json.loads(json.dumps(rows, sort_keys=True)))
         self.assertEqual(first, second)
         self.assertTrue(first["no_success_threshold"])
         self.assertTrue(first["seed_handling"]["pair_seed_rows_are_not_treated_as_independent"])
@@ -503,6 +506,11 @@ class PairedAggregationTest(unittest.TestCase):
         rows = self._rows()
         aggregate = aggregate_pair_effects(self.context, rows)
         evaluation = self.forward_evaluation
+        self.assertEqual(pair_metric_csv(rows), pair_metric_csv(json.loads(json.dumps(rows, sort_keys=True))))
+        self.assertEqual(
+            field_stage_diagnostics_csv([evaluation]),
+            field_stage_diagnostics_csv(json.loads(json.dumps([evaluation], sort_keys=True))),
+        )
         output = self.root / "products"
         digests = write_evaluation_products(output, [evaluation], rows, aggregate)
         self.assertEqual(

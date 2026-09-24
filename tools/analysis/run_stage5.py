@@ -36,6 +36,13 @@ from tools.analysis.run_artifacts import atomic_write_text, sha256_file
 from tools.analysis.search.pyramid import array_sha256
 from tools.analysis.search.transaction import load_flow_npz
 from tools.analysis.stage5.artifacts import file_record, load_canonical_json
+from tools.analysis.stage5.continuation import (
+    FILE_NAMES,
+    POST_TRAINING_ACTIONS,
+    ROOT_NAMES,
+    prepare_continuation,
+    validate_continuation,
+)
 from tools.analysis.stage5.contracts import (
     BASE_SEEDS,
     VARIANT_IDS,
@@ -136,7 +143,19 @@ def _read_protocol(path: Path, git_head: str) -> dict[str, Any]:
 
 def _protocol_context(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     head = assert_clean_exact_git(args.repo_root, args.expected_git_head)
-    protocol = _read_protocol(args.protocol, head)
+    continuation = getattr(args, "continuation", None)
+    protocol_head = head
+    if continuation is not None:
+        if args.action not in POST_TRAINING_ACTIONS:
+            raise RuntimeError("Continuation is restricted to post-training actions")
+        binding = validate_continuation(
+            continuation,
+            execution_head=head,
+            protocol_path=args.protocol,
+            supplied_paths={name: getattr(args, name) for name in (*FILE_NAMES, *ROOT_NAMES) if hasattr(args, name)},
+        )
+        protocol_head = binding["training_git_head"]
+    protocol = _read_protocol(args.protocol, protocol_head)
     if getattr(args, "smoke_barrier", None) is not None or getattr(args, "smoke_report", None) is not None:
         if args.smoke_barrier is None or args.smoke_report is None:
             raise ValueError("Explicit smoke verification requires both report and barrier")
@@ -303,7 +322,12 @@ def _stable_flow_array_sha256(path: Path, generation: FileGeneration) -> str:
     )
 
 
-def _verify_decision_artifacts(record: Mapping[str, Any], roots: Mapping[str, Path]) -> None:
+def _verify_decision_artifacts(
+    record: Mapping[str, Any],
+    roots: Mapping[str, Path],
+    *,
+    expected_execution: Mapping[str, Any] | None = None,
+) -> None:
     for name in ("certified_source_field", "requested_field", "candidate_field", "returned_field"):
         path = _resolve_artifact(record[name], roots)
         generation = file_generation(path)
@@ -314,6 +338,10 @@ def _verify_decision_artifacts(record: Mapping[str, Any], roots: Mapping[str, Pa
     exact = json.loads(exact_bytes)
     if not isinstance(exact, dict) or canonical_json_bytes(exact) != exact_bytes:
         raise RuntimeError("Stage5 decision exact report is not canonical")
+    if expected_execution is not None and any(
+        exact.get("execution", {}).get(key) != value for key, value in expected_execution.items()
+    ):
+        raise RuntimeError("Stage5 decision belongs to another execution or continuation")
     performance = {
         key: record[key]
         for key in (
@@ -327,7 +355,7 @@ def _verify_decision_artifacts(record: Mapping[str, Any], roots: Mapping[str, Pa
         )
     }
     if (
-        exact.get("schema") != "ctcf-stage5-decision-exact-report-v1"
+        exact.get("schema") != "ctcf-stage5-decision-exact-report-v2"
         or exact.get("decision_id") != record["decision_id"]
         or exact.get("source_field") != record["certified_source_field"]
         or exact.get("candidate_exact", {}).get("status") != record["candidate_exact_status"]
@@ -607,15 +635,35 @@ def command_freeze_training(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_prepare_continuation(args: argparse.Namespace) -> int:
+    head = assert_clean_exact_git(args.repo_root, args.expected_git_head)
+    payload = prepare_continuation(
+        repo_root=args.repo_root,
+        training_head=args.training_git_head,
+        execution_head=head,
+        paths={name: getattr(args, name) for name in (*FILE_NAMES, *ROOT_NAMES)},
+        output=args.output,
+    )
+    print(f"[STAGE5 CONTINUATION] {canonical_sha256(payload)} {args.output}")
+    return 0
+
+
+def _decision_execution(args: argparse.Namespace, head: str) -> dict[str, Any] | None:
+    continuation = getattr(args, "continuation", None)
+    if continuation is None:
+        return None
+    return {"execution_git_head": head, "continuation_sha256": sha256_file(continuation)}
+
+
 def command_decide(args: argparse.Namespace) -> int:
-    _protocol_context(args)
+    head, _ = _protocol_context(args)
     roots = {"source_field_root": args.source_root, "decision_output_root": args.decision_root}
     records_root = args.decision_root / "records"
     if records_root.is_dir():
         for path in sorted(records_root.glob("*.json")):
             record = load_canonical_json(path)
             if record.get("seed") == args.seed and record.get("variant_id") == args.variant:
-                _verify_decision_artifacts(record, roots)
+                _verify_decision_artifacts(record, roots, expected_execution=_decision_execution(args, head))
     count = materialize_decisions(
         protocol_path=args.protocol,
         training_barrier_path=args.training_barrier,
@@ -630,16 +678,18 @@ def command_decide(args: argparse.Namespace) -> int:
         num_shards=args.num_shards,
         device=torch.device(args.device),
         controller_config=ControllerTrainingConfig(),
+        execution_git_head=head,
+        continuation_sha256=sha256_file(args.continuation) if getattr(args, "continuation", None) else None,
     )
     print(f"[STAGE5 DECISION] seed={args.seed} variant={args.variant} count={count}")
     return 0
 
 
 def command_freeze_decision(args: argparse.Namespace) -> int:
-    _protocol_context(args)
+    head, _ = _protocol_context(args)
     roots = {"source_field_root": args.source_root, "decision_output_root": args.decision_root}
     for path in sorted((args.decision_root / "records").glob("*.json")):
-        _verify_decision_artifacts(load_canonical_json(path), roots)
+        _verify_decision_artifacts(load_canonical_json(path), roots, expected_execution=_decision_execution(args, head))
     barrier = freeze_decision_barrier(
         protocol_path=args.protocol,
         training_barrier_path=args.training_barrier,
@@ -648,6 +698,20 @@ def command_freeze_decision(args: argparse.Namespace) -> int:
     )
     print(f"[STAGE5 DECISION BARRIER] {canonical_sha256(barrier)}")
     return 0
+
+
+def _evaluation_case_inventory(runtime: Any) -> list[dict[str, str]]:
+    """Join the frozen pair relation instead of inferring pairs from case names."""
+    pair_by_case: dict[str, str] = {}
+    for pair in runtime.pairs["pairs"]:
+        for case_id in pair["case_ids"]:
+            if case_id in pair_by_case:
+                raise RuntimeError("Stage5 directed case belongs to multiple pairs")
+            pair_by_case[case_id] = pair["pair_id"]
+    cases = runtime.pairs["cases"]
+    if set(pair_by_case) != {case["case_id"] for case in cases}:
+        raise RuntimeError("Stage5 pair relation does not cover the directed cases")
+    return [{**case, "pair_id": pair_by_case[case["case_id"]]} for case in cases]
 
 
 def _evaluation_context(args: argparse.Namespace) -> tuple[EvaluationContext, Any]:
@@ -660,7 +724,7 @@ def _evaluation_context(args: argparse.Namespace) -> tuple[EvaluationContext, An
     if canonical_sha256(decision) != expected_sha:
         raise RuntimeError("Stage5 decision barrier differs from the operator-frozen SHA-256")
     runtime = load_stage5_runtime_contract(args.data_contract)
-    context = EvaluationContext.from_barriers(protocol, training, decision, runtime.pairs["cases"])
+    context = EvaluationContext.from_barriers(protocol, training, decision, _evaluation_case_inventory(runtime))
     return context, runtime
 
 
@@ -842,7 +906,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _validate_complete_compact_run(run_root: Path, git_head: str) -> None:
+def _validate_complete_compact_run(run_root: Path, git_head: str, continuation: Path | None = None) -> None:
     data_root = run_root / "data_attestations"
     protocol_path = run_root / "protocol" / "protocol.json"
     training_path = run_root / "barriers" / "training_barrier.json"
@@ -851,7 +915,11 @@ def _validate_complete_compact_run(run_root: Path, git_head: str) -> None:
     products_root = run_root / "evaluation" / "products"
     evaluation_root = run_root / "evaluation"
 
-    protocol = _read_protocol(protocol_path, git_head)
+    protocol_head = git_head
+    if continuation is not None:
+        binding = validate_continuation(continuation, execution_head=git_head, protocol_path=protocol_path)
+        protocol_head = binding["training_git_head"]
+    protocol = _read_protocol(protocol_path, protocol_head)
     runtime = load_stage5_runtime_contract(data_root / "data_contract.json")
     if runtime.contract_sha256 != protocol["data_contract_sha256"]:
         raise RuntimeError("Stage5 compact data contract differs from the frozen protocol")
@@ -861,7 +929,7 @@ def _validate_complete_compact_run(run_root: Path, git_head: str) -> None:
     validate_training_barrier(training, protocol, require_complete=True)
     validate_decision_barrier(decision, protocol, training, require_complete=True)
     validate_evaluation_barrier(evaluation_barrier, protocol, training, decision, require_complete=True)
-    context = EvaluationContext.from_barriers(protocol, training, decision, runtime.pairs["cases"])
+    context = EvaluationContext.from_barriers(protocol, training, decision, _evaluation_case_inventory(runtime))
 
     evaluations: list[dict[str, Any]] = []
     for record in evaluation_barrier["records"]:
@@ -936,7 +1004,7 @@ def command_finalize(args: argparse.Namespace) -> int:
         missing = [str(path) for path in required if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"Cannot finalize COMPLETE Stage5 run: {missing}")
-        _validate_complete_compact_run(run_root, head)
+        _validate_complete_compact_run(run_root, head, getattr(args, "continuation", None))
     manifest_dir = run_root / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_dir / f"{args.attempt_id}.json"
@@ -973,6 +1041,14 @@ def command_finalize(args: argparse.Namespace) -> int:
         },
         "remote_heavy_locator": args.remote_heavy_locator,
     }
+    if getattr(args, "continuation", None) is not None:
+        binding = validate_continuation(
+            args.continuation,
+            execution_head=head,
+            protocol_path=run_root / "protocol" / "protocol.json",
+        )
+        payload["training_git_head"] = binding["training_git_head"]
+        payload["continuation"] = file_record("compact_root", run_root, args.continuation)
     write_immutable_json(manifest_path, payload)
     print(f"[STAGE5 MANIFEST] {manifest_path}")
     return 0
@@ -1169,6 +1245,15 @@ def build_parser() -> argparse.ArgumentParser:
     training.add_argument("--checkpoint-root", type=Path, required=True)
     training.add_argument("--output", type=Path, required=True)
 
+    continuation = action("prepare-continuation", command_prepare_continuation)
+    _add_protocol(continuation)
+    _add_data(continuation)
+    continuation.add_argument("--training-git-head", required=True)
+    continuation.add_argument("--training-barrier", type=Path, required=True)
+    for name in ("checkpoint-root", "source-root", "decision-root", "evaluation-root"):
+        continuation.add_argument(f"--{name}", type=Path, required=True)
+    continuation.add_argument("--output", type=Path, required=True)
+
     decide = action("decide", command_decide)
     _add_protocol(decide)
     _add_data(decide)
@@ -1225,6 +1310,8 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--exit-code", type=int, required=True)
     finalize.add_argument("--started-at-utc", required=True)
     finalize.add_argument("--remote-heavy-locator", required=True)
+    for surface in (decide, decision, evaluate, freeze_evaluation, aggregate, finalize):
+        surface.add_argument("--continuation", type=Path)
 
     package = action("package", command_package)
     _add_git(package)

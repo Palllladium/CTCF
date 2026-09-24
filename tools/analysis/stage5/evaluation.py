@@ -574,7 +574,9 @@ def build_pair_evaluation(
                 raise FloatingPointError(f"Pair metric {metric_id} is non-scalar or non-finite")
             scalar_metrics[metric_id] = _metric_ok(metric_id, float(np.mean(values)))
     scalar_metrics.update(inverse)
-    if tuple(scalar_metrics) != EFFECT_METRIC_IDS:
+    # Metric identity is a set: readers select columns by EFFECT_METRIC_IDS, and
+    # canonical JSON sorts these keys before any consumer sees them again.
+    if set(scalar_metrics) != set(EFFECT_METRIC_IDS):
         raise RuntimeError("Pair scalar metric inventory changed")
 
     direction_diagnostics = [item["decision_diagnostics"] for item in evaluations]
@@ -1046,7 +1048,9 @@ def aggregate_pair_effects(context: EvaluationContext, pair_evaluations: Sequenc
         key = (str(item["pair_id"]), int(item["seed"]), str(item["variant_id"]))
         if key in index:
             raise RuntimeError("Duplicate Stage 5 pair evaluation")
-        if tuple(item["scalar_metrics"]) != EFFECT_METRIC_IDS:
+        # Canonical JSON sorts object keys. Metric identity is a set; every
+        # calculation below selects columns explicitly by EFFECT_METRIC_IDS.
+        if set(item["scalar_metrics"]) != set(EFFECT_METRIC_IDS):
             raise RuntimeError("Pair scalar metric inventory changed")
         index[key] = item
     expected = {
@@ -1210,7 +1214,8 @@ def field_stage_diagnostics_csv(evaluations: Sequence[Mapping[str, Any]]) -> str
                 DICE_MEAN_METRIC_ID: stages[stage]["mean_dice"],
                 **stages[stage]["geometry"],
             }
-            for metric_id, metric in metrics.items():
+            for metric_id in sorted(metrics):
+                metric = metrics[metric_id]
                 error = metric.get("error", {})
                 rows.append(
                     {
@@ -1235,7 +1240,8 @@ def field_stage_diagnostics_csv(evaluations: Sequence[Mapping[str, Any]]) -> str
 def pair_metric_csv(pair_evaluations: Sequence[Mapping[str, Any]]) -> str:
     rows: list[dict[str, Any]] = []
     for item in sorted(pair_evaluations, key=lambda value: (value["pair_id"], value["seed"], value["variant_id"])):
-        for metric_id, metric in item["scalar_metrics"].items():
+        for metric_id in EFFECT_METRIC_IDS:
+            metric = item["scalar_metrics"][metric_id]
             error = metric.get("error", {})
             rows.append(
                 {

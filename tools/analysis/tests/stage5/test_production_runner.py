@@ -22,14 +22,14 @@ def shell_function(name):
 
 @unittest.skipUnless(BASH, "Bash is required for the production scheduler test")
 class ProductionRunnerTest(unittest.TestCase):
-    def execute(self, gpu_list, *, source_run="", fail_variant=""):
+    def execute(self, gpu_list, *, source_run="", fail_variant="", phase="all", training_head="", fail_prepare=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             header = (
                 "set -Eeuo pipefail\n"
                 f"GPU_LIST='{gpu_list}'\nEXPECTED_GIT_HEAD='{HEAD}'\n"
-                f"RUN_ID='S5_DEVELOPMENT_20260911T000000Z_{HEAD[:12]}'\n"
-                f"IMPORT_U0_RUN_ID='{source_run}'\nPHASE=all\n"
+                f"RUN_ID='S5_DEVELOPMENT_20260911T000000Z_{(training_head or HEAD)[:12]}'\n"
+                f"IMPORT_U0_RUN_ID='{source_run}'\nPHASE='{phase}'\nTRAINING_GIT_HEAD='{training_head}'\n"
             )
             validation = SOURCE.split("readonly -a SEEDS=", 1)[1].split('\nmkdir -p "$LOG_ROOT"', 1)[0]
             setup = """
@@ -46,11 +46,14 @@ EVALUATION_ROOT=evaluation
 DATA_CONTRACT=data_contract.json
 OASIS_ALL_ROOT=fixture
 PROTOCOL_ARGS=()
+PROTOCOL=protocol.json
+CONTINUATION=continuation.json
 DATA_ARGS=()
 GIT_ARGS=()
 mkdir -p "$LOG_ROOT" "$STATUS_ROOT"
 run_cli() {
   printf '%s|%s\n' "${CUDA_VISIBLE_DEVICES:-none}" "$*" >> calls.txt
+  if [[ "$1" == prepare-continuation && "$FAIL_PREPARE" == 1 ]]; then return 8; fi
   if [[ "$1" == train-controller && "$*" == *"--variant $FAIL_VARIANT "* ]]; then
     return 7
   fi
@@ -71,13 +74,17 @@ sleep() { command sleep 0.01; }
                 "decision_worker",
                 "decide_phase",
                 "evaluate_phase",
+                "continue_evaluation_phase",
             )
             script = header + "readonly -a SEEDS=" + validation + "\n" + setup
-            script += f"FAIL_VARIANT='{fail_variant}'\n"
+            script += f"FAIL_VARIANT='{fail_variant}'\nFAIL_PREPARE={int(fail_prepare)}\n"
             script += "\n".join(shell_function(name) for name in names)
-            script += (
-                "\ntrain_u0_phase\ntrain_controller_phase\nmaterialize_source_phase\ndecide_phase\nevaluate_phase\n"
-            )
+            if phase == "continue-evaluation":
+                script += '\nPROTOCOL_ARGS=(--continuation "$CONTINUATION")\ncontinue_evaluation_phase\n'
+            else:
+                script += (
+                    "\ntrain_u0_phase\ntrain_controller_phase\nmaterialize_source_phase\ndecide_phase\nevaluate_phase\n"
+                )
             result = subprocess.run([BASH, "-s"], input=script, text=True, cwd=root, capture_output=True, timeout=30)
             calls = (root / "calls.txt").read_text().splitlines() if (root / "calls.txt").exists() else []
             return result, calls
@@ -130,6 +137,34 @@ sleep() { command sleep 0.01; }
         self.assertFalse(
             any("|freeze-training " in line or "|decide " in line or "|evaluate " in line for line in calls)
         )
+
+    def test_continuation_only_runs_post_training_on_arbitrary_gpus(self):
+        for gpu_list in ("3", "2,3", "0,1,2,3"):
+            with self.subTest(gpu_list=gpu_list):
+                result, calls = self.execute(gpu_list, phase="continue-evaluation", training_head="b" * 40)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                commands = [line.split("|", 1)[1] for line in calls]
+                self.assertTrue(commands[0].startswith("prepare-continuation "))
+                self.assertFalse(
+                    any(command.startswith(("train-", "materialize-source", "prepare-data")) for command in commands)
+                )
+                self.assertEqual(sum(command.startswith("decide ") for command in commands), 27)
+                self.assertEqual(sum(command.startswith("evaluate ") for command in commands), len(gpu_list.split(",")))
+                self.assertEqual(sum(command.startswith("aggregate ") for command in commands), 1)
+                for command in commands[1:]:
+                    if not command.startswith("disk-preflight"):
+                        self.assertIn("--continuation continuation.json", command)
+
+    def test_failed_continuation_verification_starts_no_gpu_work(self):
+        result, calls = self.execute("2,3", phase="continue-evaluation", training_head="b" * 40, fail_prepare=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 1)
+
+    def test_training_head_exception_is_restricted_to_explicit_continuation(self):
+        for phase, training_head in (("all", "b" * 40), ("continue-evaluation", "")):
+            result, calls = self.execute("2,3", phase=phase, training_head=training_head)
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(calls)
 
     def test_invalid_gpu_lists_fail_before_any_worker(self):
         for gpu_list in ("", "2,2", "2,", "2,,3", "02,2", "-1,3", "a,3"):
