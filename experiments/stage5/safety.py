@@ -172,6 +172,10 @@ def commit_controller_delta(
     requested_delta: torch.Tensor,
     output_root: Path,
 ) -> ControllerTransaction:
+    # Imported here so the module outside this function stays byte-identical to the training
+    # revision, which the evaluation continuation verifies; bootstrap construction is untouched.
+    from tools.analysis.stage5.work_margin import select_work_margin
+
     output_root.mkdir(parents=True, exist_ok=True)
     initial_path = initial_path.resolve()
     initial = load_flow_npz(initial_path).to(requested_delta.device)
@@ -181,6 +185,7 @@ def commit_controller_delta(
     initial_array_sha = array_sha256(initial)
     if requested_delta.shape != initial.shape:
         raise ValueError("requested controller delta and initial field must share shape")
+    work_margin = select_work_margin(initial)
     mask = geometry_mask(tuple(initial.shape[-3:]), COLLAR_WIDTH, initial.device)
 
     requested = (initial + requested_delta.float()).float()
@@ -196,9 +201,10 @@ def commit_controller_delta(
         initial,
         requested_delta.float(),
         mask,
-        work_eps=WORK_EPS,
+        work_eps=work_margin["selected_work_eps"],
         sweeps=CLIP_SWEEPS,
     )
+    clip_report.update({f"margin_{key}": value for key, value in work_margin.items() if value is not None})
     candidate_path = output_root / "post_safety_candidate.npz"
     candidate_array_sha = array_sha256(candidate)
     save_flow_npz_atomic(candidate_path, candidate.float())

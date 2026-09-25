@@ -41,6 +41,8 @@ from tools.analysis.stage5.contracts import (
     write_immutable_json,
 )
 from tools.analysis.stage5.controller_observations import observe_controller_output
+from tools.analysis.stage5.decision_reuse import execution_matches, verify_reusable_decision
+from tools.analysis.stage5.work_margin import WORK_MARGIN_POLICY
 from utils.cert_exact import certify_flow_exact
 
 
@@ -195,6 +197,7 @@ class _DecisionContext:
     device: torch.device
     execution_git_head: str | None = None
     continuation_sha256: str | None = None
+    reusable_decisions: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +350,7 @@ def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str]
         peak_memory_bytes = int(stages.controller_observations["peak_memory_bytes_before_observation"])
 
     exact_payload = {
-        "schema": "ctcf-stage5-decision-exact-report-v2",
+        "schema": "ctcf-stage5-decision-exact-report-v3",
         "decision_id": decision_id,
         "source_field": source_record,
         "candidate_exact": stages.candidate_exact,
@@ -355,6 +358,7 @@ def _materialize_one_decision(context: _DecisionContext, case: Mapping[str, str]
         "clip_report": stages.clip_report,
         "controller_observations": stages.controller_observations,
         "execution": {
+            "decision_safety_policy": WORK_MARGIN_POLICY,
             "training_git_head": context.protocol["git_head"],
             "execution_git_head": context.execution_git_head or context.protocol["git_head"],
             "continuation_sha256": context.continuation_sha256,
@@ -453,12 +457,19 @@ def _recover_decision_commit(context: _DecisionContext, decision_id: str) -> boo
         or record["seed"] != context.seed
         or record["variant_id"] != context.variant
         or exact.get("decision_id") != decision_id
-        or exact.get("execution", {}).get("execution_git_head")
-        != (context.execution_git_head or context.protocol["git_head"])
-        or exact["execution"].get("continuation_sha256") != context.continuation_sha256
+        or not execution_matches(
+            record,
+            exact,
+            {
+                "execution_git_head": context.execution_git_head or context.protocol["git_head"],
+                "continuation_sha256": context.continuation_sha256,
+                "reusable_decisions": context.reusable_decisions or {},
+            },
+        )
     ):
         raise RuntimeError("Stage5 decision journal belongs to another execution")
     roots = {"source_field_root": context.source_root, "decision_output_root": context.decision_root}
+    verify_reusable_decision(record, exact, roots=roots, protocol=context.protocol, training=context.training)
     for name in ("certified_source_field", "requested_field", "candidate_field", "returned_field"):
         saved = record[name]
         root = roots[saved["root_id"]]
@@ -495,6 +506,7 @@ def materialize_decisions(
     controller_config: ControllerTrainingConfig | None = None,
     execution_git_head: str | None = None,
     continuation_sha256: str | None = None,
+    reusable_decisions: Mapping[str, Any] | None = None,
 ) -> int:
     if seed not in BASE_SEEDS or variant not in ("U0", *STAGE5_VARIANTS):
         raise ValueError("decision seed or variant is outside the frozen Stage5 matrix")
@@ -538,6 +550,7 @@ def materialize_decisions(
         device=device,
         execution_git_head=execution_git_head,
         continuation_sha256=continuation_sha256,
+        reusable_decisions=reusable_decisions,
     )
 
     completed = 0

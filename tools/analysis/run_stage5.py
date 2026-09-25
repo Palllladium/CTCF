@@ -55,6 +55,7 @@ from tools.analysis.stage5.contracts import (
     validate_training_barrier,
     write_immutable_json,
 )
+from tools.analysis.stage5.decision_reuse import execution_matches
 from tools.analysis.stage5.evaluation import (
     EVALUATION_SCHEMA,
     EvaluationContext,
@@ -338,9 +339,7 @@ def _verify_decision_artifacts(
     exact = json.loads(exact_bytes)
     if not isinstance(exact, dict) or canonical_json_bytes(exact) != exact_bytes:
         raise RuntimeError("Stage5 decision exact report is not canonical")
-    if expected_execution is not None and any(
-        exact.get("execution", {}).get(key) != value for key, value in expected_execution.items()
-    ):
+    if expected_execution is not None and not execution_matches(record, exact, expected_execution):
         raise RuntimeError("Stage5 decision belongs to another execution or continuation")
     performance = {
         key: record[key]
@@ -355,7 +354,7 @@ def _verify_decision_artifacts(
         )
     }
     if (
-        exact.get("schema") != "ctcf-stage5-decision-exact-report-v2"
+        exact.get("schema") not in {"ctcf-stage5-decision-exact-report-v2", "ctcf-stage5-decision-exact-report-v3"}
         or exact.get("decision_id") != record["decision_id"]
         or exact.get("source_field") != record["certified_source_field"]
         or exact.get("candidate_exact", {}).get("status") != record["candidate_exact_status"]
@@ -652,18 +651,24 @@ def _decision_execution(args: argparse.Namespace, head: str) -> dict[str, Any] |
     continuation = getattr(args, "continuation", None)
     if continuation is None:
         return None
-    return {"execution_git_head": head, "continuation_sha256": sha256_file(continuation)}
+    payload = load_canonical_json(continuation)
+    return {
+        "execution_git_head": head,
+        "continuation_sha256": sha256_file(continuation),
+        "reusable_decisions": payload.get("reusable_decisions", {}),
+    }
 
 
 def command_decide(args: argparse.Namespace) -> int:
     head, _ = _protocol_context(args)
+    execution = _decision_execution(args, head)
     roots = {"source_field_root": args.source_root, "decision_output_root": args.decision_root}
     records_root = args.decision_root / "records"
     if records_root.is_dir():
         for path in sorted(records_root.glob("*.json")):
             record = load_canonical_json(path)
             if record.get("seed") == args.seed and record.get("variant_id") == args.variant:
-                _verify_decision_artifacts(record, roots, expected_execution=_decision_execution(args, head))
+                _verify_decision_artifacts(record, roots, expected_execution=execution)
     count = materialize_decisions(
         protocol_path=args.protocol,
         training_barrier_path=args.training_barrier,
@@ -680,6 +685,7 @@ def command_decide(args: argparse.Namespace) -> int:
         controller_config=ControllerTrainingConfig(),
         execution_git_head=head,
         continuation_sha256=sha256_file(args.continuation) if getattr(args, "continuation", None) else None,
+        reusable_decisions=(execution or {}).get("reusable_decisions", {}),
     )
     print(f"[STAGE5 DECISION] seed={args.seed} variant={args.variant} count={count}")
     return 0

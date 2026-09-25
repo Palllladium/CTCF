@@ -37,6 +37,18 @@ filename. Verified completed decisions/evaluations are reused. An interrupted
 decision publication is recovered from its immutable journal; unfinished field
 computation is repeated. The run lock prevents simultaneous runners for that run.
 
+A new evaluation commit may reuse decisions written under an earlier continuation
+of the same run. `prepare-continuation` authenticates each one (its fields, its
+parent continuation, both code revisions and, for pre-margin decisions, that the
+clip ran on the unchanged nominal 0.0011 path) and lists the approved digests in
+the new binding. Decisions that were never journaled are recomputed.
+
+The safety transaction uses the nominal working margin 0.0011 whenever the stored
+source affords it. A certified source whose verified bound lies below 0.0011 uses
+that bound instead; the claim 0.001 and the exact certification of the saved float32
+result (or byte-identical rollback to the source) are unchanged. The preflight
+reports how many sources need the reduced margin before any GPU work starts.
+
 The main log reports phase and worker completion. Detailed progress is in
 `logs/<attempt>/prepare_continuation.log`, `decision_gpu_<index>.log`, and
 `evaluation_<shard>of<count>.log`. Completion requires a `COMPLETE` manifest and

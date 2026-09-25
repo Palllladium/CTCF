@@ -14,16 +14,19 @@ import torch
 from experiments.stage5 import runtime
 from experiments.stage5.config import ControllerTrainingConfig, build_stage5_controller
 from tools.analysis import run_stage5
-from tools.analysis.stage5 import pipeline
+from tools.analysis.run_artifacts import sha256_file
+from tools.analysis.stage5 import continuation, pipeline
 from tools.analysis.stage5.artifacts import file_record, load_canonical_json
 from tools.analysis.stage5.contracts import (
     BASE_SEEDS,
     VARIANT_IDS,
     build_evaluation_barrier,
     build_training_barrier,
+    canonical_json_bytes,
     canonical_sha256,
     write_immutable_json,
 )
+from tools.analysis.stage5.decision_reuse import decision_digest, verify_reusable_decision
 from tools.analysis.stage5.evaluation import (
     STAGE5_EVALUATION_METRIC_IDS,
     EvaluationContext,
@@ -109,6 +112,8 @@ class PostTrainingEndToEndTest(unittest.TestCase):
                         shard_index=0,
                         num_shards=1,
                         device=torch.device("cpu"),
+                        execution_git_head="c" * 40,
+                        continuation_sha256="d" * 64,
                     )
                     with (
                         patch.object(pipeline, "Stage5OasisImageStore", return_value=store),
@@ -129,6 +134,69 @@ class PostTrainingEndToEndTest(unittest.TestCase):
                             ):
                                 pipeline.materialize_decisions(**args)
                             frozen_exact = next((decision_root / "exact_reports").glob("*__F0.json")).read_bytes()
+                            # Convert the interrupted journal into an authentic legacy
+                            # nominal result, then resume under another evaluation HEAD.
+                            journal_path = next((decision_root / "commits").glob("*__F0.json"))
+                            journal = load_canonical_json(journal_path)
+                            record, exact = journal["record"], journal["exact_report"]
+                            old_head = "b" * 40
+                            parent_path = root / "continuations" / f"{old_head}.json"
+                            write_immutable_json(parent_path, {"schema": "test-parent"})
+                            exact["schema"] = "ctcf-stage5-decision-exact-report-v2"
+                            exact["execution"].pop("decision_safety_policy")
+                            exact["execution"]["execution_git_head"] = old_head
+                            exact["execution"]["continuation_sha256"] = sha256_file(parent_path)
+                            exact["clip_report"] = {
+                                k: v for k, v in exact["clip_report"].items() if not k.startswith("margin_")
+                            }
+                            record["exact_report"]["bytes"] = len(canonical_json_bytes(exact))
+                            record["exact_report"]["sha256"] = canonical_sha256(exact)
+                            performance = {
+                                k: record[k]
+                                for k in (
+                                    "runtime_seconds",
+                                    "peak_memory_bytes",
+                                    "requested_delta_rms",
+                                    "candidate_delta_rms",
+                                    "returned_delta_rms",
+                                    "candidate_retained_ratio",
+                                    "returned_retained_ratio",
+                                )
+                            }
+                            record["execution_sha256"] = canonical_sha256(
+                                {"environment": exact["execution"], "performance": performance}
+                            )
+                            journal_path.write_bytes(canonical_json_bytes(journal))
+                            exact_path = decision_root / "exact_reports" / journal_path.name
+                            exact_path.write_bytes(canonical_json_bytes(exact))
+                            frozen_exact = exact_path.read_bytes()
+                            roots = {"source_field_root": source_root, "decision_output_root": decision_root}
+                            verify_reusable_decision(record, exact, roots=roots, protocol=protocol, training=training)
+                            # Parent provenance is validated separately from heavy bytes.
+                            with (
+                                patch.object(
+                                    continuation, "validate_continuation", return_value={"source_inventory": []}
+                                ),
+                                patch.object(continuation, "verify_code_compatibility"),
+                            ):
+                                approved = continuation._reuse_inventory(
+                                    paths={
+                                        "decision_root": decision_root,
+                                        "source_root": source_root,
+                                        "protocol": protocol_path,
+                                    },
+                                    output=root / "continuations" / ("c" * 40 + ".json"),
+                                    repo_root=root,
+                                    execution_head="c" * 40,
+                                    protocol=protocol,
+                                    training=training,
+                                    sources=[],
+                                )
+                            self.assertEqual(approved[record["decision_id"]], decision_digest(record, exact))
+                            args.update(execution_git_head="c" * 40, continuation_sha256="d" * 64)
+                            with self.assertRaisesRegex(RuntimeError, "another execution"):
+                                pipeline.materialize_decisions(**args)
+                            args["reusable_decisions"] = approved
                         pipeline.materialize_decisions(**args)
                         if seed == 0 and variant == "F0":
                             self.assertEqual(

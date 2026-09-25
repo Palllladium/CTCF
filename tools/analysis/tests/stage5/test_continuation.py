@@ -47,6 +47,8 @@ class ContinuationBindingTest(unittest.TestCase):
         if source_validator is None:
 
             def source_validator(path, **kwargs):
+                path.mkdir(parents=True, exist_ok=True)
+                write_immutable_json(path / "initial_report.json", {"report": {"psi_exact": {"interval_lo_min": 1.0}}})
                 return {"case": kwargs["case"], "seed": kwargs["seed"]}
 
         with (
@@ -198,6 +200,26 @@ class ContinuationBindingTest(unittest.TestCase):
 
 
 class ContinuationCodeCompatibilityTest(unittest.TestCase):
+    def test_safety_exception_preserves_bootstrap_globals_and_interface(self):
+        original = "WORK_EPS = 0.0011\ndef construct_initial_field(x):\n return x\ndef commit_controller_delta(a, b, c):\n return a\n"
+        fixed = original.replace(
+            " return a",
+            " from tools.analysis.stage5.work_margin import select_work_margin\n return select_work_margin(a)",
+        )
+        for modified, accepted in (
+            (fixed, True),
+            (fixed.replace("0.0011", "0.00101"), False),
+            (fixed.replace("return x", "return x + 1"), False),
+            (fixed.replace("(a, b, c)", "(a, b, c, d)"), False),
+        ):
+            outputs = [SimpleNamespace(stdout=original), SimpleNamespace(stdout=modified)]
+            with self.subTest(accepted=accepted), patch.object(continuation.subprocess, "run", side_effect=outputs):
+                if accepted:
+                    continuation._verify_frozen_safety(Path("."), "a" * 40, "b" * 40)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "frozen safety"):
+                        continuation._verify_frozen_safety(Path("."), "a" * 40, "b" * 40)
+
     def test_only_orchestration_changes_are_accepted_and_exact_head_remains_clean(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
