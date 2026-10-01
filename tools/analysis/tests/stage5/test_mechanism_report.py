@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from tools.analysis.stage5 import mechanism_contract as contract, mechanism_report as report
 
@@ -237,6 +240,94 @@ class MechanismStructureTests(unittest.TestCase):
             "tolerances": {"absolute": 1e-30},
         }
         self.assertEqual(report.bias_audit_errors(audit, audit["original_backend_flags"]), [])
+
+
+HEAD = "b" * 40
+
+
+class MechanismReportTests(unittest.TestCase):
+    def aggregate(self, *, attempts=None, audit_status="COMPLETE", source_ok=True):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for job in contract.JOBS:
+                payload = {
+                    "schema": contract.SCHEMA,
+                    "job": job,
+                    "diagnostic_git_head": HEAD,
+                    "workload_contract": contract.workload_contract(),
+                    "precision_package_verified": True,
+                    "mechanism_sources_unchanged": source_ok,
+                    "production_checkpoint_written": False,
+                    "labels_accessed": False,
+                    "status": "DIAGNOSTIC_COMPLETE",
+                    **complete_audits(),
+                }
+                payload["environment"] = {"backend_flags": payload["bias_audit"]["original_backend_flags"]}
+                payload["bias_audit"]["status"] = audit_status
+                if job == "F2P":
+                    payload["f2p_replay"] = (
+                        attempts
+                        if attempts is not None
+                        else [
+                            {
+                                "attempt": i + 1,
+                                "status": "NOT_REPRODUCED",
+                                "completed_updates": contract.F2P_UPDATES,
+                                "expected_pairs": contract.F2P_UPDATES,
+                                "initial_model_sha256": "a" * 64,
+                                "pair_schedule_sha256": "b" * 64,
+                                "pairs": [{}] * contract.F2P_UPDATES,
+                            }
+                            for i in range(contract.F2P_ATTEMPTS)
+                        ]
+                    )
+                (root / f"{job}.json").write_text(json.dumps(payload))
+            return report.aggregate_reports(root, HEAD, 0)
+
+    def test_nonreproduction_is_explicit_without_erasing_other_observations(self):
+        result = self.aggregate()
+        self.assertEqual(result["status"], "OBSERVATIONS_COMPLETE_REVIEW_REQUIRED")
+        self.assertEqual(result["jobs"]["F2P"]["reproduction"], "NOT_REPRODUCED")
+        self.assertFalse(result["production_restart_authorized"])
+        self.assertIn("bias_audit", result["jobs"]["F0"]["audits"])
+
+    def test_missing_audit_or_replay_or_source_proof_is_incomplete(self):
+        for kwargs in ({"audit_status": "ERROR"}, {"attempts": []}, {"source_ok": False}):
+            self.assertEqual(self.aggregate(**kwargs)["status"], "INCOMPLETE")
+
+    def test_observed_failure_requires_exact_capture(self):
+        attempt = {
+            "attempt": 1,
+            "status": "FAILURE_CAPTURED",
+            "capture_saved": False,
+            "completed_updates": 0,
+            "pairs": [],
+            "expected_pairs": contract.F2P_UPDATES,
+            "initial_model_sha256": "a" * 64,
+            "pair_schedule_sha256": "b" * 64,
+        }
+        self.assertEqual(self.aggregate(attempts=[attempt])["status"], "INCOMPLETE")
+        attempt["capture_saved"] = True
+        self.assertEqual(self.aggregate(attempts=[attempt])["status"], "OBSERVATIONS_COMPLETE_REVIEW_REQUIRED")
+
+    def test_f2p_attempts_require_same_initial_model_schedule_and_complete_workload(self):
+        for changed in ("initial_model_sha256", "pair_schedule_sha256", "expected_pairs"):
+            attempts = [
+                {
+                    "attempt": i + 1,
+                    "status": "NOT_REPRODUCED",
+                    "completed_updates": contract.F2P_UPDATES,
+                    "pairs": [{}] * contract.F2P_UPDATES,
+                    "expected_pairs": contract.F2P_UPDATES,
+                    "initial_model_sha256": "a" * 64,
+                    "pair_schedule_sha256": "b" * 64,
+                }
+                for i in range(contract.F2P_ATTEMPTS)
+            ]
+            attempts[1][changed] = 1 if changed == "expected_pairs" else "c" * 64
+            result = self.aggregate(attempts=attempts)
+            self.assertEqual(result["status"], "INCOMPLETE", result)
+            self.assertTrue(any("F2P" in error for error in result["errors"]))
 
 
 if __name__ == "__main__":

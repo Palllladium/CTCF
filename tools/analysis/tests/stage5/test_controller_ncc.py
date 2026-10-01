@@ -8,7 +8,6 @@ import torch.nn.functional as F
 
 from experiments.stage5 import losses, ncc, runtime
 from experiments.stage5.config import ControllerTrainingConfig, U0TrainingConfig
-from tools.analysis import diagnose_stage5_amp
 from tools.analysis.stage5.ncc_diagnostic import ReferenceNCC
 from tools.analysis.stage5.protocol import controller_training_contract, u0_training_contract
 from utils import NCCVxm
@@ -103,18 +102,6 @@ class ControllerNCCTest(unittest.TestCase):
         self.assertFalse(controller["precision"]["gradient_scaler"])
         self.assertEqual(u0["schema"], "ctcf-stage5-u0-training-contract-v2")
         self.assertNotIn("objective_numerics", u0)
-        self.assertIs(losses.ControllerNCC, ncc.ControllerNCC)
-
-    def test_historical_diagnostic_replays_legacy_ncc_and_restores_production(self):
-        def replay(_args, _report):
-            self.assertIs(losses.ControllerNCC, NCCVxm)
-            raise RuntimeError("end of synthetic replay")
-
-        with (
-            mock.patch.object(diagnose_stage5_amp, "_diagnose_legacy_source", side_effect=replay),
-            self.assertRaises(RuntimeError),
-        ):
-            diagnose_stage5_amp.diagnose(None, {})
         self.assertIs(losses.ControllerNCC, ncc.ControllerNCC)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for controller AMP")

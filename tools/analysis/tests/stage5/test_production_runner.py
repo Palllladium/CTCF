@@ -94,6 +94,10 @@ sleep() { command sleep 0.01; }
             with self.subTest(gpu_list=gpu_list):
                 result, calls = self.execute(gpu_list)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("[STAGE5 PROGRESS]", result.stdout)
+                self.assertIn("phase=decisions", result.stdout)
+                self.assertIn("[STAGE5 DECISION START]", result.stdout)
+                self.assertIn("[STAGE5 DECISION PASS]", result.stdout)
                 commands = [line.split("|", 1) for line in calls]
                 for device, command in commands:
                     if device != "none":

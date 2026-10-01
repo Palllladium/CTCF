@@ -26,6 +26,7 @@ from experiments.stage5.telemetry import parameter_telemetry
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.run_stage5 import _protocol_context
 from tools.analysis.stage5 import comparison_contract as contract
+from tools.analysis.stage5.checkpoint_sources import require_readonly_checkpoint
 from tools.analysis.stage5.comparison_math import (
     ArithmeticObserver,
     advance,
@@ -81,11 +82,13 @@ class Sources:
         config = ControllerTrainingConfig()
         model = build_stage5_controller(config).to(self.device).train()
         initial = args.checkpoint_root / "controller_initial" / f"seed_{args.seed}" / "initial.pth"
+        require_readonly_checkpoint(initial)
         self.remember(initial)
         self.remember(runtime._checkpoint_sidecar_path(initial))
         runtime._load_initial_controller(initial, model, seed=args.seed, config=config)
         if self.base_runner is None:
             base = args.checkpoint_root / "u0" / f"seed_{args.seed}" / "last.pth"
+            require_readonly_checkpoint(base)
             self.remember(base)
             self.remember(runtime._checkpoint_sidecar_path(base))
             self.base_runner = runtime.load_frozen_u0(
@@ -355,7 +358,7 @@ def train_case(args, sources, *, mode, replicate=0, updates=None, use_gate=False
 
 def paired_case(args, sources, report):
     if args.variant in ("F0", "F2V"):
-        from tools.analysis.diagnose_stage5_mechanism import CaptureSources
+        from tools.analysis.stage5.capture_sources import CaptureSources
 
         captures = CaptureSources(args.repo_root, args.precision_source_root, report)
         step, inputs = captures.load_failure(args.variant, device=sources.device, capture_root=args.capture_root)

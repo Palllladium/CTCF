@@ -2,13 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
-import signal
-import subprocess
-import sys
 import tempfile
-import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -314,75 +308,6 @@ class PrecisionReportTest(unittest.TestCase):
             self.skipTest("Symlinks unavailable on this platform")
         with self.assertRaisesRegex(ValueError, "Symlinks"):
             report.package_compact_zip(self.root, Path(self.temp.name) / "exports")
-
-
-@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "POSIX process signal test")
-class PrecisionRunnerSignalTest(unittest.TestCase):
-    def test_sigterm_waits_for_children_and_packages_logs(self):
-        real_repo = Path(__file__).resolve().parents[4]
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            runner = root / "tools/runners/train/stage5_precision_diagnostic.sh"
-            runner.parent.mkdir(parents=True)
-            shutil.copyfile(real_repo / "tools/runners/train/stage5_precision_diagnostic.sh", runner)
-            source = root / "results/stage5" / report.SOURCE_RUN
-            source.mkdir(parents=True)
-            (source / "stage5.lock").write_text("")
-            binary = root / "bin"
-            binary.mkdir()
-            scripts = {
-                "git": f'#!/usr/bin/env bash\nif [[ "$1" == rev-parse ]]; then echo {HEAD}; fi\n',
-                "flock": "#!/usr/bin/env bash\nexit 0\n",
-                "nvidia-smi": "#!/usr/bin/env bash\necho fixture\n",
-                "python-wrapper": (
-                    '#!/usr/bin/env bash\nif [[ "$*" == *tools.analysis.diagnose_stage5_precision* ]]; then\n'
-                    '  exec "$REAL_PYTHON" "$STUB_WORKER" "$@"\n'
-                    'else\n  exec "$REAL_PYTHON" "$@"\nfi\n'
-                ),
-            }
-            for name, content in scripts.items():
-                path = binary / name
-                path.write_text(content)
-                path.chmod(0o755)
-            worker = root / "worker.py"
-            worker.write_text(
-                "import signal, sys, time\n"
-                "def stop(*args):\n    print('worker stopped', flush=True)\n    raise SystemExit(143)\n"
-                "signal.signal(signal.SIGTERM, stop)\nprint('worker ready', flush=True)\n"
-                "while True: time.sleep(0.1)\n"
-            )
-            env = dict(os.environ)
-            env.update(
-                PATH=str(binary) + os.pathsep + env["PATH"],
-                PYBIN=str(binary / "python-wrapper"),
-                EXPECTED_GIT_HEAD=HEAD,
-                REAL_PYTHON=sys.executable,
-                STUB_WORKER=str(worker),
-                PYTHONPATH=str(real_repo),
-            )
-            process = subprocess.Popen(["bash", str(runner)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            try:
-                deadline = time.monotonic() + 15
-                ready = False
-                while time.monotonic() < deadline and process.poll() is None:
-                    logs = list((root / "results/stage5_diagnostics").glob("*/*.log"))
-                    ready = len(logs) == 4 and all("worker ready" in path.read_text() for path in logs)
-                    if ready:
-                        break
-                    time.sleep(0.05)
-                self.assertTrue(ready, "Runner did not start all four worker fixtures")
-                process.send_signal(signal.SIGTERM)
-                output, _ = process.communicate(timeout=20)
-                self.assertEqual(process.returncode, 143, output.decode())
-                archive = next((root / "results/exports").glob("*.zip"))
-                with zipfile.ZipFile(archive) as package:
-                    logs = [name for name in package.namelist() if name.endswith(".log")]
-                    self.assertEqual(len(logs), 4)
-                    self.assertTrue(all(b"worker stopped" in package.read(name) for name in logs))
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.communicate(timeout=10)
 
 
 if __name__ == "__main__":

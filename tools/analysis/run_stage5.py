@@ -912,6 +912,33 @@ def command_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_recomputed_aggregate(actual: Any, expected: Any, path: str = "aggregate") -> None:
+    """Allow float reduction roundoff, never changes to structure or discrete values.
+
+    This is a numerical reproducibility check only. Immutable records, hashes and
+    published CSVs retain their separate exact consistency checks.
+    """
+    if type(actual) is not type(expected):
+        raise RuntimeError(f"Stage5 aggregate type differs at {path}")
+    if isinstance(actual, dict):
+        if actual.keys() != expected.keys():
+            raise RuntimeError(f"Stage5 aggregate keys differ at {path}")
+        for key in actual:
+            _validate_recomputed_aggregate(actual[key], expected[key], f"{path}.{key}")
+    elif isinstance(actual, list):
+        if len(actual) != len(expected):
+            raise RuntimeError(f"Stage5 aggregate length differs at {path}")
+        for index, (left, right) in enumerate(zip(actual, expected, strict=True)):
+            _validate_recomputed_aggregate(left, right, f"{path}[{index}]")
+    elif isinstance(actual, float):
+        if not (math.isfinite(actual) and math.isfinite(expected)) or not math.isclose(
+            actual, expected, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            raise RuntimeError(f"Stage5 aggregate is not numerically reproducible at {path}")
+    elif actual != expected:
+        raise RuntimeError(f"Stage5 aggregate differs at {path}")
+
+
 def _validate_complete_compact_run(run_root: Path, git_head: str, continuation: Path | None = None) -> None:
     data_root = run_root / "data_attestations"
     protocol_path = run_root / "protocol" / "protocol.json"
@@ -952,8 +979,7 @@ def _validate_complete_compact_run(run_root: Path, git_head: str, continuation: 
     if bundle["evaluations"] != evaluations:
         raise RuntimeError("Stage5 evaluation bundle differs from its immutable evaluation records")
     recomputed = aggregate_pair_effects(context, bundle["pair_evaluations"])
-    if recomputed != bundle["aggregate"]:
-        raise RuntimeError("Stage5 aggregate is not reproducible from its pair-level rows")
+    _validate_recomputed_aggregate(recomputed, bundle["aggregate"])
 
     expected_products = {
         "evaluation_bundle.json": canonical_json_bytes(bundle).decode("utf-8"),
@@ -962,9 +988,9 @@ def _validate_complete_compact_run(run_root: Path, git_head: str, continuation: 
         "geometry_metrics.csv": geometry_csv(evaluations),
         "field_stage_diagnostics.csv": field_stage_diagnostics_csv(evaluations),
         "per_pair_metric.csv": pair_metric_csv(bundle["pair_evaluations"]),
-        "paired_effects_vs_u0.csv": effect_csv(recomputed["paired_effects_vs_u0"]),
-        "planned_contrasts.csv": effect_csv(recomputed["planned_contrasts"]),
-        "decision_diagnostics.csv": diagnostic_csv(recomputed),
+        "paired_effects_vs_u0.csv": effect_csv(bundle["aggregate"]["paired_effects_vs_u0"]),
+        "planned_contrasts.csv": effect_csv(bundle["aggregate"]["planned_contrasts"]),
+        "decision_diagnostics.csv": diagnostic_csv(bundle["aggregate"]),
     }
     for name, expected in expected_products.items():
         product = products_root / name

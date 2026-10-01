@@ -213,9 +213,22 @@ terminate_active_children() {
 # worker has finished its capture before it exits; stop its siblings immediately.
 wait_for_batch() {
   local pid index
+  local next_progress=$SECONDS
   local -a remaining=("$@")
   ACTIVE_PIDS=("$@")
   while [[ "${#remaining[@]}" -gt 0 ]]; do
+    if (( SECONDS >= next_progress )); then
+      echo "[STAGE5 PROGRESS] utc=$(date -u +%FT%TZ) phase=${progress_phase:-${PHASE:-unknown}} active_workers=${#remaining[@]} logs=${LOG_ROOT:-unavailable}"
+      if [[ "${progress_phase:-}" == decisions ]]; then
+        local progress_log
+        for progress_log in "$LOG_ROOT"/decision_gpu_*.log; do
+          [[ -f "$progress_log" ]] || continue
+          printf '[STAGE5 LAST OUTPUT] %s: ' "${progress_log##*/}"
+          tail -n 1 "$progress_log" || true
+        done
+      fi
+      next_progress=$((SECONDS + 60))
+    fi
     for index in "${!remaining[@]}"; do
       pid="${remaining[$index]}"
       if kill -0 "$pid" 2>/dev/null; then
@@ -579,6 +592,7 @@ decision_worker() {
     fi
     local seed variant
     read -r seed variant <"$claim"
+    echo "[STAGE5 DECISION START] gpu=${GPUS[$slot]} seed=$seed variant=$variant log=$LOG_ROOT/decision_gpu_${GPUS[$slot]}.log"
     if ! CUDA_VISIBLE_DEVICES="${GPUS[$slot]}" run_cli decide \
       "${PROTOCOL_ARGS[@]}" "${DATA_ARGS[@]}" \
       --training-barrier "$TRAINING_BARRIER" \
@@ -594,10 +608,12 @@ decision_worker() {
       return 1
     fi
     mv "$claim" "$done_root/$task"
+    echo "[STAGE5 DECISION PASS] gpu=${GPUS[$slot]} seed=$seed variant=$variant"
   done
 }
 
 decide_phase() {
+  local progress_phase=decisions
   run_cli disk-preflight "${GIT_ARGS[@]}" --phase full --target-root "$HEAVY_ROOT"
   local queue_root="$STATUS_ROOT/decision_queue"
   mkdir -p "$queue_root/pending" "$queue_root/claimed" "$queue_root/done"
@@ -625,6 +641,7 @@ decide_phase() {
 }
 
 evaluate_phase() {
+  local progress_phase=evaluation
   local decision_sha
   decision_sha="$($PYBIN -c 'import json,sys; from tools.analysis.stage5.contracts import canonical_sha256; print(canonical_sha256(json.load(open(sys.argv[1], encoding="utf-8"))))' "$DECISION_BARRIER")"
   local -a pids=()

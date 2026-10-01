@@ -19,6 +19,27 @@ from tools.analysis.stage5.contracts import canonical_sha256, write_immutable_js
 from utils.cert_exact import certify_flow_exact
 
 
+class AggregateReproducibilityTest(unittest.TestCase):
+    def test_float_roundoff_is_allowed_but_discrete_data_stays_exact(self):
+        stored = {"effect": [0.00166, 15837427397.973328], "count": 50, "status": "OK", "active": True}
+        recomputed = copy.deepcopy(stored)
+        recomputed["effect"] = [0.0016600000000001, 15837427397.973333]
+        run_stage5._validate_recomputed_aggregate(recomputed, stored)
+        for key, value in (("count", 51), ("count", 50.0), ("active", 1), ("status", "ERROR")):
+            changed = {**stored, key: value}
+            with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                run_stage5._validate_recomputed_aggregate(changed, stored)
+
+    def test_metric_drift_nonfinite_and_structure_changes_are_rejected(self):
+        stored = {"effect": [0.00166]}
+        for value in (0.00166001, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                run_stage5._validate_recomputed_aggregate({"effect": [value]}, stored)
+        for changed in ({}, {"effect": []}, {"effect": [0.00166], "extra": None}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                run_stage5._validate_recomputed_aggregate(changed, stored)
+
+
 class ParserContractTest(unittest.TestCase):
     def test_controller_can_start_without_smoke_but_still_checks_git_and_protocol(self) -> None:
         args = run_stage5.build_parser().parse_args(

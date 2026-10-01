@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -14,8 +12,7 @@ import torch.nn.functional as F
 from experiments.stage5 import losses, runtime
 from experiments.stage5.checkpoints import capture_rng_state
 from experiments.stage5.ncc import ControllerNCC
-from tools.analysis import diagnose_stage5_amp as amp
-from tools.analysis.stage5 import ncc_diagnostic as ncc
+from tools.analysis.stage5 import backward_probe as amp, ncc_diagnostic as ncc
 
 
 def centered_oracle(first, second, width):
@@ -105,50 +102,6 @@ class NCCReferenceTest(unittest.TestCase):
 
 
 class NCCReplayTest(unittest.TestCase):
-    def test_reference_report_cannot_be_substituted(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "F0.json"
-            path.write_text('{"status":"DIAGNOSTIC_COMPLETE"}', encoding="utf-8")
-            args = SimpleNamespace(ncc_audit=True, reference_report=path, variant="F0")
-            with self.assertRaisesRegex(RuntimeError, "exact reviewed"):
-                amp.load_ncc_reference(args)
-        self.assertIsNone(amp.load_ncc_reference(SimpleNamespace(ncc_audit=False)))
-
-    def test_wrong_pair_is_rejected_before_ncc_measurement(self):
-        args = SimpleNamespace()
-        report = {"source_hashes": {}, "pair": {"pair_id": "wrong"}}
-        reference = {"source_hashes": {}, "pair": {"pair_id": "right"}}
-        with mock.patch.object(ncc, "audit_pair") as audit, self.assertRaisesRegex(RuntimeError, "pair"):
-            amp.audit_ncc_failure(args, report, None, None, None, None, reference)
-        audit.assert_not_called()
-
-    def test_new_replay_records_historical_state_mismatch_without_hiding_it(self):
-        report = {
-            key: "same"
-            for key in (
-                "pair",
-                "pair_index_one_based",
-                "successful_in_memory_updates",
-                "pair_schedule_sha256",
-                "initial_controller_state_sha256",
-                "protocol_sha256",
-                "data_contract_sha256",
-            )
-        }
-        reference = dict(report, failing_controller_state_sha256="old")
-        report["source_hashes"] = reference["source_hashes"] = {}
-        report["failing_controller_state_sha256"] = "new"
-        with mock.patch.object(ncc, "audit_pair", return_value={"status": "NCC_AUDIT_COMPLETE"}):
-            amp.audit_ncc_failure(SimpleNamespace(), report, None, None, None, None, reference)
-        self.assertFalse(report["historical_controller_state_match"])
-
-    def test_replaced_u0_with_consistent_sidecars_is_rejected_against_historical_report(self):
-        report = {"source_hashes": {"u0/seed_0/last.pth": "replacement"}}
-        reference = {"source_hashes": {"u0/seed_0/last.pth": "original"}}
-        with mock.patch.object(ncc, "audit_pair") as audit, self.assertRaisesRegex(RuntimeError, "source bytes"):
-            amp.audit_ncc_failure(SimpleNamespace(), report, None, None, None, None, reference)
-        audit.assert_not_called()
-
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for production controller")
     def test_real_controller_audit_keeps_weights_and_optimizer_unchanged(self):
         config = runtime.ControllerTrainingConfig()

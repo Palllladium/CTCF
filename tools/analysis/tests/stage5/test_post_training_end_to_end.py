@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -254,6 +255,24 @@ class PostTrainingEndToEndTest(unittest.TestCase):
                 self.assertEqual(run_stage5.command_aggregate(args), 0)
             with patch.object(run_stage5, "load_stage5_runtime_contract", return_value=contract):
                 run_stage5._validate_complete_compact_run(root, protocol["git_head"])
+                bundle = load_canonical_json(evaluation_root / "products/evaluation_bundle.json")
+                rounded = copy.deepcopy(bundle["aggregate"])
+
+                def perturb_float(value):
+                    if isinstance(value, dict):
+                        return {key: perturb_float(item) for key, item in value.items()}
+                    if isinstance(value, list):
+                        return [perturb_float(item) for item in value]
+                    if isinstance(value, float):
+                        return value + 1e-15
+                    return value
+
+                with patch.object(run_stage5, "aggregate_pair_effects", return_value=perturb_float(rounded)):
+                    run_stage5._validate_complete_compact_run(root, protocol["git_head"])
+                published_csv = evaluation_root / "products/planned_contrasts.csv"
+                published_csv.write_text(published_csv.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "internally inconsistent"):
+                    run_stage5._validate_complete_compact_run(root, protocol["git_head"])
             self.assertEqual(len(records), len(BASE_SEEDS) * len(VARIANT_IDS) * len(cases))
             for path in (decision_root / "exact_reports").glob("*__A24P.json"):
                 self.assertIsNotNone(load_canonical_json(path)["controller_observations"])

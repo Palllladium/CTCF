@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-
 SOURCE_RUN = "S5_DEVELOPMENT_20260907T202438Z_ffd3090f6129"
 SOURCE_HEAD = "ffd3090f6129a48960d849ac345d2fc981dec063"
 JOBS = ("F0", "F2V", "F2P", "coverage")
@@ -52,14 +50,3 @@ def error_status(exc):
     if isinstance(exc, FloatingPointError):
         return "MATH_ERROR"
     return "ERROR"
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runner-values", action="store_true", required=True)
-    parser.parse_args()
-    print("\n".join((SOURCE_RUN, *JOBS)))
-
-
-if __name__ == "__main__":
-    main()

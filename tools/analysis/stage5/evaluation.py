@@ -496,7 +496,9 @@ def _inverse_metrics(first: torch.Tensor, second: torch.Tensor) -> dict[str, dic
         maximum = max(first_max, second_max)
     metadata = {
         "composition": "first + sample_at_psi(second, first), evaluated in both orders",
-        "warp": WARP_CONVENTION,
+        # 3D grid_sample's bilinear mode interpolates displacement trilinearly;
+        # nearest is used only for the segmentation labels in Dice evaluation.
+        "warp": {**WARP_CONVENTION, "interpolation": "trilinear"},
         "domain": "full grid",
     }
     return {

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import argparse
-
-from tools.analysis.stage5.precision_contract import SOURCE_RUN, TRAINING_SUBJECTS
+from tools.analysis.stage5.precision_contract import TRAINING_SUBJECTS
 
 PRECISION_RUN = "S5_PRECISIONDIAG_20260909T140904Z_3575584_cdede42ac60c"
 PRECISION_HEAD = "cdede42ac60c1ee1aa93d176683d9e2174819bbb"
@@ -60,14 +58,3 @@ def workload_contract():
         "bias_comparisons": [list(pair) for pair in BIAS_COMPARISONS],
         "production_training": False,
     }
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runner-values", required=True, action="store_true")
-    parser.parse_args()
-    print("\n".join((SOURCE_RUN, PRECISION_RUN, *JOBS)))
-
-
-if __name__ == "__main__":
-    main()

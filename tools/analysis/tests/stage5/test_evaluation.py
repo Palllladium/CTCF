@@ -321,6 +321,11 @@ class ReturnedFieldEvaluationTest(unittest.TestCase):
             self.field_path,
         )
         self.assertEqual(pair["scalar_metrics"][INVERSE_COMPONENT_RMS_METRIC_ID]["value"], 0.0)
+        self.assertEqual(
+            pair["scalar_metrics"][INVERSE_COMPONENT_RMS_METRIC_ID]["metadata"]["warp"]["interpolation"],
+            "trilinear",
+        )
+        self.assertEqual(forward["warp"]["interpolation"], "nearest")
         with self.assertRaisesRegex(RuntimeError, "both exact directions"):
             build_pair_evaluation(
                 self.context,
