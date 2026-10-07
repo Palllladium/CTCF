@@ -15,7 +15,7 @@ class SACBSolo(nn.Module):
     Runner / validation exactly like VoxelMorph and CorrMLP — no flow conversion needed.
 
     Requires CUDA at forward time (SACB1 hardcodes `.cuda()` and uses kmeans_gpu); cannot be
-    smoke-tested on CPU. Verify on the first GPU run that validation Dice is sane (>0.7).
+    smoke-tested on CPU. Sanity-check validation Dice on the first GPU run.
     """
 
     def __init__(self, img_size: tuple[int, int, int], num_k: int = 7, ch_scale: int = 4):

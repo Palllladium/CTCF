@@ -1,0 +1,1018 @@
+{
+  "algorithm": {
+    "both_directions": true,
+    "direction_domain": "CTCF-S5-OASIS-DIRECTION-V2\u0000",
+    "pair_domain": "CTCF-S5-OASIS-PAIR-V2\u0000",
+    "pairing": "adjacent_after_sha256_rank"
+  },
+  "cases": [
+    {
+      "case_id": "S5PAIR-001-D0",
+      "fixed_subject_id": "OASIS_ALL_P0103",
+      "moving_subject_id": "OASIS_ALL_P0150"
+    },
+    {
+      "case_id": "S5PAIR-001-D1",
+      "fixed_subject_id": "OASIS_ALL_P0150",
+      "moving_subject_id": "OASIS_ALL_P0103"
+    },
+    {
+      "case_id": "S5PAIR-002-D0",
+      "fixed_subject_id": "OASIS_ALL_P0365",
+      "moving_subject_id": "OASIS_ALL_P0428"
+    },
+    {
+      "case_id": "S5PAIR-002-D1",
+      "fixed_subject_id": "OASIS_ALL_P0428",
+      "moving_subject_id": "OASIS_ALL_P0365"
+    },
+    {
+      "case_id": "S5PAIR-003-D0",
+      "fixed_subject_id": "OASIS_ALL_P0244",
+      "moving_subject_id": "OASIS_ALL_P0300"
+    },
+    {
+      "case_id": "S5PAIR-003-D1",
+      "fixed_subject_id": "OASIS_ALL_P0300",
+      "moving_subject_id": "OASIS_ALL_P0244"
+    },
+    {
+      "case_id": "S5PAIR-004-D0",
+      "fixed_subject_id": "OASIS_ALL_P0088",
+      "moving_subject_id": "OASIS_ALL_P0353"
+    },
+    {
+      "case_id": "S5PAIR-004-D1",
+      "fixed_subject_id": "OASIS_ALL_P0353",
+      "moving_subject_id": "OASIS_ALL_P0088"
+    },
+    {
+      "case_id": "S5PAIR-005-D0",
+      "fixed_subject_id": "OASIS_ALL_P0047",
+      "moving_subject_id": "OASIS_ALL_P0429"
+    },
+    {
+      "case_id": "S5PAIR-005-D1",
+      "fixed_subject_id": "OASIS_ALL_P0429",
+      "moving_subject_id": "OASIS_ALL_P0047"
+    },
+    {
+      "case_id": "S5PAIR-006-D0",
+      "fixed_subject_id": "OASIS_ALL_P0424",
+      "moving_subject_id": "OASIS_ALL_P0294"
+    },
+    {
+      "case_id": "S5PAIR-006-D1",
+      "fixed_subject_id": "OASIS_ALL_P0294",
+      "moving_subject_id": "OASIS_ALL_P0424"
+    },
+    {
+      "case_id": "S5PAIR-007-D0",
+      "fixed_subject_id": "OASIS_ALL_P0064",
+      "moving_subject_id": "OASIS_ALL_P0032"
+    },
+    {
+      "case_id": "S5PAIR-007-D1",
+      "fixed_subject_id": "OASIS_ALL_P0032",
+      "moving_subject_id": "OASIS_ALL_P0064"
+    },
+    {
+      "case_id": "S5PAIR-008-D0",
+      "fixed_subject_id": "OASIS_ALL_P0144",
+      "moving_subject_id": "OASIS_ALL_P0120"
+    },
+    {
+      "case_id": "S5PAIR-008-D1",
+      "fixed_subject_id": "OASIS_ALL_P0120",
+      "moving_subject_id": "OASIS_ALL_P0144"
+    },
+    {
+      "case_id": "S5PAIR-009-D0",
+      "fixed_subject_id": "OASIS_ALL_P0176",
+      "moving_subject_id": "OASIS_ALL_P0228"
+    },
+    {
+      "case_id": "S5PAIR-009-D1",
+      "fixed_subject_id": "OASIS_ALL_P0228",
+      "moving_subject_id": "OASIS_ALL_P0176"
+    },
+    {
+      "case_id": "S5PAIR-010-D0",
+      "fixed_subject_id": "OASIS_ALL_P0397",
+      "moving_subject_id": "OASIS_ALL_P0054"
+    },
+    {
+      "case_id": "S5PAIR-010-D1",
+      "fixed_subject_id": "OASIS_ALL_P0054",
+      "moving_subject_id": "OASIS_ALL_P0397"
+    },
+    {
+      "case_id": "S5PAIR-011-D0",
+      "fixed_subject_id": "OASIS_ALL_P0279",
+      "moving_subject_id": "OASIS_ALL_P0164"
+    },
+    {
+      "case_id": "S5PAIR-011-D1",
+      "fixed_subject_id": "OASIS_ALL_P0164",
+      "moving_subject_id": "OASIS_ALL_P0279"
+    },
+    {
+      "case_id": "S5PAIR-012-D0",
+      "fixed_subject_id": "OASIS_ALL_P0370",
+      "moving_subject_id": "OASIS_ALL_P0057"
+    },
+    {
+      "case_id": "S5PAIR-012-D1",
+      "fixed_subject_id": "OASIS_ALL_P0057",
+      "moving_subject_id": "OASIS_ALL_P0370"
+    },
+    {
+      "case_id": "S5PAIR-013-D0",
+      "fixed_subject_id": "OASIS_ALL_P0099",
+      "moving_subject_id": "OASIS_ALL_P0379"
+    },
+    {
+      "case_id": "S5PAIR-013-D1",
+      "fixed_subject_id": "OASIS_ALL_P0379",
+      "moving_subject_id": "OASIS_ALL_P0099"
+    },
+    {
+      "case_id": "S5PAIR-014-D0",
+      "fixed_subject_id": "OASIS_ALL_P0039",
+      "moving_subject_id": "OASIS_ALL_P0236"
+    },
+    {
+      "case_id": "S5PAIR-014-D1",
+      "fixed_subject_id": "OASIS_ALL_P0236",
+      "moving_subject_id": "OASIS_ALL_P0039"
+    },
+    {
+      "case_id": "S5PAIR-015-D0",
+      "fixed_subject_id": "OASIS_ALL_P0117",
+      "moving_subject_id": "OASIS_ALL_P0147"
+    },
+    {
+      "case_id": "S5PAIR-015-D1",
+      "fixed_subject_id": "OASIS_ALL_P0147",
+      "moving_subject_id": "OASIS_ALL_P0117"
+    },
+    {
+      "case_id": "S5PAIR-016-D0",
+      "fixed_subject_id": "OASIS_ALL_P0308",
+      "moving_subject_id": "OASIS_ALL_P0339"
+    },
+    {
+      "case_id": "S5PAIR-016-D1",
+      "fixed_subject_id": "OASIS_ALL_P0339",
+      "moving_subject_id": "OASIS_ALL_P0308"
+    },
+    {
+      "case_id": "S5PAIR-017-D0",
+      "fixed_subject_id": "OASIS_ALL_P0263",
+      "moving_subject_id": "OASIS_ALL_P0004"
+    },
+    {
+      "case_id": "S5PAIR-017-D1",
+      "fixed_subject_id": "OASIS_ALL_P0004",
+      "moving_subject_id": "OASIS_ALL_P0263"
+    },
+    {
+      "case_id": "S5PAIR-018-D0",
+      "fixed_subject_id": "OASIS_ALL_P0261",
+      "moving_subject_id": "OASIS_ALL_P0114"
+    },
+    {
+      "case_id": "S5PAIR-018-D1",
+      "fixed_subject_id": "OASIS_ALL_P0114",
+      "moving_subject_id": "OASIS_ALL_P0261"
+    },
+    {
+      "case_id": "S5PAIR-019-D0",
+      "fixed_subject_id": "OASIS_ALL_P0421",
+      "moving_subject_id": "OASIS_ALL_P0078"
+    },
+    {
+      "case_id": "S5PAIR-019-D1",
+      "fixed_subject_id": "OASIS_ALL_P0078",
+      "moving_subject_id": "OASIS_ALL_P0421"
+    },
+    {
+      "case_id": "S5PAIR-020-D0",
+      "fixed_subject_id": "OASIS_ALL_P0319",
+      "moving_subject_id": "OASIS_ALL_P0198"
+    },
+    {
+      "case_id": "S5PAIR-020-D1",
+      "fixed_subject_id": "OASIS_ALL_P0198",
+      "moving_subject_id": "OASIS_ALL_P0319"
+    },
+    {
+      "case_id": "S5PAIR-021-D0",
+      "fixed_subject_id": "OASIS_ALL_P0331",
+      "moving_subject_id": "OASIS_ALL_P0165"
+    },
+    {
+      "case_id": "S5PAIR-021-D1",
+      "fixed_subject_id": "OASIS_ALL_P0165",
+      "moving_subject_id": "OASIS_ALL_P0331"
+    },
+    {
+      "case_id": "S5PAIR-022-D0",
+      "fixed_subject_id": "OASIS_ALL_P0082",
+      "moving_subject_id": "OASIS_ALL_P0270"
+    },
+    {
+      "case_id": "S5PAIR-022-D1",
+      "fixed_subject_id": "OASIS_ALL_P0270",
+      "moving_subject_id": "OASIS_ALL_P0082"
+    },
+    {
+      "case_id": "S5PAIR-023-D0",
+      "fixed_subject_id": "OASIS_ALL_P0071",
+      "moving_subject_id": "OASIS_ALL_P0269"
+    },
+    {
+      "case_id": "S5PAIR-023-D1",
+      "fixed_subject_id": "OASIS_ALL_P0269",
+      "moving_subject_id": "OASIS_ALL_P0071"
+    },
+    {
+      "case_id": "S5PAIR-024-D0",
+      "fixed_subject_id": "OASIS_ALL_P0026",
+      "moving_subject_id": "OASIS_ALL_P0292"
+    },
+    {
+      "case_id": "S5PAIR-024-D1",
+      "fixed_subject_id": "OASIS_ALL_P0292",
+      "moving_subject_id": "OASIS_ALL_P0026"
+    },
+    {
+      "case_id": "S5PAIR-025-D0",
+      "fixed_subject_id": "OASIS_ALL_P0281",
+      "moving_subject_id": "OASIS_ALL_P0218"
+    },
+    {
+      "case_id": "S5PAIR-025-D1",
+      "fixed_subject_id": "OASIS_ALL_P0218",
+      "moving_subject_id": "OASIS_ALL_P0281"
+    },
+    {
+      "case_id": "S5PAIR-026-D0",
+      "fixed_subject_id": "OASIS_ALL_P0223",
+      "moving_subject_id": "OASIS_ALL_P0119"
+    },
+    {
+      "case_id": "S5PAIR-026-D1",
+      "fixed_subject_id": "OASIS_ALL_P0119",
+      "moving_subject_id": "OASIS_ALL_P0223"
+    },
+    {
+      "case_id": "S5PAIR-027-D0",
+      "fixed_subject_id": "OASIS_ALL_P0265",
+      "moving_subject_id": "OASIS_ALL_P0433"
+    },
+    {
+      "case_id": "S5PAIR-027-D1",
+      "fixed_subject_id": "OASIS_ALL_P0433",
+      "moving_subject_id": "OASIS_ALL_P0265"
+    },
+    {
+      "case_id": "S5PAIR-028-D0",
+      "fixed_subject_id": "OASIS_ALL_P0140",
+      "moving_subject_id": "OASIS_ALL_P0056"
+    },
+    {
+      "case_id": "S5PAIR-028-D1",
+      "fixed_subject_id": "OASIS_ALL_P0056",
+      "moving_subject_id": "OASIS_ALL_P0140"
+    },
+    {
+      "case_id": "S5PAIR-029-D0",
+      "fixed_subject_id": "OASIS_ALL_P0333",
+      "moving_subject_id": "OASIS_ALL_P0311"
+    },
+    {
+      "case_id": "S5PAIR-029-D1",
+      "fixed_subject_id": "OASIS_ALL_P0311",
+      "moving_subject_id": "OASIS_ALL_P0333"
+    },
+    {
+      "case_id": "S5PAIR-030-D0",
+      "fixed_subject_id": "OASIS_ALL_P0137",
+      "moving_subject_id": "OASIS_ALL_P0188"
+    },
+    {
+      "case_id": "S5PAIR-030-D1",
+      "fixed_subject_id": "OASIS_ALL_P0188",
+      "moving_subject_id": "OASIS_ALL_P0137"
+    },
+    {
+      "case_id": "S5PAIR-031-D0",
+      "fixed_subject_id": "OASIS_ALL_P0010",
+      "moving_subject_id": "OASIS_ALL_P0159"
+    },
+    {
+      "case_id": "S5PAIR-031-D1",
+      "fixed_subject_id": "OASIS_ALL_P0159",
+      "moving_subject_id": "OASIS_ALL_P0010"
+    },
+    {
+      "case_id": "S5PAIR-032-D0",
+      "fixed_subject_id": "OASIS_ALL_P0011",
+      "moving_subject_id": "OASIS_ALL_P0214"
+    },
+    {
+      "case_id": "S5PAIR-032-D1",
+      "fixed_subject_id": "OASIS_ALL_P0214",
+      "moving_subject_id": "OASIS_ALL_P0011"
+    },
+    {
+      "case_id": "S5PAIR-033-D0",
+      "fixed_subject_id": "OASIS_ALL_P0202",
+      "moving_subject_id": "OASIS_ALL_P0109"
+    },
+    {
+      "case_id": "S5PAIR-033-D1",
+      "fixed_subject_id": "OASIS_ALL_P0109",
+      "moving_subject_id": "OASIS_ALL_P0202"
+    },
+    {
+      "case_id": "S5PAIR-034-D0",
+      "fixed_subject_id": "OASIS_ALL_P0326",
+      "moving_subject_id": "OASIS_ALL_P0302"
+    },
+    {
+      "case_id": "S5PAIR-034-D1",
+      "fixed_subject_id": "OASIS_ALL_P0302",
+      "moving_subject_id": "OASIS_ALL_P0326"
+    },
+    {
+      "case_id": "S5PAIR-035-D0",
+      "fixed_subject_id": "OASIS_ALL_P0086",
+      "moving_subject_id": "OASIS_ALL_P0403"
+    },
+    {
+      "case_id": "S5PAIR-035-D1",
+      "fixed_subject_id": "OASIS_ALL_P0403",
+      "moving_subject_id": "OASIS_ALL_P0086"
+    },
+    {
+      "case_id": "S5PAIR-036-D0",
+      "fixed_subject_id": "OASIS_ALL_P0312",
+      "moving_subject_id": "OASIS_ALL_P0325"
+    },
+    {
+      "case_id": "S5PAIR-036-D1",
+      "fixed_subject_id": "OASIS_ALL_P0325",
+      "moving_subject_id": "OASIS_ALL_P0312"
+    },
+    {
+      "case_id": "S5PAIR-037-D0",
+      "fixed_subject_id": "OASIS_ALL_P0431",
+      "moving_subject_id": "OASIS_ALL_P0304"
+    },
+    {
+      "case_id": "S5PAIR-037-D1",
+      "fixed_subject_id": "OASIS_ALL_P0304",
+      "moving_subject_id": "OASIS_ALL_P0431"
+    },
+    {
+      "case_id": "S5PAIR-038-D0",
+      "fixed_subject_id": "OASIS_ALL_P0293",
+      "moving_subject_id": "OASIS_ALL_P0374"
+    },
+    {
+      "case_id": "S5PAIR-038-D1",
+      "fixed_subject_id": "OASIS_ALL_P0374",
+      "moving_subject_id": "OASIS_ALL_P0293"
+    },
+    {
+      "case_id": "S5PAIR-039-D0",
+      "fixed_subject_id": "OASIS_ALL_P0404",
+      "moving_subject_id": "OASIS_ALL_P0418"
+    },
+    {
+      "case_id": "S5PAIR-039-D1",
+      "fixed_subject_id": "OASIS_ALL_P0418",
+      "moving_subject_id": "OASIS_ALL_P0404"
+    },
+    {
+      "case_id": "S5PAIR-040-D0",
+      "fixed_subject_id": "OASIS_ALL_P0255",
+      "moving_subject_id": "OASIS_ALL_P0209"
+    },
+    {
+      "case_id": "S5PAIR-040-D1",
+      "fixed_subject_id": "OASIS_ALL_P0209",
+      "moving_subject_id": "OASIS_ALL_P0255"
+    },
+    {
+      "case_id": "S5PAIR-041-D0",
+      "fixed_subject_id": "OASIS_ALL_P0237",
+      "moving_subject_id": "OASIS_ALL_P0402"
+    },
+    {
+      "case_id": "S5PAIR-041-D1",
+      "fixed_subject_id": "OASIS_ALL_P0402",
+      "moving_subject_id": "OASIS_ALL_P0237"
+    },
+    {
+      "case_id": "S5PAIR-042-D0",
+      "fixed_subject_id": "OASIS_ALL_P0070",
+      "moving_subject_id": "OASIS_ALL_P0018"
+    },
+    {
+      "case_id": "S5PAIR-042-D1",
+      "fixed_subject_id": "OASIS_ALL_P0018",
+      "moving_subject_id": "OASIS_ALL_P0070"
+    },
+    {
+      "case_id": "S5PAIR-043-D0",
+      "fixed_subject_id": "OASIS_ALL_P0183",
+      "moving_subject_id": "OASIS_ALL_P0016"
+    },
+    {
+      "case_id": "S5PAIR-043-D1",
+      "fixed_subject_id": "OASIS_ALL_P0016",
+      "moving_subject_id": "OASIS_ALL_P0183"
+    },
+    {
+      "case_id": "S5PAIR-044-D0",
+      "fixed_subject_id": "OASIS_ALL_P0073",
+      "moving_subject_id": "OASIS_ALL_P0081"
+    },
+    {
+      "case_id": "S5PAIR-044-D1",
+      "fixed_subject_id": "OASIS_ALL_P0081",
+      "moving_subject_id": "OASIS_ALL_P0073"
+    },
+    {
+      "case_id": "S5PAIR-045-D0",
+      "fixed_subject_id": "OASIS_ALL_P0174",
+      "moving_subject_id": "OASIS_ALL_P0021"
+    },
+    {
+      "case_id": "S5PAIR-045-D1",
+      "fixed_subject_id": "OASIS_ALL_P0021",
+      "moving_subject_id": "OASIS_ALL_P0174"
+    },
+    {
+      "case_id": "S5PAIR-046-D0",
+      "fixed_subject_id": "OASIS_ALL_P0177",
+      "moving_subject_id": "OASIS_ALL_P0131"
+    },
+    {
+      "case_id": "S5PAIR-046-D1",
+      "fixed_subject_id": "OASIS_ALL_P0131",
+      "moving_subject_id": "OASIS_ALL_P0177"
+    },
+    {
+      "case_id": "S5PAIR-047-D0",
+      "fixed_subject_id": "OASIS_ALL_P0282",
+      "moving_subject_id": "OASIS_ALL_P0015"
+    },
+    {
+      "case_id": "S5PAIR-047-D1",
+      "fixed_subject_id": "OASIS_ALL_P0015",
+      "moving_subject_id": "OASIS_ALL_P0282"
+    },
+    {
+      "case_id": "S5PAIR-048-D0",
+      "fixed_subject_id": "OASIS_ALL_P0328",
+      "moving_subject_id": "OASIS_ALL_P0434"
+    },
+    {
+      "case_id": "S5PAIR-048-D1",
+      "fixed_subject_id": "OASIS_ALL_P0434",
+      "moving_subject_id": "OASIS_ALL_P0328"
+    },
+    {
+      "case_id": "S5PAIR-049-D0",
+      "fixed_subject_id": "OASIS_ALL_P0141",
+      "moving_subject_id": "OASIS_ALL_P0111"
+    },
+    {
+      "case_id": "S5PAIR-049-D1",
+      "fixed_subject_id": "OASIS_ALL_P0111",
+      "moving_subject_id": "OASIS_ALL_P0141"
+    },
+    {
+      "case_id": "S5PAIR-050-D0",
+      "fixed_subject_id": "OASIS_ALL_P0019",
+      "moving_subject_id": "OASIS_ALL_P0059"
+    },
+    {
+      "case_id": "S5PAIR-050-D1",
+      "fixed_subject_id": "OASIS_ALL_P0059",
+      "moving_subject_id": "OASIS_ALL_P0019"
+    }
+  ],
+  "counts": {
+    "directed_cases": 100,
+    "unordered_pairs": 50
+  },
+  "pairs": [
+    {
+      "case_ids": [
+        "S5PAIR-001-D0",
+        "S5PAIR-001-D1"
+      ],
+      "direction_sha256": "b261cd4a70806332e3f2d9d31d50eb8de222de6fe52859a82f0c7d7447241eeb",
+      "pair_id": "S5PAIR-001",
+      "subject_a": "OASIS_ALL_P0103",
+      "subject_b": "OASIS_ALL_P0150"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-002-D0",
+        "S5PAIR-002-D1"
+      ],
+      "direction_sha256": "315341a951fbc3257e641852e788d0a3c1f37b52852984deca46cd3244e40b5f",
+      "pair_id": "S5PAIR-002",
+      "subject_a": "OASIS_ALL_P0365",
+      "subject_b": "OASIS_ALL_P0428"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-003-D0",
+        "S5PAIR-003-D1"
+      ],
+      "direction_sha256": "7d2ed3020558d25338446ae8971ea77e9367449aedb805d93c3caf3bac10b7cf",
+      "pair_id": "S5PAIR-003",
+      "subject_a": "OASIS_ALL_P0244",
+      "subject_b": "OASIS_ALL_P0300"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-004-D0",
+        "S5PAIR-004-D1"
+      ],
+      "direction_sha256": "620dbbeee1ebe1313a8ec9c3d5b96597b213f61553aec519d7d49397f493ac0b",
+      "pair_id": "S5PAIR-004",
+      "subject_a": "OASIS_ALL_P0088",
+      "subject_b": "OASIS_ALL_P0353"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-005-D0",
+        "S5PAIR-005-D1"
+      ],
+      "direction_sha256": "d7f06219d14263f06b0645d2e678b75a8351590ebac85d25a2ce4b6f26002c79",
+      "pair_id": "S5PAIR-005",
+      "subject_a": "OASIS_ALL_P0047",
+      "subject_b": "OASIS_ALL_P0429"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-006-D0",
+        "S5PAIR-006-D1"
+      ],
+      "direction_sha256": "0fbfa6701016a9af021af8d4485d44a6dd0f40f34af112652612233af3e28ede",
+      "pair_id": "S5PAIR-006",
+      "subject_a": "OASIS_ALL_P0294",
+      "subject_b": "OASIS_ALL_P0424"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-007-D0",
+        "S5PAIR-007-D1"
+      ],
+      "direction_sha256": "b155374cfbc0b2b895e1a172d5ee459134cff8c20ff89010c6cce412776924a6",
+      "pair_id": "S5PAIR-007",
+      "subject_a": "OASIS_ALL_P0032",
+      "subject_b": "OASIS_ALL_P0064"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-008-D0",
+        "S5PAIR-008-D1"
+      ],
+      "direction_sha256": "1c4f2d43963ae5a60a2a99bbbddca3d9fc988c81702e3fc55fdc66d8ff8c7448",
+      "pair_id": "S5PAIR-008",
+      "subject_a": "OASIS_ALL_P0120",
+      "subject_b": "OASIS_ALL_P0144"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-009-D0",
+        "S5PAIR-009-D1"
+      ],
+      "direction_sha256": "652ce5313e05b1a965ca693d75170f876612725f917746ae09a4505d7721f4f5",
+      "pair_id": "S5PAIR-009",
+      "subject_a": "OASIS_ALL_P0176",
+      "subject_b": "OASIS_ALL_P0228"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-010-D0",
+        "S5PAIR-010-D1"
+      ],
+      "direction_sha256": "fd85518a5a984df588f68619003e4dd537f1d268d6ed52a82bfcfc1838a1e99e",
+      "pair_id": "S5PAIR-010",
+      "subject_a": "OASIS_ALL_P0054",
+      "subject_b": "OASIS_ALL_P0397"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-011-D0",
+        "S5PAIR-011-D1"
+      ],
+      "direction_sha256": "299e21857f769aeba2c24cd81fbffd2d4b8ef244db7b0fa8ad9935900c12dc82",
+      "pair_id": "S5PAIR-011",
+      "subject_a": "OASIS_ALL_P0164",
+      "subject_b": "OASIS_ALL_P0279"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-012-D0",
+        "S5PAIR-012-D1"
+      ],
+      "direction_sha256": "f04f9fe0281e9801f259cdc25448c7f5975ba592c5bb816d4391db8bd78c5e30",
+      "pair_id": "S5PAIR-012",
+      "subject_a": "OASIS_ALL_P0057",
+      "subject_b": "OASIS_ALL_P0370"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-013-D0",
+        "S5PAIR-013-D1"
+      ],
+      "direction_sha256": "8b8f5df7bc3f96b55eeb4c21bcf5f4f1c63963fbf1b4fa4f5081397d39965849",
+      "pair_id": "S5PAIR-013",
+      "subject_a": "OASIS_ALL_P0099",
+      "subject_b": "OASIS_ALL_P0379"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-014-D0",
+        "S5PAIR-014-D1"
+      ],
+      "direction_sha256": "5db2e2442d2fedcb3b43847ced7977212405f0112e9b0630d74cae2cb96a9623",
+      "pair_id": "S5PAIR-014",
+      "subject_a": "OASIS_ALL_P0039",
+      "subject_b": "OASIS_ALL_P0236"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-015-D0",
+        "S5PAIR-015-D1"
+      ],
+      "direction_sha256": "55c50ef9b58cc262b3960b4b5462375690ab16e874c4784bd2ddecb621db1bbb",
+      "pair_id": "S5PAIR-015",
+      "subject_a": "OASIS_ALL_P0117",
+      "subject_b": "OASIS_ALL_P0147"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-016-D0",
+        "S5PAIR-016-D1"
+      ],
+      "direction_sha256": "3b2748297f70c44cf12a5a85af5a43841e4a14bf953479c479139454cf9c5245",
+      "pair_id": "S5PAIR-016",
+      "subject_a": "OASIS_ALL_P0308",
+      "subject_b": "OASIS_ALL_P0339"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-017-D0",
+        "S5PAIR-017-D1"
+      ],
+      "direction_sha256": "c3f299ed0cb0fd65b8391978010ed46cdc471842d7c509f9c9bdf9d02a6c55b0",
+      "pair_id": "S5PAIR-017",
+      "subject_a": "OASIS_ALL_P0004",
+      "subject_b": "OASIS_ALL_P0263"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-018-D0",
+        "S5PAIR-018-D1"
+      ],
+      "direction_sha256": "89dffbdd3dbe77b4b868efdd117e31b2f9d5a35e12881ed0211da3b84f32f0f2",
+      "pair_id": "S5PAIR-018",
+      "subject_a": "OASIS_ALL_P0114",
+      "subject_b": "OASIS_ALL_P0261"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-019-D0",
+        "S5PAIR-019-D1"
+      ],
+      "direction_sha256": "40825945b39ff0fa642a49a40d72f8fbff8ce301447e7fb568ea20c8a60876b0",
+      "pair_id": "S5PAIR-019",
+      "subject_a": "OASIS_ALL_P0078",
+      "subject_b": "OASIS_ALL_P0421"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-020-D0",
+        "S5PAIR-020-D1"
+      ],
+      "direction_sha256": "796ebf1a4ecd6c9b0947dd7a9e4e4314f5a64cd660fef35b005201814335edf4",
+      "pair_id": "S5PAIR-020",
+      "subject_a": "OASIS_ALL_P0198",
+      "subject_b": "OASIS_ALL_P0319"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-021-D0",
+        "S5PAIR-021-D1"
+      ],
+      "direction_sha256": "87b5aeed4189db0264d626f12cdf4a2b34b197a5d1e1ac8f9c9b4fdcccdcc90a",
+      "pair_id": "S5PAIR-021",
+      "subject_a": "OASIS_ALL_P0165",
+      "subject_b": "OASIS_ALL_P0331"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-022-D0",
+        "S5PAIR-022-D1"
+      ],
+      "direction_sha256": "60c08e1f470edba50c236f28dfc76fe3d6b7e75a062495146103431eed0649e9",
+      "pair_id": "S5PAIR-022",
+      "subject_a": "OASIS_ALL_P0082",
+      "subject_b": "OASIS_ALL_P0270"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-023-D0",
+        "S5PAIR-023-D1"
+      ],
+      "direction_sha256": "c822ff8c9c270afbe476de6710050ff445317ad0b8c72fad046ba5d2d77f6351",
+      "pair_id": "S5PAIR-023",
+      "subject_a": "OASIS_ALL_P0071",
+      "subject_b": "OASIS_ALL_P0269"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-024-D0",
+        "S5PAIR-024-D1"
+      ],
+      "direction_sha256": "22894ceab6128f3479bb1eac4878c732f2e5df0cdd22972e7af38d7c8c682167",
+      "pair_id": "S5PAIR-024",
+      "subject_a": "OASIS_ALL_P0026",
+      "subject_b": "OASIS_ALL_P0292"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-025-D0",
+        "S5PAIR-025-D1"
+      ],
+      "direction_sha256": "afd88a6f1aee96b1f084b71f84b202db8f4dc10ebf6388589b7a76fe59f4c3ba",
+      "pair_id": "S5PAIR-025",
+      "subject_a": "OASIS_ALL_P0218",
+      "subject_b": "OASIS_ALL_P0281"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-026-D0",
+        "S5PAIR-026-D1"
+      ],
+      "direction_sha256": "fb215435674f3ba61cfd155f1a32fd1d65660eb56ac43b7e8c6fb61c2e3f0f08",
+      "pair_id": "S5PAIR-026",
+      "subject_a": "OASIS_ALL_P0119",
+      "subject_b": "OASIS_ALL_P0223"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-027-D0",
+        "S5PAIR-027-D1"
+      ],
+      "direction_sha256": "3775428837be885e63f64feec97f39d1d7d4e7e116de0d3a1aa903030f468263",
+      "pair_id": "S5PAIR-027",
+      "subject_a": "OASIS_ALL_P0265",
+      "subject_b": "OASIS_ALL_P0433"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-028-D0",
+        "S5PAIR-028-D1"
+      ],
+      "direction_sha256": "6edb8634fe47f8e4accc1f9d4e72af2e6d12a9d90be1256b6006ebc9d368c68a",
+      "pair_id": "S5PAIR-028",
+      "subject_a": "OASIS_ALL_P0056",
+      "subject_b": "OASIS_ALL_P0140"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-029-D0",
+        "S5PAIR-029-D1"
+      ],
+      "direction_sha256": "a9440d34a920c0fdc01a2678d8dd0e11dee2fc057dc0fb0f1ec4fcfffdc6ae2a",
+      "pair_id": "S5PAIR-029",
+      "subject_a": "OASIS_ALL_P0311",
+      "subject_b": "OASIS_ALL_P0333"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-030-D0",
+        "S5PAIR-030-D1"
+      ],
+      "direction_sha256": "f3ecc55ace2d097444e4d019bc18b1b7ff343e5c41c190b999dea00e59238385",
+      "pair_id": "S5PAIR-030",
+      "subject_a": "OASIS_ALL_P0137",
+      "subject_b": "OASIS_ALL_P0188"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-031-D0",
+        "S5PAIR-031-D1"
+      ],
+      "direction_sha256": "00357f7014bc61e6644c81468dbd28cb5f3221212330d4439d0a23c20a03334f",
+      "pair_id": "S5PAIR-031",
+      "subject_a": "OASIS_ALL_P0010",
+      "subject_b": "OASIS_ALL_P0159"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-032-D0",
+        "S5PAIR-032-D1"
+      ],
+      "direction_sha256": "cafb78e2723daf8212371bf660e25187cb1849bb15e9b93c0417eaa92c3750e9",
+      "pair_id": "S5PAIR-032",
+      "subject_a": "OASIS_ALL_P0011",
+      "subject_b": "OASIS_ALL_P0214"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-033-D0",
+        "S5PAIR-033-D1"
+      ],
+      "direction_sha256": "e39514e2de6b20980d6662b4f459f4c10fd91ae6c4a8c559fc4b01f1be7b9eb0",
+      "pair_id": "S5PAIR-033",
+      "subject_a": "OASIS_ALL_P0109",
+      "subject_b": "OASIS_ALL_P0202"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-034-D0",
+        "S5PAIR-034-D1"
+      ],
+      "direction_sha256": "535a9dd2abda107424de2ebad7a75d4f9acf30989da88d87c8b768753eeef6e2",
+      "pair_id": "S5PAIR-034",
+      "subject_a": "OASIS_ALL_P0302",
+      "subject_b": "OASIS_ALL_P0326"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-035-D0",
+        "S5PAIR-035-D1"
+      ],
+      "direction_sha256": "fe525f5942c1135d44d169ce5227254d076ff5f6b1ba6e7ed4cc77200a447973",
+      "pair_id": "S5PAIR-035",
+      "subject_a": "OASIS_ALL_P0086",
+      "subject_b": "OASIS_ALL_P0403"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-036-D0",
+        "S5PAIR-036-D1"
+      ],
+      "direction_sha256": "13804ed5d285ddfa751a07b4d13616f69c6cc00d92d9676f40b5a236a5e3c677",
+      "pair_id": "S5PAIR-036",
+      "subject_a": "OASIS_ALL_P0312",
+      "subject_b": "OASIS_ALL_P0325"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-037-D0",
+        "S5PAIR-037-D1"
+      ],
+      "direction_sha256": "f46dd3e761b35fcd823242eb3add5d496f6bdba7f38302015f2bd94dfdf7f726",
+      "pair_id": "S5PAIR-037",
+      "subject_a": "OASIS_ALL_P0304",
+      "subject_b": "OASIS_ALL_P0431"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-038-D0",
+        "S5PAIR-038-D1"
+      ],
+      "direction_sha256": "4c50b3956d4844dbb6f27c2614b06e3aabc957c53e49ecf681eac14ff7123b29",
+      "pair_id": "S5PAIR-038",
+      "subject_a": "OASIS_ALL_P0293",
+      "subject_b": "OASIS_ALL_P0374"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-039-D0",
+        "S5PAIR-039-D1"
+      ],
+      "direction_sha256": "c16a7fc20af06247a1327b2c0b6dd23d22fb68cc5de3f7cafcc94a60e74c5bd7",
+      "pair_id": "S5PAIR-039",
+      "subject_a": "OASIS_ALL_P0404",
+      "subject_b": "OASIS_ALL_P0418"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-040-D0",
+        "S5PAIR-040-D1"
+      ],
+      "direction_sha256": "34075fb86d9cde3da307733924e890fe6fe467d1eb303777599a820deb81ae9a",
+      "pair_id": "S5PAIR-040",
+      "subject_a": "OASIS_ALL_P0209",
+      "subject_b": "OASIS_ALL_P0255"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-041-D0",
+        "S5PAIR-041-D1"
+      ],
+      "direction_sha256": "758959f7be1483fde47cb8849ba64e63221f7d6811fa79ce85594965e1f84b81",
+      "pair_id": "S5PAIR-041",
+      "subject_a": "OASIS_ALL_P0237",
+      "subject_b": "OASIS_ALL_P0402"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-042-D0",
+        "S5PAIR-042-D1"
+      ],
+      "direction_sha256": "d2567b2157636f630762935e8fb7e083b9a785bec54e34cbda42c4df88686348",
+      "pair_id": "S5PAIR-042",
+      "subject_a": "OASIS_ALL_P0018",
+      "subject_b": "OASIS_ALL_P0070"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-043-D0",
+        "S5PAIR-043-D1"
+      ],
+      "direction_sha256": "f61d57795869c25cbda412b0f61ccfec0f2bdf9202faaf4c7a5644319c012e76",
+      "pair_id": "S5PAIR-043",
+      "subject_a": "OASIS_ALL_P0016",
+      "subject_b": "OASIS_ALL_P0183"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-044-D0",
+        "S5PAIR-044-D1"
+      ],
+      "direction_sha256": "3c0e7b68785fc20d653992893f9f84e937714aafd4e56cd65e0a14c47c0052c3",
+      "pair_id": "S5PAIR-044",
+      "subject_a": "OASIS_ALL_P0073",
+      "subject_b": "OASIS_ALL_P0081"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-045-D0",
+        "S5PAIR-045-D1"
+      ],
+      "direction_sha256": "0cc5106fd0169fdd600dada6b7e0f9fc6ed1ef56ae9f5f50bc9736b219398252",
+      "pair_id": "S5PAIR-045",
+      "subject_a": "OASIS_ALL_P0021",
+      "subject_b": "OASIS_ALL_P0174"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-046-D0",
+        "S5PAIR-046-D1"
+      ],
+      "direction_sha256": "f47801d11aa80f8b9e06322c01e525e8417515828dc2aaecdb7e9b990d4b5fc4",
+      "pair_id": "S5PAIR-046",
+      "subject_a": "OASIS_ALL_P0131",
+      "subject_b": "OASIS_ALL_P0177"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-047-D0",
+        "S5PAIR-047-D1"
+      ],
+      "direction_sha256": "38410f8585a5e575edc17c63848893a9aef4b05bc485e2d41421a658833068d8",
+      "pair_id": "S5PAIR-047",
+      "subject_a": "OASIS_ALL_P0015",
+      "subject_b": "OASIS_ALL_P0282"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-048-D0",
+        "S5PAIR-048-D1"
+      ],
+      "direction_sha256": "5217cdf28b55bc0095a1090652b863628d52fc694aa048e30cb787396e785b4d",
+      "pair_id": "S5PAIR-048",
+      "subject_a": "OASIS_ALL_P0328",
+      "subject_b": "OASIS_ALL_P0434"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-049-D0",
+        "S5PAIR-049-D1"
+      ],
+      "direction_sha256": "cce519fc93ba60ef2eaf3ab1512e379768059233dbc5546290dc550c6cc99cce",
+      "pair_id": "S5PAIR-049",
+      "subject_a": "OASIS_ALL_P0111",
+      "subject_b": "OASIS_ALL_P0141"
+    },
+    {
+      "case_ids": [
+        "S5PAIR-050-D0",
+        "S5PAIR-050-D1"
+      ],
+      "direction_sha256": "5f2a460ae0feb40fcaf0903112e92908b0f5b9d8357812208e636a6dacf7a0ed",
+      "pair_id": "S5PAIR-050",
+      "subject_a": "OASIS_ALL_P0019",
+      "subject_b": "OASIS_ALL_P0059"
+    }
+  ],
+  "protocol_id": "CTCF-STAGE5-OASIS-DATA-V2",
+  "schema": "ctcf-stage5-oasis-pairs-v2"
+}

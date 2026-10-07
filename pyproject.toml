@@ -5,7 +5,7 @@ extend-exclude = [
     "logs",
     "results",
     "tools/archive",
-    "tools/paper",
+    "archive",
     # verbatim upstream baseline code
     "models/CorrMLP/networks.py",
     "models/SACB/SACB1.py",

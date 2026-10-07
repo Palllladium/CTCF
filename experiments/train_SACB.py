@@ -1,12 +1,13 @@
 """Train SACB-Net (Cheng et al., CVPR 2025) as a standalone baseline on our OASIS/IXI split.
 
-Verifies its reported IXI 0.769 (vs our 0.7635) on our exact data. SACB's flow is voxel-units
-(TransMorph-style ST), so it runs through our Runner/val like VoxelMorph/CorrMLP. Loss = NCC(win 9)
-+ diffusion, weights [1, 0.3] (SACB native), Adam 1e-4. Verbatim upstream net lives in models/SACB/
+Reproduces its published IXI result on our exact data; both that number and ours route through
+the evidence ledger, not through this file. SACB's flow is voxel-units (TransMorph-style ST),
+so it runs through our Runner/val like VoxelMorph/CorrMLP. Loss = NCC(win 9) + diffusion,
+weights [1, 0.3] (SACB native), Adam 1e-4. Verbatim upstream net lives in models/SACB/
 (SACB1/model/nn_util/utils); this trainer is our harness glue.
 
 Requires CUDA + deps: einops kmeans_gpu timm monai pystrum scipy (SACB1 hardcodes `.cuda()`),
-so there is no CPU smoke path — sanity-check val Dice (>0.7) on the first GPU run.
+so there is no CPU smoke path — sanity-check validation Dice on the first GPU run.
 """
 
 from __future__ import annotations

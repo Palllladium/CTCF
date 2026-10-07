@@ -1,3 +1,5 @@
+"""IXI pair datasets: a fixed atlas against each subject, intensity only, no labels."""
+
 from __future__ import annotations
 
 import numpy as np

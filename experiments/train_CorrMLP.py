@@ -1,9 +1,10 @@
 """Train CorrMLP (Meng et al., CVPR 2024) as a standalone baseline on our OASIS/IXI split.
 
-Verifies the unsupervised gap reported in memory/competitor_landscape_2026.md (~0.871 OASIS)
-on our exact data and protocol. Loss = NCC(win=9) + diffusion, weights [1, 1], Adam 1e-4 —
-identical to CorrMLP's native recipe and to our baseline loss. GPL-3.0 upstream code lives in
-models/CorrMLP/networks_upstream.py (git-ignored); this trainer is our harness glue.
+Reproduces the published unsupervised result on our exact data and protocol; the value it is
+compared against routes through the evidence ledger, not through this file. Loss = NCC(win=9)
++ diffusion, weights [1, 1], Adam 1e-4 — identical to CorrMLP's native recipe and to our
+baseline loss. The network is verbatim GPL-3.0 upstream code in models/CorrMLP/networks.py
+(tracked); this trainer is our harness glue.
 """
 
 from __future__ import annotations

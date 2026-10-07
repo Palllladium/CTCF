@@ -1,3 +1,5 @@
+"""Synthetic warped-pair generator: a known deformation applied to real volumes, for debugging."""
+
 from __future__ import annotations
 
 import torch
