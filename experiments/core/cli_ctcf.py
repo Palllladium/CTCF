@@ -147,6 +147,34 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         "the default for every prior run); ~1.0 is the standard weakly-supervised setting.",
     )
     group.add_argument(
+        "--anatomy_loss",
+        type=str,
+        choices=["none", "gmm"],
+        default="none",
+        help="Label-free anatomical target: gmm = soft-Dice between warped and fixed soft tissue "
+        "classes of a 3-component intensity mixture fitted on training images (pilot P1).",
+    )
+    group.add_argument(
+        "--w_anat",
+        type=float,
+        default=1.0,
+        help="Weight of the --anatomy_loss term.",
+    )
+    group.add_argument(
+        "--init_ckpt",
+        default="",
+        help="Initialise model weights only (strict load) and train from epoch 0 with a fresh "
+        "optimizer; unlike --resume it restores no epoch, optimizer or scaler state.",
+    )
+    group.add_argument(
+        "--finetune",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Keep L1, L3 and the ICON/Jacobian warm-up fully on from epoch 0 (for continuing a trained "
+        "cascade, where the warm-up ramp would switch its levels off).",
+    )
+    group.add_argument(
         "--icon_mode",
         type=str,
         choices=["l1", "l2"],

@@ -20,6 +20,8 @@ ITER_LOG_KEYS: tuple[tuple[str, str], ...] = (
     ("reg", "reg"),
     ("icon", "icon"),
     ("jac", "jac"),
+    ("dice", "dice"),
+    ("anat", "anat"),
     ("dice_tr", "dice_tr"),
 )
 

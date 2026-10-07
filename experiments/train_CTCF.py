@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import glob
+import os
 
 import torch
 import torch.nn.functional as F
@@ -11,7 +13,9 @@ from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
 from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
 from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter
+from experiments.core.path_profiles import resolve_dataset_dirs
 from experiments.core.train_runtime import TrainContext, run_train
 from utils import (
     DareDiffusion,
@@ -22,14 +26,18 @@ from utils import (
     elastic_loss,
     icon_loss,
     neg_jacobian_penalty,
+    pkload,
     setup_device,
     soft_dice_loss,
     trilinear_fold_penalty,
 )
+from utils.anatomy import fit_tissue_gmm, tissue_posteriors
 
 # One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
 # absent/background channels, so an over-wide count is harmless.
 _SEG_NUM_CLASSES = 37
+# Training images the tissue mixture is fitted on (sorted, first N): fixed before any pilot run.
+_GMM_FIT_FILES = 40
 
 
 class Runner:
@@ -55,13 +63,28 @@ class Runner:
             synth_dwin=synth_dwin,
             **ctcf_overrides_from_args(args),
         ).to(device)
+        if args.init_ckpt:
+            if args.resume:
+                raise ValueError("--init_ckpt starts a new run from given weights; do not combine it with --resume.")
+            report = load_checkpoint_state(self.model, args.init_ckpt, strict=True)
+            print(f">>> Initialised weights from {args.init_ckpt}: {report}")
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
         self.img_size = tuple(self.model.img_size_full)
         self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         # Differentiable (bilinear) warp of one-hot labels for the weakly-supervised Dice loss.
-        self.reg_bilin = RegisterModel(self.img_size, mode="bilinear").to(device) if args.w_dice > 0.0 else None
+        uses_soft_targets = args.w_dice > 0.0 or args.anatomy_loss != "none"
+        self.reg_bilin = RegisterModel(self.img_size, mode="bilinear").to(device) if uses_soft_targets else None
+        self.tissue_gmm = None
+        if args.anatomy_loss == "gmm":
+            train_dir, _, _ = resolve_dataset_dirs(args)
+            fit_files = sorted(glob.glob(os.path.join(train_dir, "*.pkl")))[:_GMM_FIT_FILES]
+            self.tissue_gmm = fit_tissue_gmm(pkload(path)[0] for path in fit_files)
+            print(
+                f">>> Tissue GMM on {len(fit_files)} training images: means={self.tissue_gmm.means.round(4)} "
+                f"stds={self.tissue_gmm.variances.round(6) ** 0.5} weights={self.tissue_gmm.weights.round(4)}"
+            )
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
         self._val_alpha_l1 = 0.0 if args.disable_l1 else 1.0
@@ -146,6 +169,8 @@ class Runner:
         alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=epoch, max_epoch=schedule_max_epoch)
         if args.l1_from_start:
             alpha_l1 = 1.0
+        if args.finetune:
+            alpha_l1 = alpha_l3 = warm = 1.0
         if args.disable_l1:
             alpha_l1 = 0.0
         if args.disable_l3:
@@ -196,6 +221,14 @@ class Runner:
             warp_yx = self.reg_bilin((y_oh, flow_yx))
             L_dice = 0.5 * (soft_dice_loss(warp_xy, y_oh) + soft_dice_loss(warp_yx, x_oh)) * args.w_dice
 
+        L_anat = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
+        if self.tissue_gmm is not None:
+            x_tissue = tissue_posteriors(x, self.tissue_gmm)
+            y_tissue = tissue_posteriors(y, self.tissue_gmm)
+            warp_xy = self.reg_bilin((x_tissue, flow_xy))
+            warp_yx = self.reg_bilin((y_tissue, flow_yx))
+            L_anat = 0.5 * (soft_dice_loss(warp_xy, y_tissue) + soft_dice_loss(warp_yx, x_tissue)) * args.w_anat
+
         if self.use_cascade_reg:
             level_weights = (
                 ("phi_l1", self.w_reg_l1),
@@ -230,7 +263,7 @@ class Runner:
                 * warm
             )
 
-        loss = L_ncc + L_icon + L_reg + L_jac + L_ema + L_dice
+        loss = L_ncc + L_icon + L_reg + L_jac + L_ema + L_dice + L_anat
 
         logs = {
             "all": loss.item(),
@@ -239,6 +272,7 @@ class Runner:
             "icon": L_icon.item(),
             "jac": L_jac.item(),
             "dice": L_dice.item(),
+            "anat": L_anat.item(),
             "alpha_l1": alpha_l1,
             "alpha_l3": alpha_l3,
             "warm": warm,
