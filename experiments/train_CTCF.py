@@ -32,7 +32,17 @@ from utils import (
     soft_dice_loss,
     trilinear_fold_penalty,
 )
-from utils.anatomy import fit_tissue_gmm, tissue_posteriors
+from utils.anatomy import (
+    LatentParcellation,
+    anatomix_features,
+    augment_intensity,
+    effective_classes,
+    fit_tissue_gmm,
+    information_loss,
+    load_anatomix,
+    tissue_posteriors,
+    with_background,
+)
 from utils.field import differentiable_local_clip
 
 # One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
@@ -42,6 +52,8 @@ _SEG_NUM_CLASSES = 37
 _GMM_FIT_FILES = 40
 # Clip margin above the published certificate eps 0.001, as in the inference repair chain.
 _CERT_WORK_EPS = 0.0011
+# P2b: epochs in which the parcellation learns alone before its consistency term reaches the flow.
+_LATENT_SOLO_EPOCHS = 5
 
 
 def certified_crop_warp(flow, moving, sweeps, size, origin):
@@ -116,6 +128,11 @@ class Runner:
                 f">>> Tissue GMM on {len(fit_files)} training images: means={self.tissue_gmm.means.round(4)} "
                 f"stds={self.tissue_gmm.variances.round(6) ** 0.5} weights={self.tissue_gmm.weights.round(4)}"
             )
+        self.parcellation = None
+        if args.anatomy_loss == "latent":
+            self.parcellation = LatentParcellation().to(device)
+            self.optimizer.add_param_group({"params": self.parcellation.parameters()})
+        self.feature_net = load_anatomix(device) if args.anatomy_loss == "foundation" else None
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
         self._val_alpha_l1 = 0.0 if args.disable_l1 else 1.0
@@ -186,6 +203,44 @@ class Runner:
         origin = [2 * random.randrange((n - size) // 2 + 1) for n in flow.shape[2:]]
         warped, block = certified_crop_warp(flow, moving_oh, self.args.certified_steps, size, origin)
         return soft_dice_loss(warped, fixed_oh[(slice(None), slice(None), *block)])
+
+    def _anatomy_loss(self, x, y, flow_xy, flow_yx, epoch):
+        """The label-free anatomical term selected by --anatomy_loss, symmetric in the two directions."""
+        args = self.args
+        if args.anatomy_loss == "gmm":
+            x_tissue = tissue_posteriors(x, self.tissue_gmm)
+            y_tissue = tissue_posteriors(y, self.tissue_gmm)
+            warp_xy = self.reg_bilin((x_tissue, flow_xy))
+            warp_yx = self.reg_bilin((y_tissue, flow_yx))
+            return 0.5 * (soft_dice_loss(warp_xy, y_tissue) + soft_dice_loss(warp_yx, x_tissue)) * args.w_anat, {}
+
+        if args.anatomy_loss == "latent":
+            x_probs = torch.softmax(self.parcellation(x), dim=1)
+            y_probs = torch.softmax(self.parcellation(y), dim=1)
+            x_classes, y_classes = with_background(x_probs, x), with_background(y_probs, y)
+            coupled = epoch >= _LATENT_SOLO_EPOCHS
+            to_y = flow_xy if coupled else flow_xy.detach()
+            to_x = flow_yx if coupled else flow_yx.detach()
+            consistency = 0.5 * (
+                soft_dice_loss(self.reg_bilin((x_classes, to_y)), y_classes)
+                + soft_dice_loss(self.reg_bilin((y_classes, to_x)), x_classes)
+            )
+            information = 0.5 * (information_loss(x_probs, x) + information_loss(y_probs, y))
+            x_augmented = torch.softmax(self.parcellation(augment_intensity(x)), dim=1)
+            invariance = soft_dice_loss(with_background(x_augmented, x), x_classes.detach())
+            loss = (consistency + information + invariance) * args.w_anat
+            return loss, {"k_eff": effective_classes(x_probs.detach(), x)}
+
+        if args.anatomy_loss == "foundation":
+            with torch.no_grad():
+                x_feat = anatomix_features(self.feature_net, x)
+                y_feat = anatomix_features(self.feature_net, y)
+            cos_xy = (F.normalize(self.reg_bilin((x_feat, flow_xy)), dim=1) * y_feat).sum(dim=1)
+            cos_yx = (F.normalize(self.reg_bilin((y_feat, flow_yx)), dim=1) * x_feat).sum(dim=1)
+            loss = 0.5 * ((1.0 - cos_xy)[y[:, 0] > 0].mean() + (1.0 - cos_yx)[x[:, 0] > 0].mean()) * args.w_anat
+            return loss, {}
+
+        return torch.zeros((), device=self.device, dtype=flow_xy.dtype), {}
 
     def train_step(self, batch, epoch):
         args, ctx = self.args, self.ctx
@@ -268,13 +323,7 @@ class Runner:
                     * args.w_cert
                 )
 
-        L_anat = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
-        if self.tissue_gmm is not None:
-            x_tissue = tissue_posteriors(x, self.tissue_gmm)
-            y_tissue = tissue_posteriors(y, self.tissue_gmm)
-            warp_xy = self.reg_bilin((x_tissue, flow_xy))
-            warp_yx = self.reg_bilin((y_tissue, flow_yx))
-            L_anat = 0.5 * (soft_dice_loss(warp_xy, y_tissue) + soft_dice_loss(warp_yx, x_tissue)) * args.w_anat
+        L_anat, anat_logs = self._anatomy_loss(x, y, flow_xy, flow_yx, epoch)
 
         if self.use_cascade_reg:
             level_weights = (
@@ -321,6 +370,7 @@ class Runner:
             "dice": L_dice.item(),
             "anat": L_anat.item(),
             "cert": L_cert.item(),
+            **anat_logs,
             "alpha_l1": alpha_l1,
             "alpha_l3": alpha_l3,
             "warm": warm,

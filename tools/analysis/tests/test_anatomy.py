@@ -5,7 +5,15 @@ import unittest
 import numpy as np
 import torch
 
-from utils.anatomy import fit_tissue_gmm, tissue_posteriors
+from utils.anatomy import (
+    LatentParcellation,
+    augment_intensity,
+    effective_classes,
+    fit_tissue_gmm,
+    information_loss,
+    tissue_posteriors,
+    with_background,
+)
 from utils.dice import soft_dice_loss
 
 
@@ -42,6 +50,41 @@ class TissueGMMTest(unittest.TestCase):
         post = tissue_posteriors(image, self.gmm)
         shifted = torch.roll(post, shifts=3, dims=4)
         self.assertLess(soft_dice_loss(post, post).item(), soft_dice_loss(shifted, post).item())
+
+
+class LatentParcellationTest(unittest.TestCase):
+    def setUp(self):
+        self.image = torch.ones(1, 1, 4, 4, 8)
+        self.image[..., :2] = 0.0  # a background slab
+
+    def test_information_loss_rewards_confident_balanced_classes(self):
+        k = 4
+        uniform = torch.full((1, k, 4, 4, 8), 1.0 / k)
+        one_class = torch.zeros(1, k, 4, 4, 8)
+        one_class[:, 0] = 1.0
+        balanced = torch.zeros(1, k, 4, 4, 8)
+        for c in range(k):
+            balanced[:, c, ..., 2 + c] = 1.0
+        balanced[:, 0, ..., 6:] = 1.0  # the remaining foreground columns
+        self.assertAlmostEqual(information_loss(uniform, self.image).item(), 0.0, places=5)
+        self.assertAlmostEqual(information_loss(one_class, self.image).item(), 0.0, places=5)
+        self.assertLess(information_loss(balanced, self.image).item(), -0.8)
+        self.assertAlmostEqual(effective_classes(one_class, self.image), 1.0, places=4)
+
+    def test_background_channel_and_shapes(self):
+        net = LatentParcellation(classes=5, width=4)
+        probs = torch.softmax(net(torch.rand(1, 1, 16, 16, 16)), dim=1)
+        self.assertEqual(tuple(probs.shape), (1, 5, 16, 16, 16))
+        classes = with_background(torch.softmax(torch.rand(1, 5, 4, 4, 8), dim=1), self.image)
+        torch.testing.assert_close(classes.sum(dim=1), torch.ones(1, 4, 4, 8))
+        self.assertTrue(torch.equal(classes[:, 0, ..., :2], torch.ones(1, 4, 4, 2)))
+
+    def test_augmentation_leaves_background_untouched(self):
+        image = torch.rand(1, 1, 6, 6, 6) * (torch.rand(1, 1, 6, 6, 6) > 0.4)
+        augmented = augment_intensity(image, torch.Generator().manual_seed(0))
+        self.assertTrue(torch.equal(augmented[image == 0], image[image == 0]))
+        self.assertFalse(torch.equal(augmented[image > 0], image[image > 0]))
+        self.assertTrue(bool((augmented[image > 0] > 0).all()))
 
 
 if __name__ == "__main__":

@@ -149,10 +149,12 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--anatomy_loss",
         type=str,
-        choices=["none", "gmm"],
+        choices=["none", "gmm", "latent", "foundation"],
         default="none",
-        help="Label-free anatomical target: gmm = soft-Dice between warped and fixed soft tissue "
-        "classes of a 3-component intensity mixture fitted on training images (pilot P1).",
+        help="Label-free anatomical target. gmm (P1): soft-Dice between warped and fixed soft tissue classes "
+        "of a 3-component intensity mixture fitted on training images. latent (P2b): a co-trained 16-class "
+        "parcellation kept consistent under the warp, informative and invariant to intensity changes. "
+        "foundation (P2c): cosine similarity of frozen anatomix features (pip install anatomix first).",
     )
     group.add_argument(
         "--w_anat",
