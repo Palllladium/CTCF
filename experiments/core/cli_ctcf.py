@@ -161,6 +161,26 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         help="Weight of the --anatomy_loss term.",
     )
     group.add_argument(
+        "--certified_steps",
+        type=int,
+        default=0,
+        help="Pilot P3: sweeps of the certified local clip from identity, applied with its exact derivative "
+        "to one random crop of each output; the soft-Dice of the clipped crop joins the loss. Inference "
+        "deploys the same operator with --tto_clip_from_identity 1 --tto_clip_sweeps <same>. 0 = off.",
+    )
+    group.add_argument(
+        "--cert_patch",
+        type=int,
+        default=64,
+        help="Even crop edge for --certified_steps; Dice is scored >= 8*sweeps voxels inside its border.",
+    )
+    group.add_argument(
+        "--w_cert",
+        type=float,
+        default=1.0,
+        help="Weight of the certified-crop soft-Dice term (--certified_steps > 0).",
+    )
+    group.add_argument(
         "--init_ckpt",
         default="",
         help="Initialise model weights only (strict load) and train from epoch 0 with a fresh "

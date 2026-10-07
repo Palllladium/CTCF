@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch.utils.checkpoint import checkpoint
 
 
@@ -735,31 +736,56 @@ def certified_local_clip(
     if flow_current.shape != flow_proposal.shape:
         raise ValueError("current and proposal must share shape [1,3,D,H,W]")
     with torch.no_grad():
-        cur = flow_current.detach().double()
-        prop = flow_proposal.detach().double()
-        _, _, d, h, w = cur.shape
-        zz, yy, xx = torch.meshgrid(
-            torch.arange(d, device=cur.device),
-            torch.arange(h, device=cur.device),
-            torch.arange(w, device=cur.device),
-            indexing="ij",
-        )
-        for _ in range(max(1, sweeps)):
-            for color in range(8):
-                ci, cj, ck = (color >> 2) & 1, (color >> 1) & 1, color & 1
-                cmask = (zz % 2 == ci) & (yy % 2 == cj) & (xx % 2 == ck)  # this color's vertices [D,H,W]
-                field1 = torch.where(cmask[None, None], prop, cur)  # this color's vertices fully at proposal
-                b0 = _trilinear_bernstein_coeffs(cur)  # [3,3,3,D-1,H-1,W-1], all >= eps (cur is certified)
-                s = _trilinear_bernstein_coeffs(field1) - b0  # per-cell affine slope of each coeff in alpha
-                ratio = torch.where(s < 0, (b0 - eps) / (-s).clamp_min(1e-30), torch.full_like(s, float("inf")))
-                alpha_cell = ratio.amin(dim=(0, 1, 2)).clamp(0.0, 1.0)  # max safe alpha per cell [D-1,H-1,W-1]
-                # each color vertex is the color-c corner of its <=8 incident cells; alpha_v = min over them
-                # (min-pool = -maxpool(-x); pad missing boundary cells with +inf so they never constrain)
-                padded = F.pad(alpha_cell[None, None], (1, 1, 1, 1, 1, 1), value=float("inf"))
-                alpha_v = (-F.max_pool3d(-padded, kernel_size=2, stride=1))[0, 0]  # [D,H,W]
-                alpha_v = torch.where(cmask, alpha_v.clamp(0.0, 1.0), torch.zeros_like(alpha_v))
-                cur = cur + alpha_v[None, None] * (prop - cur)
-        return cur.float()
+        return _local_clip_sweeps(flow_current.detach().double(), flow_proposal.detach().double(), eps, sweeps).float()
+
+
+def differentiable_local_clip(flow_proposal: torch.Tensor, eps: float, sweeps: int) -> torch.Tensor:
+    """``certified_local_clip(identity, flow_proposal)`` at the proposal's dtype, with its exact piecewise
+    derivative: autograd runs through the per-vertex fractions alpha, so a proposal pushed past what the
+    constraints admit gains nothing (unlike a detached alpha, which would reward inflating it).
+
+    The clip is local: one color moves a vertex using only its incident cells, so after ``sweeps`` passes a
+    vertex depends on input within ``8 * sweeps`` voxels. On a crop that starts at even indices (so parities
+    match) the output agrees with the full-volume clip everywhere at least that far from the crop border."""
+    return _local_clip_sweeps(torch.zeros_like(flow_proposal), flow_proposal, eps, sweeps)
+
+
+def _local_clip_sweeps(cur: torch.Tensor, prop: torch.Tensor, eps: float, sweeps: int) -> torch.Tensor:
+    """The 8-parity-color clip loop of ``certified_local_clip``; grad-transparent, at the inputs' dtype.
+    With autograd on, each color is checkpointed: backward recomputes it instead of holding the 27-coefficient
+    graphs of all colors at once (gigabytes even for a 64^3 crop)."""
+    _, _, d, h, w = cur.shape
+    zz, yy, xx = torch.meshgrid(
+        torch.arange(d, device=cur.device),
+        torch.arange(h, device=cur.device),
+        torch.arange(w, device=cur.device),
+        indexing="ij",
+    )
+    tracked = torch.is_grad_enabled() and (cur.requires_grad or prop.requires_grad)
+    for _ in range(max(1, sweeps)):
+        for color in range(8):
+            ci, cj, ck = (color >> 2) & 1, (color >> 1) & 1, color & 1
+            cmask = (zz % 2 == ci) & (yy % 2 == cj) & (xx % 2 == ck)  # this color's vertices [D,H,W]
+            if tracked:
+                cur = torch.utils.checkpoint.checkpoint(_clip_color, cur, prop, cmask, eps, use_reentrant=False)
+            else:
+                cur = _clip_color(cur, prop, cmask, eps)
+    return cur
+
+
+def _clip_color(cur: torch.Tensor, prop: torch.Tensor, cmask: torch.Tensor, eps: float) -> torch.Tensor:
+    """Move one parity color of vertices toward the proposal by its largest certified fraction."""
+    field1 = torch.where(cmask[None, None], prop, cur)  # this color's vertices fully at proposal
+    b0 = _trilinear_bernstein_coeffs(cur)  # [3,3,3,D-1,H-1,W-1], all >= eps (cur is certified)
+    s = _trilinear_bernstein_coeffs(field1) - b0  # per-cell affine slope of each coeff in alpha
+    ratio = torch.where(s < 0, (b0 - eps) / (-s).clamp_min(1e-30), torch.full_like(s, float("inf")))
+    alpha_cell = ratio.amin(dim=(0, 1, 2)).clamp(0.0, 1.0)  # max safe alpha per cell [D-1,H-1,W-1]
+    # each color vertex is the color-c corner of its <=8 incident cells; alpha_v = min over them
+    # (min-pool = -maxpool(-x); pad missing boundary cells with +inf so they never constrain)
+    padded = F.pad(alpha_cell[None, None], (1, 1, 1, 1, 1, 1), value=float("inf"))
+    alpha_v = (-F.max_pool3d(-padded, kernel_size=2, stride=1))[0, 0]  # [D,H,W]
+    alpha_v = torch.where(cmask, alpha_v.clamp(0.0, 1.0), torch.zeros_like(alpha_v))
+    return cur + alpha_v[None, None] * (prop - cur)
 
 
 def _tri_pen_map(flow: torch.Tensor, mode: str, eps: float) -> torch.Tensor:

@@ -4,6 +4,7 @@ import argparse
 import copy
 import glob
 import os
+import random
 
 import torch
 import torch.nn.functional as F
@@ -32,12 +33,36 @@ from utils import (
     trilinear_fold_penalty,
 )
 from utils.anatomy import fit_tissue_gmm, tissue_posteriors
+from utils.field import differentiable_local_clip
 
 # One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
 # absent/background channels, so an over-wide count is harmless.
 _SEG_NUM_CLASSES = 37
 # Training images the tissue mixture is fitted on (sorted, first N): fixed before any pilot run.
 _GMM_FIT_FILES = 40
+# Clip margin above the published certificate eps 0.001, as in the inference repair chain.
+_CERT_WORK_EPS = 0.0011
+
+
+def certified_crop_warp(flow, moving, sweeps, size, origin):
+    """Warp ``moving`` by the certified-clipped ``flow`` on the even-aligned crop at ``origin``.
+
+    Only the crop interior >= 8*sweeps voxels from its border is returned, where the crop clip equals the
+    full-volume clip; sampling is normalised exactly as utils.spatial.SpatialTransformer does. Returns the
+    warped interior and its absolute (z, y, x) slices.
+    """
+    margin = 8 * sweeps
+    dims = flow.shape[2:]
+    crop = flow[:, :, origin[0] : origin[0] + size, origin[1] : origin[1] + size, origin[2] : origin[2] + size]
+    clipped = differentiable_local_clip(crop.float(), eps=_CERT_WORK_EPS, sweeps=sweeps)
+    inner = clipped[:, :, margin : size - margin, margin : size - margin, margin : size - margin]
+    start = [o + margin for o in origin]
+    n = size - 2 * margin
+    axes = [torch.arange(lo, lo + n, device=flow.device, dtype=inner.dtype) for lo in start]
+    grid = torch.stack(torch.meshgrid(*axes, indexing="ij"))[None]
+    locs = torch.stack([2.0 * ((grid[:, i] + inner[:, i]) / (dims[i] - 1) - 0.5) for i in range(3)], dim=-1)
+    warped = F.grid_sample(moving, locs[..., [2, 1, 0]], align_corners=False, mode="bilinear")
+    return warped, tuple(slice(lo, lo + n) for lo in start)
 
 
 class Runner:
@@ -74,6 +99,12 @@ class Runner:
         self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         # Differentiable (bilinear) warp of one-hot labels for the weakly-supervised Dice loss.
+        if args.certified_steps > 0:
+            margin = 8 * args.certified_steps
+            if args.w_dice <= 0.0:
+                raise ValueError("--certified_steps scores the clipped crop against labels; it needs --w_dice > 0.")
+            if args.cert_patch % 2 or args.cert_patch <= 2 * margin:
+                raise ValueError(f"--cert_patch must be even and larger than 2*8*sweeps = {2 * margin}.")
         uses_soft_targets = args.w_dice > 0.0 or args.anatomy_loss != "none"
         self.reg_bilin = RegisterModel(self.img_size, mode="bilinear").to(device) if uses_soft_targets else None
         self.tissue_gmm = None
@@ -150,6 +181,12 @@ class Runner:
             for b_t, b_s in zip(self.teacher.buffers(), self.model.buffers(), strict=True):
                 b_t.data.copy_(b_s.data)
 
+    def _certified_crop_dice(self, flow, moving_oh, fixed_oh):
+        size = self.args.cert_patch
+        origin = [2 * random.randrange((n - size) // 2 + 1) for n in flow.shape[2:]]
+        warped, block = certified_crop_warp(flow, moving_oh, self.args.certified_steps, size, origin)
+        return soft_dice_loss(warped, fixed_oh[(slice(None), slice(None), *block)])
+
     def train_step(self, batch, epoch):
         args, ctx = self.args, self.ctx
         self._ema_update()
@@ -221,6 +258,16 @@ class Runner:
             warp_yx = self.reg_bilin((y_oh, flow_yx))
             L_dice = 0.5 * (soft_dice_loss(warp_xy, y_oh) + soft_dice_loss(warp_yx, x_oh)) * args.w_dice
 
+        L_cert = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
+        if args.certified_steps > 0:
+            # The Bernstein coefficients go through einsum, which autocast would run in float16.
+            with torch.autocast(device_type="cuda", enabled=False):
+                L_cert = (
+                    0.5
+                    * (self._certified_crop_dice(flow_xy, x_oh, y_oh) + self._certified_crop_dice(flow_yx, y_oh, x_oh))
+                    * args.w_cert
+                )
+
         L_anat = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
         if self.tissue_gmm is not None:
             x_tissue = tissue_posteriors(x, self.tissue_gmm)
@@ -263,7 +310,7 @@ class Runner:
                 * warm
             )
 
-        loss = L_ncc + L_icon + L_reg + L_jac + L_ema + L_dice + L_anat
+        loss = L_ncc + L_icon + L_reg + L_jac + L_ema + L_dice + L_anat + L_cert
 
         logs = {
             "all": loss.item(),
@@ -273,6 +320,7 @@ class Runner:
             "jac": L_jac.item(),
             "dice": L_dice.item(),
             "anat": L_anat.item(),
+            "cert": L_cert.item(),
             "alpha_l1": alpha_l1,
             "alpha_l3": alpha_l3,
             "warm": warm,
