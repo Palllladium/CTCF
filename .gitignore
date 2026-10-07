@@ -38,3 +38,12 @@ results/
 *.pt
 *.ckpt
 *.npz
+
+# Licensed third-party baseline ports (CorrMLP: GPL-3.0; SACB-Net: no licence declared).
+# Kept locally, not distributed. Restore a copy from history when needed, e.g.
+#   git show stage5-final:models/CorrMLP/networks.py > models/CorrMLP/networks.py
+models/CorrMLP/networks.py
+models/SACB/SACB1.py
+models/SACB/model.py
+models/SACB/nn_util.py
+models/SACB/utils.py

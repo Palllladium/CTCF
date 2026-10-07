@@ -3,8 +3,8 @@
 Every field in this module is a Phi displacement in **voxel units**, channel-first
 ``(B, 3, D, H, W)``, on a unit-spaced grid, with channel ``c`` paired to spatial axis ``c``.
 That is the CTCF convention; it is not the Psi source-index displacement the deployment warp
-samples, and it is not a normalized-grid flow. Converting between the two is
-``tools.analysis.search.transaction.phi_to_psi_displacement`` and its inverse.
+samples, and it is not a normalized-grid flow. Converting Phi to Psi is
+``tools.analysis.materialize_psi.materialize_psi_displacement``.
 
 Fold and determinant results here come from several *different* schemes that do not agree:
 the central-difference ``jacobian_det``, the digital corner/star determinants, and the
