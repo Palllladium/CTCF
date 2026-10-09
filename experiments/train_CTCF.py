@@ -44,6 +44,7 @@ from utils.anatomy import (
     with_background,
 )
 from utils.field import differentiable_local_clip
+from utils.losses import local_ncc_map, region_mean
 
 # One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
 # absent/background channels, so an over-wide count is harmless.
@@ -246,9 +247,9 @@ class Runner:
         args, ctx = self.args, self.ctx
         self._ema_update()
 
-        if self.is_synth or args.w_dice > 0.0:
+        if self.is_synth or args.w_dice > 0.0 or args.ncc_regions == "labels":
             if len(batch) < 4:
-                raise RuntimeError("--w_dice > 0 needs a dataset that provides segmentations (x_seg, y_seg).")
+                raise RuntimeError("--w_dice/--ncc_regions need a dataset that provides segmentations.")
             x, y, x_seg, y_seg = batch[0], batch[1], batch[2], batch[3]
             x_seg, y_seg = x_seg.to(self.device).long(), y_seg.to(self.device).long()
         else:
@@ -284,7 +285,15 @@ class Runner:
             def_yx, flow_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
 
         with torch.autocast(device_type="cuda", enabled=False):
-            L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
+            if args.ncc_regions == "labels":
+                # The control's exact per-voxel map (same operator, argument order, window and eps): only the
+                # averaging changes, from every voxel to every labelled structure of the fixed image.
+                win, eps = ctx.ncc.win, ctx.ncc.eps
+                per_structure_xy = region_mean(local_ncc_map(def_xy.float(), y.float(), win, eps), y_seg)
+                per_structure_yx = region_mean(local_ncc_map(def_yx.float(), x.float(), win, eps), x_seg)
+                L_ncc = -0.5 * (per_structure_xy + per_structure_yx) * args.w_ncc
+            else:
+                L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc
 
         L_icon = icon_loss(flow_xy, flow_yx, mode=args.icon_mode) * W_icon
         tri_stats = None

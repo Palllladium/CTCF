@@ -47,32 +47,7 @@ class NCCVxm(nn.Module):
         do not switch it on in training without re-tuning w_reg, since masking rescales the
         similarity term relative to the regulariser.
         """
-        ii, ji = y_true, y_pred
-        ndims = len(ii.shape) - 2
-        assert ndims in (1, 2, 3)
-        win = [9] * ndims if self.win is None else list(self.win)
-        pad = win[0] // 2
-        if ndims == 1:
-            stride, padding = (1,), (pad,)
-        elif ndims == 2:
-            stride, padding = (1, 1), (pad, pad)
-        else:
-            stride, padding = (1, 1, 1), (pad, pad, pad)
-        conv = getattr(F, f"conv{ndims}d")
-        filt = torch.ones((1, 1, *win), device=ii.device, dtype=ii.dtype)
-        i2, j2, ij = ii * ii, ji * ji, ii * ji
-        i_sum = conv(ii, filt, stride=stride, padding=padding)
-        j_sum = conv(ji, filt, stride=stride, padding=padding)
-        i2_sum = conv(i2, filt, stride=stride, padding=padding)
-        j2_sum = conv(j2, filt, stride=stride, padding=padding)
-        ij_sum = conv(ij, filt, stride=stride, padding=padding)
-        win_size = float(torch.tensor(win).prod().item())
-        ui, uj = i_sum / win_size, j_sum / win_size
-        cross = ij_sum - uj * i_sum - ui * j_sum + ui * uj * win_size
-        i_var = torch.clamp(i2_sum - 2 * ui * i_sum + ui * ui * win_size, min=self.eps)
-        j_var = torch.clamp(j2_sum - 2 * uj * j_sum + uj * uj * win_size, min=self.eps)
-        cc = (cross * cross) / (i_var * j_var)
-
+        cc = local_ncc_map(y_true, y_pred, win=self.win, eps=self.eps)
         if mask is None:
             return -torch.mean(cc)
 
@@ -80,6 +55,53 @@ class NCCVxm(nn.Module):
         if m.dim() == cc.dim() - 1:
             m = m.unsqueeze(1)
         return -(cc * m).sum() / torch.clamp(m.sum(), min=1.0)
+
+
+def local_ncc_map(y_true: torch.Tensor, y_pred: torch.Tensor, win=None, eps: float = 1e-5) -> torch.Tensor:
+    """Per-voxel squared local correlation that NCCVxm averages, the one implementation both use.
+
+    In exact arithmetic it lies in [0, 1]. The window variances are differences of large sums, so on a
+    near-flat window FP32 cancellation leaves noise that the clamp does not catch and the value can land far
+    outside (a constant 0.9 volume gives ~1e5). Exact zeros, as in the background, give exactly 0; the brain
+    of the Learn2Reg OASIS volumes has no window flat enough to matter.
+    """
+    ii, ji = y_true, y_pred
+    ndims = len(ii.shape) - 2
+    assert ndims in (1, 2, 3)
+    win = [9] * ndims if win is None else list(win)
+    pad = win[0] // 2
+    if ndims == 1:
+        stride, padding = (1,), (pad,)
+    elif ndims == 2:
+        stride, padding = (1, 1), (pad, pad)
+    else:
+        stride, padding = (1, 1, 1), (pad, pad, pad)
+    conv = getattr(F, f"conv{ndims}d")
+    filt = torch.ones((1, 1, *win), device=ii.device, dtype=ii.dtype)
+    i2, j2, ij = ii * ii, ji * ji, ii * ji
+    i_sum = conv(ii, filt, stride=stride, padding=padding)
+    j_sum = conv(ji, filt, stride=stride, padding=padding)
+    i2_sum = conv(i2, filt, stride=stride, padding=padding)
+    j2_sum = conv(j2, filt, stride=stride, padding=padding)
+    ij_sum = conv(ij, filt, stride=stride, padding=padding)
+    win_size = float(torch.tensor(win).prod().item())
+    ui, uj = i_sum / win_size, j_sum / win_size
+    cross = ij_sum - uj * i_sum - ui * j_sum + ui * uj * win_size
+    i_var = torch.clamp(i2_sum - 2 * ui * i_sum + ui * ui * win_size, min=eps)
+    j_var = torch.clamp(j2_sum - 2 * uj * j_sum + uj * uj * win_size, min=eps)
+    return (cross * cross) / (i_var * j_var)
+
+
+def region_mean(values: torch.Tensor, regions: torch.Tensor) -> torch.Tensor:
+    """Mean of `values` inside each region id > 0 of `regions` (same shape), then averaged with equal weight over
+    the regions present: a 60-voxel structure counts as much as the cortex. Id 0 is ignored. A batch pools
+    regions that share an id across its items."""
+    v, r = values.reshape(-1), regions.reshape(-1).long()
+    n = int(r.max().item()) + 1
+    sums = torch.zeros(n, device=v.device, dtype=v.dtype).index_add_(0, r, v)
+    counts = torch.bincount(r, minlength=n).to(v.dtype)
+    present = counts[1:] > 0
+    return (sums[1:][present] / counts[1:][present]).mean()
 
 
 _MIND_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))

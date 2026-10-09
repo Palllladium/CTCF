@@ -739,15 +739,22 @@ def certified_local_clip(
         return _local_clip_sweeps(flow_current.detach().double(), flow_proposal.detach().double(), eps, sweeps).float()
 
 
-def differentiable_local_clip(flow_proposal: torch.Tensor, eps: float, sweeps: int) -> torch.Tensor:
-    """``certified_local_clip(identity, flow_proposal)`` at the proposal's dtype, with its exact piecewise
+def differentiable_local_clip(
+    flow_proposal: torch.Tensor,
+    eps: float,
+    sweeps: int,
+    flow_current: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``certified_local_clip(flow_current, flow_proposal)`` at the proposal's dtype, with its exact piecewise
     derivative: autograd runs through the per-vertex fractions alpha, so a proposal pushed past what the
-    constraints admit gains nothing (unlike a detached alpha, which would reward inflating it).
+    constraints admit gains nothing (unlike a detached alpha, which would reward inflating it). The current
+    field defaults to the identity; whatever is passed must already be certified.
 
     The clip is local: one color moves a vertex using only its incident cells, so after ``sweeps`` passes a
     vertex depends on input within ``8 * sweeps`` voxels. On a crop that starts at even indices (so parities
     match) the output agrees with the full-volume clip everywhere at least that far from the crop border."""
-    return _local_clip_sweeps(torch.zeros_like(flow_proposal), flow_proposal, eps, sweeps)
+    current = torch.zeros_like(flow_proposal) if flow_current is None else flow_current
+    return _local_clip_sweeps(current, flow_proposal, eps, sweeps)
 
 
 def _local_clip_sweeps(cur: torch.Tensor, prop: torch.Tensor, eps: float, sweeps: int) -> torch.Tensor:

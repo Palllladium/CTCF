@@ -163,6 +163,15 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         help="Weight of the --anatomy_loss term.",
     )
     group.add_argument(
+        "--ncc_regions",
+        type=str,
+        choices=["none", "labels"],
+        default="none",
+        help="labels (round-1 oracle diagnostic): the local-NCC map is averaged with equal weight per labelled "
+        "structure of the fixed image instead of per voxel. The labels only re-weight the similarity and never "
+        "enter as a Dice target, yet they are supervision: the run is an upper-bound probe, not a label-free arm.",
+    )
+    group.add_argument(
         "--certified_steps",
         type=int,
         default=0,
