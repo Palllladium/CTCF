@@ -43,6 +43,7 @@ from utils.anatomy import (
     tissue_posteriors,
     with_background,
 )
+from utils.feature_similarity import LearnedSimilarity, load_feature_net
 from utils.field import differentiable_local_clip
 from utils.losses import local_ncc_map, region_mean
 
@@ -134,6 +135,11 @@ class Runner:
             self.parcellation = LatentParcellation().to(device)
             self.optimizer.add_param_group({"params": self.parcellation.parameters()})
         self.feature_net = load_anatomix(device) if args.anatomy_loss == "foundation" else None
+        self.learned_similarity = None
+        if args.anatomy_loss == "learned":
+            if not args.feature_ckpt:
+                raise ValueError("--anatomy_loss learned needs --feature_ckpt from experiments.train_features.")
+            self.learned_similarity = LearnedSimilarity(load_feature_net(args.feature_ckpt, device), args.feature_mode)
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"
         self._val_alpha_l1 = 0.0 if args.disable_l1 else 1.0
@@ -205,9 +211,15 @@ class Runner:
         warped, block = certified_crop_warp(flow, moving_oh, self.args.certified_steps, size, origin)
         return soft_dice_loss(warped, fixed_oh[(slice(None), slice(None), *block)])
 
-    def _anatomy_loss(self, x, y, flow_xy, flow_yx, epoch):
+    def _anatomy_loss(self, x, y, def_xy, def_yx, flow_xy, flow_yx, epoch):
         """The label-free anatomical term selected by --anatomy_loss, symmetric in the two directions."""
         args = self.args
+        if args.anatomy_loss == "learned":
+            with torch.autocast(device_type="cuda", enabled=False):
+                sim = self.learned_similarity
+                loss = 0.5 * (sim(x, def_xy, y, flow_xy) + sim(y, def_yx, x, flow_yx)) * args.w_anat
+            return loss, {}
+
         if args.anatomy_loss == "gmm":
             x_tissue = tissue_posteriors(x, self.tissue_gmm)
             y_tissue = tissue_posteriors(y, self.tissue_gmm)
@@ -332,7 +344,7 @@ class Runner:
                     * args.w_cert
                 )
 
-        L_anat, anat_logs = self._anatomy_loss(x, y, flow_xy, flow_yx, epoch)
+        L_anat, anat_logs = self._anatomy_loss(x, y, def_xy, def_yx, flow_xy, flow_yx, epoch)
 
         if self.use_cascade_reg:
             level_weights = (
