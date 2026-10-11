@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from experiments.train_features import HARD_DEFAULTS, info_nce, mine_ncc_hard, patch_ncc, patches, warp_index
+from tools.analysis.diag_round2 import standalone_weight
 from utils.feature_similarity import (
     ContrastiveFeatureNet,
     FeatureAutoencoder,
@@ -26,6 +27,18 @@ class _IdentityFeatures(torch.nn.Module):
 
     def feature_maps(self, image):
         return [image]
+
+
+class _RandomConvFeatures(torch.nn.Module):
+    """A fixed random 1 -> 4 channel convolution as a one-level feature net."""
+
+    def __init__(self):
+        super().__init__()
+        torch.manual_seed(0)
+        self.conv = torch.nn.Conv3d(1, 4, kernel_size=3, padding=1).requires_grad_(False)
+
+    def feature_maps(self, image):
+        return [self.conv(image)]
 
 
 def _smooth_flow(shape, amplitude, seed=0):
@@ -145,3 +158,38 @@ def test_feature_net_checkpoint_round_trip(tmp_path):
     assert not any(p.requires_grad for p in loaded.parameters()) and not loaded.training
     for a, b in zip(net.feature_maps(image), loaded.feature_maps(image), strict=True):
         assert torch.equal(a, b)
+
+
+def test_autoencoder_learns_a_mostly_empty_volume():
+    """Round 2's sigmoid head sat at the zero-output loss on brain-like volumes (mostly background)."""
+    n = 32
+    axes = torch.linspace(-1, 1, n)
+    z, y, x = torch.meshgrid(axes, axes, axes, indexing="ij")
+    inside = (z / 0.55) ** 2 + (y / 0.65) ** 2 + (x / 0.6) ** 2 < 1
+    noise = torch.rand((1, 1, 8, 8, 8), generator=torch.Generator().manual_seed(0))
+    texture = F.interpolate(noise, size=(n, n, n), mode="trilinear")
+    image = torch.where(inside, 0.25 + 0.4 * texture, torch.zeros(()))
+    target = F.avg_pool3d(image, kernel_size=2)
+    torch.manual_seed(0)
+    net = FeatureAutoencoder()
+    optimizer = torch.optim.Adam(net.parameters(), lr=3e-4)
+    for _ in range(40):
+        loss = F.mse_loss(net(image), target)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    assert loss < 0.5 * (target * target).mean()
+
+
+def test_standalone_weight_gives_the_term_the_ncc_field_gradient_norm():
+    shape = (24, 24, 24)
+    st = SpatialTransformer(shape)
+    x, y = torch.rand((1, 1, *shape)), torch.rand((1, 1, *shape))
+    flow = _smooth_flow(shape, 2.0)
+    sim = LearnedSimilarity(_RandomConvFeatures(), "warped_image")
+    weight, ratios = standalone_weight([("pair", x, y, None, None)], [flow], st, sim)
+    flow = flow.clone().requires_grad_(True)
+    warped = st(x, flow)
+    (g_ncc,) = torch.autograd.grad(-local_ncc_map(warped, y).mean(), flow, retain_graph=True)
+    (g_term,) = torch.autograd.grad(weight * sim(x, warped, y, flow), flow)
+    assert weight == ratios[0] > 0 and torch.isclose(g_term.norm(), g_ncc.norm(), rtol=1e-4)

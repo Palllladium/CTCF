@@ -1,24 +1,50 @@
 #!/usr/bin/env bash
-# Round 2: a learned registration similarity next to NCC (rules: PILOTS.md, round 2, in the memory registry).
-# Stage 0 trains three frozen feature nets on the unlabelled training images and checks them; stage 1 then trains
+# Round 2: a learned registration similarity next to NCC (rules: PILOTS.md, rounds 2 and 2b, in the memory registry).
+# Stage 0 trains frozen feature nets on the unlabelled training images and checks them; stage 1 then trains
 # VXM-100 from scratch with the PILOT_P1_CONTROL recipe (seed 0) plus lambda x the feature term, for every net
-# that passed stage 0. Stage 1 starts only when stage 0 finished cleanly: all three nets trained and the checks
-# ran. That is apart from the gate itself: a net that fails the gate drops only its own arm.
-#   GPU A: contrastive net with NCC-hard negatives (HARD), then its stage-1 run
-#   GPU B: contrastive net with random negatives only (RAND), then its stage-1 run
-#   GPU C: DeepSim-style autoencoder (AE), then its stage-1 run
-#   GPU D: where P10 and J15 differ (regime) during the feature training; then the stage-0 checks
-#          (features, cost, calibrate, gate); then the diagnostic per-pair optimisation (tto) during stage 1
+# that passed stage 0. Stage 1 starts only when stage 0 finished cleanly: every requested net trained and the
+# checks ran. That is apart from the gate itself: a net that fails the gate drops only its own arm.
+#   ARMS      feature nets, default "HARD RAND AE": HARD contrastive with NCC-hard negatives, RAND contrastive with
+#             random negatives only, AE DeepSim-style autoencoder. Each arm trains its net, then its stage-1 run,
+#             on its own GPU.
+#   GPUS      one per arm plus a last one for diagnostics, default "0 1 2 3". The diagnostics GPU maps where P10
+#             and J15 differ during the feature training (REGIME=1, default), then runs the stage-0 checks
+#             (features, cost, calibrate, gate), then the diagnostic per-pair optimisation (tto) during stage 1;
+#             ANATOMIX=1 adds the anatomix similarity alone to tto.
+#   LABEL     names the export results/exports/<LABEL>_<stamp>.zip, default ROUND2.
 # Each dispatch writes only under its own stamp (results/round2/<stamp>, experiments R2_<stamp>_*), and ends
 # with status.txt: one PASS/FAIL/SKIP line per step; the exit code is 1 when any step failed.
 #
 #   GPUS="0 1 2 3" nohup bash tools/runners/train/round2.sh > round2.out 2>&1 &
+#   ARMS=AE GPUS="0 1" REGIME=0 ANATOMIX=1 LABEL=ROUND2B nohup bash tools/runners/train/round2.sh > round2b.out 2>&1 &
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 PY="${PY:-/data/mooncake/P/envs/ctcf/bin/python}"
 export CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"
-read -r GPU_A GPU_B GPU_C GPU_D <<< "${GPUS:-0 1 2 3}"
+read -r -a GPU_LIST <<< "${GPUS:-0 1 2 3}"
+read -r -a ARM_NAMES <<< "${ARMS:-HARD RAND AE}"
+REGIME="${REGIME:-1}"
+ANATOMIX="${ANATOMIX:-0}"
+LABEL="${LABEL:-ROUND2}"
+declare -A FEATURE_ARGS=(
+  [HARD]="--kind contrastive --negatives ncc_hard"
+  [RAND]="--kind contrastive --negatives random"
+  [AE]="--kind autoencoder"
+)
+if (( ${#GPU_LIST[@]} < ${#ARM_NAMES[@]} + 1 )); then
+  echo "[R2] need one GPU per arm (${ARM_NAMES[*]}) plus one for diagnostics, got GPUS=\"${GPU_LIST[*]}\""
+  exit 1
+fi
+declare -A GPU_OF
+for i in "${!ARM_NAMES[@]}"; do
+  if [[ -z "${FEATURE_ARGS[${ARM_NAMES[$i]}]:-}" ]]; then
+    echo "[R2] unknown arm ${ARM_NAMES[$i]} (known: ${!FEATURE_ARGS[*]})"
+    exit 1
+  fi
+  GPU_OF[${ARM_NAMES[$i]}]=${GPU_LIST[$i]}
+done
+GPU_D=${GPU_LIST[${#GPU_LIST[@]}-1]}
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RUN=results/round2/$STAMP
 DIAG=$RUN/diag
@@ -100,16 +126,25 @@ EOF
   done
 }
 
-log "HEAD $(git rev-parse --short HEAD), run $RUN, GPUs A=$GPU_A B=$GPU_B C=$GPU_C D=$GPU_D"
-diag "$GPU_D" regime diag_regime &
-features "$GPU_A" HARD --kind contrastive --negatives ncc_hard &
-features "$GPU_B" RAND --kind contrastive --negatives random &
-features "$GPU_C" AE --kind autoencoder &
+placement=""
+for name in "${ARM_NAMES[@]}"; do
+  placement+="$name=${GPU_OF[$name]} "
+done
+echo "HEAD $(git rev-parse HEAD) ARMS=${ARM_NAMES[*]} GPUS=${GPU_LIST[*]} REGIME=$REGIME ANATOMIX=$ANATOMIX" \
+  > "$RUN/run_info.txt"
+log "HEAD $(git rev-parse --short HEAD), run $RUN, arms ${placement}diagnostics=$GPU_D"
+if [[ "$REGIME" == 1 ]]; then
+  diag "$GPU_D" regime diag_regime &
+fi
+for name in "${ARM_NAMES[@]}"; do
+  read -r -a feature_args <<< "${FEATURE_ARGS[$name]}"
+  features "${GPU_OF[$name]}" "$name" "${feature_args[@]}" &
+done
 wait
 
 arms=()
 untrained=()
-for name in HARD RAND AE; do
+for name in "${ARM_NAMES[@]}"; do
   if grep -qx "PASS features $name" "$STATUS" 2>/dev/null; then
     arms+=(--arm "$name=$FEAT/$name/feature_net.pth")
   else
@@ -125,10 +160,12 @@ if (( ${#untrained[@]} )); then
 elif ! grep -qx "PASS diag_stage0" "$STATUS" || [[ ! -f "$DIAG/stage0_gate.json" ]]; then
   mark SKIP "stage 1 (stage 0 incomplete: the stage-0 checks failed; see $DIAG)"
 else
-  arm "$GPU_A" HARD &
-  arm "$GPU_B" RAND &
-  arm "$GPU_C" AE &
-  diag "$GPU_D" tto diag_tto "${arms[@]}" &
+  for name in "${ARM_NAMES[@]}"; do
+    arm "${GPU_OF[$name]}" "$name" &
+  done
+  tto_flags=()
+  [[ "$ANATOMIX" == 1 ]] && tto_flags+=(--anatomix)
+  diag "$GPU_D" tto diag_tto "${arms[@]}" "${tto_flags[@]}" &
   wait
 fi
 
@@ -137,17 +174,17 @@ scored=("$RUN"/*/per_case.csv)
 if (( ${#scored[@]} )); then
   "$PY" -m tools.analysis.dice_groups "${scored[@]}" | tee "$RUN/dice_groups.txt"
 fi
-archive="results/exports/ROUND2_$STAMP.zip"
-"$PY" - "$archive" "$RUN" logs/"${TAG}"_* <<'EOF'
+archive="results/exports/${LABEL}_$STAMP.zip"
+"$PY" - "$archive" "$LABEL" "$RUN" logs/"${TAG}"_* <<'EOF'
 import os, sys, zipfile
-archive, roots = sys.argv[1], sys.argv[2:]
+archive, label, roots = sys.argv[1], sys.argv[2], sys.argv[3:]
 with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
     for root in roots:
         for folder, _, files in os.walk(root):
             for name in files:
                 if not name.endswith((".pth", ".npz")):
                     path = os.path.join(folder, name)
-                    z.write(path, os.path.join("ROUND2", path))
+                    z.write(path, os.path.join(label, path))
 EOF
 failed=$(grep -c '^FAIL' "$STATUS")
 log "status: $(grep -c '^PASS' "$STATUS") PASS, $failed FAIL, $(grep -c '^SKIP' "$STATUS") SKIP (see $STATUS)"

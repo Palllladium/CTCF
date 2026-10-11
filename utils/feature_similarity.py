@@ -54,7 +54,8 @@ class FeatureAutoencoder(nn.Module):
     """DeepSim-style autoencoder (Czolbe et al., MIDL 2021) without skip connections, run at half resolution.
 
     Widths follow DeepSim's 3D setting (32/64/128); the three encoder stage outputs are the features.
-    Trained by experiments.train_features to reconstruct the half-resolution image.
+    Trained by experiments.train_features to reconstruct the half-resolution image. The head is linear: a
+    sigmoid head saturates to a constant zero output on mostly-empty brain volumes.
     """
 
     def __init__(self, widths: tuple[int, int, int] = (32, 64, 128), dropout: float = 0.1):
@@ -77,7 +78,7 @@ class FeatureAutoencoder(nn.Module):
         e1, e2, e3 = self.encode(image)
         d2 = self.dec2(_resize(e3, e2.shape[2:]))
         d1 = self.dec1(_resize(d2, e1.shape[2:]))
-        return torch.sigmoid(self.head(d1))
+        return self.head(d1)
 
     def feature_maps(self, image: torch.Tensor) -> list[torch.Tensor]:
         return self.encode(image)

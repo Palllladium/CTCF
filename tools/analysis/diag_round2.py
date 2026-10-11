@@ -10,7 +10,8 @@ calibrate  lambda per net and mode: the feature term's network-gradient norm equ
            seed-0 initial state on fixed training pairs (the state every stage-1 run starts from).
 gate       technical pass/fail per net, the extraction mode by the pre-registered rule, and its lambda.
 regime     where the P10 and J15 fields differ: by local intensity spread of the fixed image and by structure.
-tto        diagnostic only: per-pair optimisation from P10 and J15 with NCC and NCC + lambda x feature term.
+tto        diagnostic only: per-pair optimisation from P10 and J15 with NCC and NCC + lambda x feature term; with
+           --anatomix also the anatomix similarity alone, weighted to NCC's field-gradient scale at P10.
 
     python -m tools.analysis.diag_round2 --parts features,cost,calibrate,gate --out results/round2/diag \
         --arm HARD=<ckpt> --arm RAND=<ckpt> --arm AE=<ckpt> --paths 3
@@ -46,6 +47,7 @@ from experiments.train_features import (
 )
 from tools.analysis.diag_round1 import Ctx, dice35, fold_percent, groups, summarise, warp_seg, write_csv
 from utils import ctcf_schedule, pkload, setup_device
+from utils.anatomy import anatomix_features, load_anatomix
 from utils.feature_similarity import LearnedSimilarity, level_points, load_feature_net, sample_at, warped_level_maps
 from utils.losses import Grad3d, local_ncc_map
 
@@ -470,22 +472,56 @@ def _optimise(ctx, flow0, x, objective, steps, lr, reg_weight=1.0):
     return snaps
 
 
+class AnatomixMaps(torch.nn.Module):
+    """anatomix (utils.anatomy) as a one-level, full-resolution feature net for LearnedSimilarity."""
+
+    def __init__(self, device):
+        super().__init__()
+        self.net = load_anatomix(device)
+
+    def feature_maps(self, image):
+        return [anatomix_features(self.net, image)]
+
+
+def standalone_weight(pairs, flows, st, sim):
+    """The weight that gives a similarity term NCC's force in the per-pair optimisation: the median over pairs of
+    ||field gradient of the NCC loss|| / ||field gradient of the term|| at the given fields."""
+    ratios = []
+    for (_, x, y, _, _), flow in zip(pairs, flows, strict=True):
+        flow = flow.detach().clone().requires_grad_(True)
+        warped = st(x, flow)
+        (g_ncc,) = torch.autograd.grad(-local_ncc_map(warped, y).mean(), flow, retain_graph=True)
+        (g_term,) = torch.autograd.grad(sim(x, warped, y, flow), flow)
+        ratios.append(float(g_ncc.norm() / g_term.norm().clamp_min(1e-30)))
+    return float(np.median(ratios)), ratios
+
+
 def part_tto(s: Stage0):
     ctx = s.ctx
     gate = json.loads((s.out / "stage0_gate.json").read_text(encoding="utf-8"))["arms"]
     starts = {name: ctx.flows(name) for name in ("P10", "J15") if name in ctx.models()}
-    variants = [("ncc", None)] + [(f"ncc+{name}", name) for name, entry in gate.items() if entry["pass"]]
+    variants = [("ncc", None, 0.0, True)]  # name, similarity term, its weight, with the NCC loss
+    for name, entry in gate.items():
+        if entry["pass"]:
+            variants.append((f"ncc+{name}", LearnedSimilarity(s.net(name), entry["mode"]), entry["lambda"], True))
+    weights = {name: entry["lambda"] for name, entry in gate.items() if entry["pass"]}
+    if s.args.anatomix:
+        sim = LearnedSimilarity(AnatomixMaps(s.device), "warped_image")
+        reference = starts["P10"] if "P10" in starts else next(iter(starts.values()))
+        weight, ratios = standalone_weight(ctx.pairs, reference, ctx.st(ctx.shape), sim)
+        variants.append(("anatomix", sim, weight, False))
+        weights.update(anatomix=weight, anatomix_ratios=ratios)
+        print(f"[tto] anatomix alone: weight {weight:.4g} (NCC's field-gradient scale at P10)")
+    (s.out / "tto_weights.json").write_text(json.dumps(weights, indent=1), encoding="utf-8")
     rows = []
     for start, flows in starts.items():
-        for variant, arm in variants:
-            sim = LearnedSimilarity(s.net(arm), gate[arm]["mode"]) if arm else None
-            weight = gate[arm]["lambda"] if arm else 0.0
+        for variant, sim, weight, with_ncc in variants:
             t0 = time.perf_counter()
             for (case, x, y, x_seg, y_seg), flow0 in zip(ctx.pairs, flows, strict=True):
 
-                def objective(warped, flow, x=x, y=y, sim=sim, weight=weight):
-                    value = -local_ncc_map(warped, y).mean()
-                    return value + weight * sim(x, warped, y, flow) if sim is not None else value
+                def objective(warped, flow, x=x, y=y, sim=sim, weight=weight, with_ncc=with_ncc):
+                    value = weight * sim(x, warped, y, flow) if sim is not None else 0.0
+                    return value - local_ncc_map(warped, y).mean() if with_ncc else value
 
                 for step, (flow, value) in _optimise(ctx, flow0, x, objective, s.args.tto_steps, 0.02).items():
                     rows.append(
@@ -529,6 +565,7 @@ def main():
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0, help="first N test pairs (0 = all 19)")
     parser.add_argument("--tto_steps", type=int, default=150)
+    parser.add_argument("--anatomix", action="store_true", help="tto: add the anatomix similarity alone")
     parser.add_argument("--crop", type=int, nargs=3, default=None, help="centre crop D H W, multiples of 32 (smoke)")
     parser.add_argument("--smoke", action="store_true", help="random-init registration models (local smoke runs)")
     args = parser.parse_args()
