@@ -50,6 +50,7 @@ ignore = [
 "models/MambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/VMambaMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
 "models/VoxelMorph/model.py" = ["N", "B", "SIM", "UP", "RUF"]
+"models/CST/core.py" = ["N", "B", "SIM", "UP", "RUF"]
 
 # Config registries are mostly upstream-derived hyperparameter data.
 "models/EfficientMorph/configs.py" = ["N", "B", "SIM", "UP", "RUF"]
