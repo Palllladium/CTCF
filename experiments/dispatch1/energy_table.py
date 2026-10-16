@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from experiments.core.bridges import Parent, energy, sub_bank
 from experiments.core.path_profiles import get_dataset_paths
+from experiments.dispatch1.bridges import Parent, energy, sub_bank
 from utils import pkload, setup_device
 
 

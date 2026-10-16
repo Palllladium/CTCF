@@ -31,7 +31,7 @@ from pathlib import Path
 
 from experiments.core.field_scoring import repair_flags
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PY = os.environ.get("PY", sys.executable)
 NODE = "--paths 3 --gpu 0"  # the node's path profile (CTCF_DATA_DIR) and the one GPU a task sees
 PARENTS = {
@@ -54,8 +54,8 @@ RECIPE = "--ds OASIS --use_tb 0 --w_ncc 1.0 --w_icon 0.05 --w_reg 1.0 --w_jac 0.
 EPOCHS, UPDATES = 100, 39_400  # 100 epochs of the 394 training pairs: the P1 control's updates
 PROFILE_UPDATES, SHORT_UPDATES = 60, 10
 TABLE_SHARDS = 4
-TESTS = ("test_known_warp.py", "test_bridges.py", "test_im2grid.py", "test_dispatch1.py")
-IM2GRID = "experiments.train_im2grid"
+TESTS = "tools/analysis/tests/dispatch1"
+IM2GRID = "experiments.dispatch1.train_im2grid"
 SIGNAL, SMALL_SIGNAL = 0.005, 0.003  # pre-registered REP Dice35 differences
 OVERHEAD, EVAL_HOURS, ELIGIBLE_COST = 1.15, 0.4, 1.2  # approximate cost margins of the projections
 POLL_SECONDS = 30
@@ -245,7 +245,7 @@ def ctcf_arm(ctx: Ctx, name: str, extra: str = "", seed=0, parent=None, init=Tru
     commands += inference(parent, ckpt, ctx.path(name))
     if epe:
         out = ctx.path(name, "epe.json")
-        commands.append(py(f"experiments.eval_known_warp {model_flags(parent, ckpt)} --out {out} {NODE}"))
+        commands.append(py(f"experiments.dispatch1.eval_known_warp {model_flags(parent, ckpt)} --out {out} {NODE}"))
     return commands
 
 
@@ -260,7 +260,7 @@ def h2_prep(ctx: Ctx) -> list[str]:
         commands.append(calibrate(ctx, f"h2_prep/gamma_{target}.json", known_warp(ctx, target), parent))
     commands += [short(ctx, f"h2_{target}", known_warp(ctx, target, gamma=1)) for target in ("structure", "deadzone")]
     commands += inference(parent, ckpt, ctx.path("h2_prep", "inference"))
-    epe = f"experiments.eval_known_warp {model_flags(parent)} --out {ctx.path('h2_prep', 'epe_parent.json')}"
+    epe = f"experiments.dispatch1.eval_known_warp {model_flags(parent)} --out {ctx.path('h2_prep', 'epe_parent.json')}"
     return [*commands, py(f"{epe} {NODE}")]
 
 
@@ -299,17 +299,17 @@ def matcher_arm(ctx: Ctx, name: str, script: str, prep: str, scale: str = "1.0")
 def energy_shard(ctx: Ctx, shard: int) -> list[str]:
     rows = f"--bank {table_bank(ctx)} --shard {shard} --shards {TABLE_SHARDS}"
     out = ctx.path(f"d_table_{shard}", "part.npz")
-    return [py(f"tools.analysis.energy_table {model_flags(ctx.parent)} {rows} --out {out} {NODE}")]
+    return [py(f"experiments.dispatch1.energy_table {model_flags(ctx.parent)} {rows} --out {out} {NODE}")]
 
 
 def energy_merge(ctx: Ctx) -> list[str]:
     parts = " ".join(ctx.path(f"d_table_{k}", "part.npz") for k in range(TABLE_SHARDS))
-    return [py(f"tools.analysis.energy_table --merge {ctx.path('d_table', 'table.npz')} {parts}")]
+    return [py(f"experiments.dispatch1.energy_table --merge {ctx.path('d_table', 'table.npz')} {parts}")]
 
 
 def bridges(ctx: Ctx, task: str, check_only=False) -> list[str]:
     args = f"{model_flags(ctx.parent)} --check_ff {ctx.parent['historical_ff']} --out {ctx.path(task)}"
-    return [py(f"experiments.eval_bridge {args}{' --check_only' if check_only else ''} {NODE}")]
+    return [py(f"experiments.dispatch1.eval_bridge {args}{' --check_only' if check_only else ''} {NODE}")]
 
 
 def train_hours(task: str, name: str, factor: float = 1.0):
@@ -360,11 +360,14 @@ def tasks() -> list[Task]:
         out = f"{name}/weight.json"
         add(name, branch, priority, deps, lambda c: [calibrate(c, out, extra(c), c.parent)], condition=condition)
 
-    tests = " ".join(f"tools/analysis/tests/{name}" for name in TESTS)
     add("pre_fetch", "pre", 0, [], lambda c: [py("models.Im2grid.fetch")], gpu=False)
-    add("pre_tests", "pre", 0, ["pre_fetch"], lambda c: [py(f"pytest -q -p no:cacheprovider {tests}")], gpu=False)
+    add("pre_tests", "pre", 0, ["pre_fetch"], lambda c: [py(f"pytest -q -p no:cacheprovider {TESTS}")], gpu=False)
     add(
-        "pre_parent", "pre", 0, ["pre_tests"], lambda c: [py(f"experiments.dispatch1 --prepare {c.path('pre_parent')}")]
+        "pre_parent",
+        "pre",
+        0,
+        ["pre_tests"],
+        lambda c: [py(f"experiments.dispatch1.run --prepare {c.path('pre_parent')}")],
     )
     add("pre_check", "pre", 0, ["pre_parent"], lambda c: bridges(c, "pre_check", check_only=True))
 
@@ -373,14 +376,14 @@ def tasks() -> list[Task]:
         "H2",
         1,
         ["pre_tests"],
-        lambda c: [py(f"experiments.eval_known_warp --stats {c.path('h2_stats', 'stats.json')} {NODE}")],
+        lambda c: [py(f"experiments.dispatch1.eval_known_warp --stats {c.path('h2_stats', 'stats.json')} {NODE}")],
     )
     add("h2_prep", "H2", 2, ["pre_check", "h2_stats"], h2_prep)
     add("d_prep", "D", 2, ["pre_check"], d_prep)
     add("mse_prep", "H3_MSE", 2, ["pre_parent"], mse_prep)
     add("im2grid_prep", "IM", 2, ["pre_parent"], lambda c: matcher_prep(c, "im2grid_prep", IM2GRID))
     for mode in ("D3", "E3"):
-        script, prep = f"experiments.train_multimatch --mode {mode}", f"h1_prep_{mode}"
+        script, prep = f"experiments.dispatch1.train_multimatch --mode {mode}", f"h1_prep_{mode}"
         add(prep, "H1", 2, ["pre_tests"], lambda c, s=script, p=prep: matcher_prep(c, p, s))
         add(
             f"h1_{mode}",
@@ -808,7 +811,7 @@ def prepare(out: str) -> None:
     """parent.json: Mamba NoSVF when its checkpoint and historical FF table are on this node, mamba_ssm imports and the
     strict load passes, otherwise the P1 control. control.json: the P1 control's FF and REP over the 19 test pairs, the
     reference of the MSE and im2grid arms; its checkpoint must be present for the MSE weight."""
-    from experiments.core.bridges import Parent
+    from experiments.dispatch1.bridges import Parent
 
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)

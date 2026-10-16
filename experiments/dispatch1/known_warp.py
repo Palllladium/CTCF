@@ -193,7 +193,9 @@ class KnownWarpSource:
         if target not in TARGETS:
             raise ValueError(f"target must be one of {TARGETS}, got {target!r}")
         if target == "set" and not stats:
-            raise ValueError("the set target needs thresholds from `python -m experiments.eval_known_warp --stats`")
+            raise ValueError(
+                "the set target needs thresholds from `python -m experiments.dispatch1.eval_known_warp --stats`"
+            )
         self.files = sorted(files)
         if not self.files or anchors < 1:
             raise ValueError("known-warp sampling needs training images and a positive anchor count")

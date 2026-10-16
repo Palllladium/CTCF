@@ -4,7 +4,7 @@ Minimax takes the bank subject whose harder leg has the least energy and falls b
 eases it; proxy and random bridges take two passes. Every field keeps the parent's legacy sampling. Labels score the
 outputs and the descriptive FF oracle; they never select a bridge.
 
-    python -m experiments.eval_bridge --ckpt CKPT --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 0 --out RUN/h3 \
+    python -m experiments.dispatch1.eval_bridge --ckpt CKPT --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 0 --out RUN/h3 \
         --check_ff HISTORICAL_FF/per_case.csv --paths 3 --gpu 0
 
 --check_only stops after checking that the direct field reproduces the historical FF table (mean within 1e-4, every
@@ -26,7 +26,10 @@ import numpy as np
 import torch
 from scipy import stats
 
-from experiments.core.bridges import (
+from experiments.core.field_scoring import PROFILE, score_ff_rep, warp_labels
+from experiments.core.inference_metrics import write_results
+from experiments.core.path_profiles import get_dataset_paths
+from experiments.dispatch1.bridges import (
     PROXY_FIT_FILES,
     SUB_BANK_SIZE,
     Parent,
@@ -37,9 +40,6 @@ from experiments.core.bridges import (
     sub_bank,
     ventricle_proxy,
 )
-from experiments.core.field_scoring import PROFILE, score_ff_rep, warp_labels
-from experiments.core.inference_metrics import write_results
-from experiments.core.path_profiles import get_dataset_paths
 from utils import pkload, setup_device
 from utils.dice import dice_per_label
 from utils.field import compose_flows, legacy_sampling_displacement

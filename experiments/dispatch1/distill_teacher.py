@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from experiments.core.bridges import EnergyTable, Parent, compose_bridge, energy, nearest_proxy
+from experiments.dispatch1.bridges import EnergyTable, Parent, compose_bridge, energy, nearest_proxy
 from utils import pkload
 from utils.field import compose_flows, legacy_sampling_displacement
 
@@ -27,7 +27,7 @@ class DistillTeacher:
         if (kind == "bridge_minimax" or pairs == "eligible") and not table:
             raise ValueError("the minimax teacher and the eligible-pairs policy need --energy_table")
         if kind == "bridge_proxy" and not proxy:
-            raise ValueError("the proxy teacher needs --proxy_values from experiments.eval_bridge")
+            raise ValueError("the proxy teacher needs --proxy_values from experiments.dispatch1.eval_bridge")
         self.parent = Parent(copy.deepcopy(model), device)
         self.kind, self.pairs = kind, pairs
         self.table = EnergyTable(table) if table else None
@@ -53,7 +53,7 @@ class DistillTeacher:
     @torch.no_grad()
     def target(self, moving, fixed, moving_subject: str, fixed_subject: str) -> torch.Tensor | None:
         """The teacher field F <- M, or None for a pair the policy does not teach. Warps and compositions run in
-        float32 whatever the caller's autocast, as in experiments.eval_bridge."""
+        float32 whatever the caller's autocast, as in experiments.dispatch1.eval_bridge."""
         with torch.autocast(device_type=moving.device.type, enabled=False):
             direct = None
             if self.pairs == "eligible" or self.kind in ("direct", "recursion"):

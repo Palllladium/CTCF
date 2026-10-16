@@ -3,8 +3,8 @@
 The endpoint error is split by the clean target's structure weight into a normal and a tangential part. It measures
 synthetic correspondence, not anatomical Dice.
 
-    python -m experiments.eval_known_warp --stats RUN/stats.json --paths 3 --gpu 0
-    python -m experiments.eval_known_warp --ckpt CKPT --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 0 --out RUN/epe.json
+    python -m experiments.dispatch1.eval_known_warp --stats RUN/stats.json --paths 3 --gpu 0
+    python -m experiments.dispatch1.eval_known_warp --ckpt CKPT --ctcf_config CTCF-CascadeA-Mamba --ctcf_l3_svf 0 --out RUN/epe.json
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ from pathlib import Path
 
 import torch
 
-from experiments.core.bridges import Parent
-from experiments.core.known_warp import KnownWarpSource, effective_points, estimate_stats, structure_weights
 from experiments.core.path_profiles import get_dataset_paths
+from experiments.dispatch1.bridges import Parent
+from experiments.dispatch1.known_warp import KnownWarpSource, effective_points, estimate_stats, structure_weights
 from utils import setup_device
 
 HELD_OUT_SEED = 900_001  # disjoint from the training and calibration streams

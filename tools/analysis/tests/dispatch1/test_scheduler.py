@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from experiments import dispatch1
+from experiments.dispatch1 import run as dispatch1
 
 H3 = {
     "direct": 0.80,
@@ -127,7 +127,7 @@ def test_preflight_runs_every_branch_path_before_its_arms(tmp_path):
     h2 = launched["h2_prep"][1]
     for target in ("point", "set", "structure", "deadzone"):
         assert f"--known_warp_target {target}" in h2, target
-    assert "experiments.inference" in h2 and "experiments.eval_known_warp" in h2
+    assert "experiments.inference" in h2 and "experiments.dispatch1.eval_known_warp" in h2
     d = launched["d_prep"][1]
     assert all(f"--distill_teacher {kind}" in d for kind in ("random_bridge", "direct", "recursion"))
     for task in ("im2grid_prep", "h1_prep_D3", "h1_prep_E3"):

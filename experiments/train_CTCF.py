@@ -18,12 +18,12 @@ from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
 from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
 from experiments.core.data_loaders import baseline_loader_builder
-from experiments.core.distill_teacher import DistillTeacher
 from experiments.core.inference_runtime import load_checkpoint_state
-from experiments.core.known_warp import KnownWarpSource, anchor_loss, effective_points
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import resolve_dataset_dirs
 from experiments.core.train_runtime import TrainContext, run_train
+from experiments.dispatch1.distill_teacher import DistillTeacher
+from experiments.dispatch1.known_warp import KnownWarpSource, anchor_loss, effective_points
 from utils import (
     DareDiffusion,
     RegisterModel,
@@ -160,7 +160,9 @@ class Runner:
         self.learned_similarity = None
         if args.anatomy_loss == "learned":
             if not args.feature_ckpt:
-                raise ValueError("--anatomy_loss learned needs --feature_ckpt from experiments.train_features.")
+                raise ValueError(
+                    "--anatomy_loss learned needs --feature_ckpt from experiments.train_features (git tag rounds-final)."
+                )
             self.learned_similarity = LearnedSimilarity(load_feature_net(args.feature_ckpt, device), args.feature_mode)
         self.forward_flow = self._forward_flow
         self.lr_policy = "ctcf"

@@ -1,8 +1,8 @@
 """The E3/D3 correspondence matcher (H1) on OASIS without labels: profile, calibrate lambda, train or evaluate.
 
-python -m experiments.train_multimatch --mode D3 --calibrate RUN/lambda.json --paths 3 --gpu 0
-python -m experiments.train_multimatch --mode D3 --lambda_file RUN/lambda.json --exp H1_D3 --paths 3 --gpu 0
-python -m experiments.train_multimatch --mode D3 --eval_ckpt results/H1_D3/ckpt/last.pth --out RUN/h1_D3 --paths 3
+python -m experiments.dispatch1.train_multimatch --mode D3 --calibrate RUN/lambda.json --paths 3 --gpu 0
+python -m experiments.dispatch1.train_multimatch --mode D3 --lambda_file RUN/lambda.json --exp H1_D3 --paths 3 --gpu 0
+python -m experiments.dispatch1.train_multimatch --mode D3 --eval_ckpt results/H1_D3/ckpt/last.pth --out RUN/h1_D3 --paths 3
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import argparse
 
 import torch
 
-from experiments.core.matcher_training import add_arguments, run
+from experiments.dispatch1.matcher_training import add_arguments, run
 from models.Im2grid.fetch import PORT_VERSION, REVISION
 from models.MultiMatch.model import MODES, MultiMatch, level_mismatch, level_smoothness
 from utils import setup_device

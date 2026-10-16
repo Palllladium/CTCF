@@ -156,12 +156,12 @@ def add_ctcf_loss_args(p: argparse.ArgumentParser) -> None:
         "of a 3-component intensity mixture fitted on training images. latent (P2b): a co-trained 16-class "
         "parcellation kept consistent under the warp, informative and invariant to intensity changes. "
         "foundation (P2c): cosine similarity of frozen anatomix features (pip install anatomix first). "
-        "learned (round 2): 1 - cosine of a frozen feature net from experiments.train_features (--feature_ckpt).",
+        "learned (round 2): 1 - cosine of a frozen feature net (--feature_ckpt; experiments.train_features, tag rounds-final).",
     )
     group.add_argument(
         "--feature_ckpt",
         default="",
-        help="--anatomy_loss learned: checkpoint written by experiments.train_features.",
+        help="--anatomy_loss learned: checkpoint written by experiments.train_features (git tag rounds-final).",
     )
     group.add_argument(
         "--feature_mode",
@@ -423,7 +423,7 @@ def add_ctcf_auxiliary_args(p: argparse.ArgumentParser) -> None:
         "--known_warp_every",
         type=int,
         default=0,
-        help="Every k-th training step is a known-warp synthetic pair (experiments.core.known_warp); 0 disables.",
+        help="Every k-th training step is a known-warp synthetic pair (experiments.dispatch1.known_warp); 0 disables.",
     )
     group.add_argument(
         "--known_warp_target",
@@ -452,13 +452,13 @@ def add_ctcf_auxiliary_args(p: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--known_warp_stats",
         default="",
-        help="Thresholds JSON from experiments.eval_known_warp --stats.",
+        help="Thresholds JSON from experiments.dispatch1.eval_known_warp --stats.",
     )
     group.add_argument(
         "--distill_teacher",
         choices=["none", "bridge_minimax", "bridge_proxy", "random_bridge", "direct", "recursion"],
         default="none",
-        help="Teacher field from a frozen copy of the starting weights (experiments.core.distill_teacher).",
+        help="Teacher field from a frozen copy of the starting weights (experiments.dispatch1.distill_teacher).",
     )
     group.add_argument(
         "--distill_pairs",
@@ -481,12 +481,12 @@ def add_ctcf_auxiliary_args(p: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--energy_table",
         default="",
-        help="NPZ from tools.analysis.energy_table.",
+        help="NPZ from experiments.dispatch1.energy_table.",
     )
     group.add_argument(
         "--proxy_values",
         default="",
-        help="proxy_values.json from experiments.eval_bridge.",
+        help="proxy_values.json from experiments.dispatch1.eval_bridge.",
     )
     group.add_argument(
         "--aux_calibrate",

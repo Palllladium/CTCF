@@ -14,13 +14,13 @@ import torch
 import torch.nn.functional as F
 
 from datasets.OASIS import OASISBrainDataset
-from experiments.core.bridges import EnergyTable, compose_bridge
 from experiments.core.cli_inference import add_tto_args
-from experiments.core.distill_teacher import DistillTeacher
 from experiments.core.field_scoring import REPAIR, repair_flags, score, score_ff_rep, warp_labels
 from experiments.core.inference_metrics import digital_projection_columns, trilinear_projection_columns
+from experiments.dispatch1.bridges import EnergyTable, compose_bridge
+from experiments.dispatch1.distill_teacher import DistillTeacher
+from experiments.dispatch1.energy_table import merge
 from experiments.train_CTCF import Runner, _gradient_ratio
-from tools.analysis.energy_table import merge
 from utils import NumpyType
 from utils.field import _warp, digital_project, legacy_sampling_displacement, trilinear_project
 from utils.spatial import RegisterModel, SpatialTransformer

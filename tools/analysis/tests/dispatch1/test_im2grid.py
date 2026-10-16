@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from experiments.core import matcher_training
-from experiments.core.matcher_training import TrainingPairs, parameter_gradient_norm
+from experiments.dispatch1 import matcher_training
+from experiments.dispatch1.matcher_training import TrainingPairs, parameter_gradient_norm
 from models.Im2grid import Im2gridLite, local_smoothness, to_canonical
 from models.Im2grid.fetch import PORT, prepare_port
 from models.MultiMatch.model import (

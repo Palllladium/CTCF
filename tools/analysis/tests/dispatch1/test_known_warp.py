@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from experiments.core.known_warp import (
+from experiments.dispatch1.known_warp import (
     MARGIN,
     Affine,
     AnchorTargets,

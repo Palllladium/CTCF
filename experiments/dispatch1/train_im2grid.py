@@ -1,15 +1,15 @@
-"""im2grid-Lite on OASIS without labels: profile, calibrate lambda, train or evaluate (experiments.core.matcher_training).
+"""im2grid-Lite on OASIS without labels: profile, calibrate lambda, train or evaluate (experiments.dispatch1.matcher_training).
 
-python -m experiments.train_im2grid --calibrate RUN/lambda.json --paths 3 --gpu 0
-python -m experiments.train_im2grid --lambda_file RUN/lambda.json --exp IM2GRID --paths 3 --gpu 0
-python -m experiments.train_im2grid --eval_ckpt results/IM2GRID/ckpt/last.pth --out RUN/im2grid --paths 3 --gpu 0
+python -m experiments.dispatch1.train_im2grid --calibrate RUN/lambda.json --paths 3 --gpu 0
+python -m experiments.dispatch1.train_im2grid --lambda_file RUN/lambda.json --exp IM2GRID --paths 3 --gpu 0
+python -m experiments.dispatch1.train_im2grid --eval_ckpt results/IM2GRID/ckpt/last.pth --out RUN/im2grid --paths 3 --gpu 0
 """
 
 from __future__ import annotations
 
 import argparse
 
-from experiments.core.matcher_training import add_arguments, run
+from experiments.dispatch1.matcher_training import add_arguments, run
 from models.Im2grid import METHOD, Im2gridLite, to_canonical
 from utils import setup_device
 
