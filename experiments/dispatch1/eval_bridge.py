@@ -158,7 +158,7 @@ def run_bridges(args, parent: Parent, pairs, bank_files, device, out: Path, chec
             "recursion": (compose_flows(legacy_sampling_displacement(second), direct), t_direct + synced(device) - t0),
         }
 
-        path_scores, dices, t_bank, t_oracle = [], [], 0.0, 0.0
+        path_scores, dices, t_bank, t_sub, t_oracle = [], [], 0.0, 0.0, 0.0
         for s, host_image in enumerate(bank):
             t0 = synced(device)
             via = host_image.to(device)
@@ -166,6 +166,7 @@ def run_bridges(args, parent: Parent, pairs, bank_files, device, out: Path, chec
             e_fs, e_sm = energy(f_fs, y), energy(f_sm, via)
             elapsed = synced(device) - t0
             t_bank += elapsed
+            t_sub += elapsed if stems[s] in in_sub else 0.0
             leg_seconds.append(elapsed / 2)
             path_scores.append(max(e_fs, e_sm))
             t0 = synced(device)
@@ -194,7 +195,7 @@ def run_bridges(args, parent: Parent, pairs, bank_files, device, out: Path, chec
         }
         search_cost = {
             "bridge_minimax": t_direct + t_bank,
-            "bridge_minimax64": t_direct + t_bank * len(sub_index) / len(bank),
+            "bridge_minimax64": t_direct + t_sub,
             "oracle_ff": t_bank + t_oracle,
         }
         for arm, s in choices.items():

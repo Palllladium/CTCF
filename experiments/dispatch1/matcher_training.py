@@ -125,6 +125,7 @@ def train(args, device, lam, steps, build_model, losses, method, directory=None)
     window, consecutive = [], 0
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
     start = time.perf_counter()
     for moving, fixed in loader:
         if counts["step"] >= steps:
@@ -181,12 +182,21 @@ def train(args, device, lam, steps, build_model, losses, method, directory=None)
         "attempts": done["attempts"],
         "skipped": counts["skipped"],
         "skipped_after_warmup": counts["skipped_after_warmup"],
+        **peak_memory(device),
     }
+
+
+def peak_memory(device) -> dict:
+    """Peak allocated and reserved GiB since the last reset; reserved is what CTCF logs as perf_peak_gpu_mem_gib."""
+    if device.type != "cuda":
+        return {"peak_allocated_gib": None, "peak_reserved_gib": None}
+    allocated, reserved = torch.cuda.max_memory_allocated(device), torch.cuda.max_memory_reserved(device)
+    return {"peak_allocated_gib": allocated / 2**30, "peak_reserved_gib": reserved / 2**30}
 
 
 def calibrate(args, device, build_model, losses, method) -> dict:
     """lambda* = median over fixed training pairs of |grad similarity| / |grad regularity| over the parameters, after a
-    discarded warm-up at lambda 1 whose mean update time is reported as step_sec."""
+    discarded warm-up at lambda 1 whose mean update time is reported as step_sec and whose peak memory is in warmup."""
     model, warmup = train(args, device, 1.0, WARMUP_UPDATES, build_model, losses, method)
     pairs = TrainingPairs(
         training_files(args), seed=CALIBRATION_SEED, start=0, length=CALIBRATION_PAIRS, crop=args.crop
@@ -293,11 +303,8 @@ def run(args, device, build_model, losses, predict, method) -> None:
         evaluate(args, device, build_model, predict, method)
         return
     if args.profile:
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
         _, result = train(args, device, 1.0, args.profile_steps, build_model, losses, method)
-        peak = torch.cuda.max_memory_allocated(device) / 2**30 if device.type == "cuda" else None
-        result.update(step_sec=result["seconds"] / result["updates"], peak_gib=peak, method=method)
+        result.update(step_sec=result["seconds"] / result["updates"], method=method)
         output = Path(args.profile)
     elif args.calibrate:
         result, output = calibrate(args, device, build_model, losses, method), Path(args.calibrate)

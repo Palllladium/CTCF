@@ -316,9 +316,13 @@ class InferRunner:
             stem = Path(self.test_files[idx]).stem
             cid = stem[2:] if stem.startswith("p_") else stem
 
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
             t0 = time.perf_counter()
             with torch.no_grad():
                 flow = self.adapter.forward(self.model, x, y)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
             t_fwd = time.perf_counter() - t0
 
             snapshots = {}

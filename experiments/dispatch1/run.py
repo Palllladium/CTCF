@@ -61,7 +61,7 @@ OVERHEAD, EVAL_HOURS, ELIGIBLE_COST = 1.15, 0.4, 1.2  # approximate cost margins
 POLL_SECONDS = 30
 READ_PROFILE = (
     "import csv, json, sys; r = list(csv.DictReader(open(sys.argv[1])))[-1]; json.dump({'step_sec': "
-    "float(r['perf_iter_time_ms']) / 1000, 'peak_gib': r['perf_peak_gpu_mem_gib']}, open(sys.argv[2], 'w'))"
+    "float(r['perf_iter_time_ms']) / 1000, 'peak_reserved_gib': r['perf_peak_gpu_mem_gib']}, open(sys.argv[2], 'w'))"
 )
 
 
