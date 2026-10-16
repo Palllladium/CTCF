@@ -58,6 +58,22 @@ def compose_flows(flow_ab: torch.Tensor, flow_bc: torch.Tensor, mode: str = "bil
     return flow_ab + _warp(flow_bc, flow_ab, mode=mode)
 
 
+def legacy_sampling_displacement(flow: torch.Tensor) -> torch.Tensor:
+    """Displacement of the map the checkpoint-compatible SpatialTransformer samples for a stored flow.
+
+    That sampler normalizes by N-1 and calls grid_sample with align_corners=False, so a stored flow u is read at
+    index (x + u) * N / (N - 1) - 1/2 along each axis. Returns that index minus x, on the device of ``flow``;
+    ``_warp`` and ``compose_flows`` with the result reproduce the legacy sampler.
+    """
+    per_axis = []
+    for axis, n in enumerate(flow.shape[2:]):
+        view = [1, 1, 1]
+        view[axis] = n
+        coord = torch.arange(n, device=flow.device, dtype=flow.dtype).view(view)
+        per_axis.append((coord + flow[:, axis]) * (n / (n - 1)) - 0.5 - coord)
+    return torch.stack(per_axis, dim=1)
+
+
 def integrate_svf(vel: torch.Tensor, st, steps: int = 7) -> torch.Tensor:
     """Integrate a stationary velocity field into a displacement via scaling-and-squaring."""
     disp = vel * (1.0 / (2**steps))

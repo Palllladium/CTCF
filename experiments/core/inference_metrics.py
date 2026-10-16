@@ -11,7 +11,55 @@ import numpy as np
 import torch
 
 from utils import IXI_VOI_LABELS, OASIS_VOI_LABELS, digital_jacobian_metrics, logdet_std_from_flow
-from utils.field import digital_fold_percent, erode_mask, jacobian_nonpositive_percent
+from utils.field import (
+    boundary_max_disp,
+    boundary_nonzero_count,
+    boundary_tangential_lip,
+    digital_fold_percent,
+    digital_min_det,
+    displacement_grad_norm_max,
+    erode_mask,
+    jacobian_nonpositive_percent,
+    trilinear_fold_percent,
+    trilinear_min_det,
+)
+
+
+def geometry_columns(flow: torch.Tensor, tri_bound: float, eps: float) -> dict[str, float]:
+    """Certificate and boundary columns of one stored field; ``tri_bound`` is its Bernstein bound at ``eps``.
+
+    cert_min_det is the minimum of the ten digital determinants, tri_min_det and tri_cert_bound concern the trilinear
+    interpolant grid_sample applies; digital > 0 does not imply trilinear > 0. disp_grad_norm < 1 alone certifies
+    global injectivity, boundary_tan_lip < 1 only each face separately.
+    """
+    tri_fold = trilinear_fold_percent(flow)
+    nonzero = boundary_nonzero_count(flow)
+    return {
+        "cert_min_det": digital_min_det(flow),
+        "tri_min_det": trilinear_min_det(flow),
+        "tri_cert_bound": tri_bound,
+        "bernstein_pass_float64": float(math.isfinite(tri_bound) and tri_bound >= eps),
+        "tri_fold_pct": tri_fold,
+        "tri_case_folds": float(tri_fold > 0.0),
+        "disp_grad_norm": displacement_grad_norm_max(flow),
+        "boundary_tan_lip": boundary_tangential_lip(flow),
+        "boundary_max_disp": boundary_max_disp(flow),
+        "boundary_nonzero_count": float(nonzero),
+        "identity_boundary_exact": float(nonzero == 0),
+    }
+
+
+def digital_projection_columns(folds: float, iters: int) -> dict[str, float]:
+    return {"proj_folds_end": folds, "proj_iters": float(iters)}
+
+
+def trilinear_projection_columns(report) -> dict[str, float]:
+    return {
+        "tri_proj_certified": float(report.certified),
+        "tri_proj_uncertified_cells": float(report.n_uncertified_cells),
+        "tri_proj_sampled_negative_pct": report.sampled_negative_cell_percent,
+        "tri_proj_iters": float(report.iterations),
+    }
 
 
 def _fold_counts(flow: torch.Tensor, x_seg: torch.Tensor) -> dict[str, float]:

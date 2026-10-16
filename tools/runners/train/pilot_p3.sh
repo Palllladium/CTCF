@@ -4,7 +4,7 @@
 # the soft-Dice of a certified-clipped random crop, with the clip's exact derivative. Afterwards each
 # last.pth is scored three ways: feed-forward, the post-hoc repair chain, and the deployed operator
 # (clip from identity, 2 sweeps) whose saved fields go through the exact verifier at eps 0.001.
-# Success (PILOTS.md): Dice35 >= 0.903 on all 19 cases with every deployed field exactly certified.
+# Success: Dice35 >= 0.903 on all 19 cases with every deployed field exactly certified.
 #
 #   GPUS="2 3" nohup bash tools/runners/train/pilot_p3.sh > pilot_p3.out 2>&1 &
 set -euo pipefail

@@ -46,6 +46,7 @@ def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     add_ctcf_mechanism_args(p)
     add_ctcf_reg_mode_args(p)
     add_ctcf_synth_args(p)
+    add_ctcf_auxiliary_args(p)
 
 
 def add_ctcf_model_args(p: argparse.ArgumentParser) -> None:
@@ -401,6 +402,96 @@ def add_ctcf_synth_args(p: argparse.ArgumentParser) -> None:
         type=int,
         default=123,
         help="Base seed for synthetic pair generation.",
+    )
+
+
+def add_ctcf_auxiliary_args(p: argparse.ArgumentParser) -> None:
+    group = p.add_argument_group("CTCF auxiliary objectives")
+    group.add_argument(
+        "--sim",
+        choices=["ncc", "mse"],
+        default="ncc",
+        help="Image similarity of the base loss.",
+    )
+    group.add_argument(
+        "--w_mse",
+        type=float,
+        default=1.0,
+        help="Weight of the MSE similarity (--sim mse).",
+    )
+    group.add_argument(
+        "--known_warp_every",
+        type=int,
+        default=0,
+        help="Every k-th training step is a known-warp synthetic pair (experiments.core.known_warp); 0 disables.",
+    )
+    group.add_argument(
+        "--known_warp_target",
+        choices=["point", "set", "structure", "deadzone"],
+        default="point",
+        help="Target of the anchors: exact point, admissible set, structure-tensor weight or dead zone.",
+    )
+    group.add_argument(
+        "--known_warp_gamma",
+        type=float,
+        default=0.0,
+        help="Weight of the anchor loss (from --aux_calibrate).",
+    )
+    group.add_argument(
+        "--known_warp_seed",
+        type=int,
+        default=0,
+        help="Seed of the synthetic stream, separate from pairs.",
+    )
+    group.add_argument(
+        "--known_warp_anchors",
+        type=int,
+        default=2048,
+        help="Anchors per direction and pair.",
+    )
+    group.add_argument(
+        "--known_warp_stats",
+        default="",
+        help="Thresholds JSON from experiments.eval_known_warp --stats.",
+    )
+    group.add_argument(
+        "--distill_teacher",
+        choices=["none", "bridge_minimax", "bridge_proxy", "random_bridge", "direct", "recursion"],
+        default="none",
+        help="Teacher field from a frozen copy of the starting weights (experiments.core.distill_teacher).",
+    )
+    group.add_argument(
+        "--distill_pairs",
+        choices=["eligible", "all"],
+        default="eligible",
+        help="Pairs taught.",
+    )
+    group.add_argument(
+        "--distill_beta",
+        type=float,
+        default=0.0,
+        help="Weight of the distillation loss; zero disables the teacher.",
+    )
+    group.add_argument(
+        "--distill_seed",
+        type=int,
+        default=0,
+        help="Seed of the random-bridge teacher.",
+    )
+    group.add_argument(
+        "--energy_table",
+        default="",
+        help="NPZ from tools.analysis.energy_table.",
+    )
+    group.add_argument(
+        "--proxy_values",
+        default="",
+        help="proxy_values.json from experiments.eval_bridge.",
+    )
+    group.add_argument(
+        "--aux_calibrate",
+        default="",
+        help="Write the weight of the enabled auxiliary objective (gamma, beta or w_mse) to this JSON and exit.",
     )
 
 

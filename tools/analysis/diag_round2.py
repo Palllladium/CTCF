@@ -51,7 +51,7 @@ from utils.anatomy import anatomix_features, load_anatomix
 from utils.feature_similarity import LearnedSimilarity, level_points, load_feature_net, sample_at, warped_level_maps
 from utils.losses import Grad3d, local_ncc_map
 
-# Pre-registered (PILOTS.md, round 2) before any stage-0 run.
+# Fixed before the stage-0 runs.
 SHARE = 1.0  # feature-term / NCC-term network-gradient norm at the initial state
 CALIBRATION_PAIRS = 8
 GATE_LOCALISATION_VOX = 3.0  # contrastive nets: median error of the embedding match under a known warp

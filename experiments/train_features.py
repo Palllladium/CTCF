@@ -23,7 +23,7 @@ PATCH_RADIUS = 4
 BORDER = 5
 # Variance floor of the registration loss's local NCC (utils.losses.local_ncc_map).
 NCC_EPS = NCCVxm().eps
-# Hard-negative mining, pre-registered for round 2 (PILOTS.md); also used by tools/analysis/diag_round2.
+# Hard-negative mining; also used by tools/analysis/diag_round2.
 # NCC here is the loss's squared local correlation; a 0.25 margin gives hard negatives to ~35% of anchors on T1.
 HARD_DEFAULTS = {
     "candidates": 64,

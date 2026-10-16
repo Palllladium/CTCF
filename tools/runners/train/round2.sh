@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Round 2: a learned registration similarity next to NCC (rules: PILOTS.md, rounds 2 and 2b, in the memory registry).
+# Round 2: a learned registration similarity next to NCC.
 # Stage 0 trains frozen feature nets on the unlabelled training images and checks them; stage 1 then trains
 # VXM-100 from scratch with the PILOT_P1_CONTROL recipe (seed 0) plus lambda x the feature term, for every net
 # that passed stage 0. Stage 1 starts only when stage 0 finished cleanly: every requested net trained and the

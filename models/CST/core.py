@@ -6,7 +6,7 @@ self-training", MICCAI 2023.
 Changes: tensors follow the input device instead of .cuda(); align_corners=False is spelled out where the original
 relied on that default; formatting. One correction: offsets are normalized by n/2, the scale of the align_corners=False
 warps that apply them. The original converts voxels with (n - 1)/2 in the solver, its inverse consistency and the Adam
-refinement, which inflates displacements by n/(n - 1): 4-5% on the 1/8 grid, about 1% at half resolution (EV-LIT-005).
+refinement, which inflates displacements by n/(n - 1): 4-5% on the 1/8 grid, about 1% at half resolution.
 Algorithms and constants are otherwise unchanged; displacements are normalized grid_sample offsets in (x, y, z)
 channel order, sampled with align_corners=False. The training/pseudo-label stream that used to call these lives in models.CST.adaptation.
 """

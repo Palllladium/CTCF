@@ -3,8 +3,12 @@ from __future__ import annotations
 import argparse
 import copy
 import glob
+import json
+import math
 import os
 import random
+import statistics
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -14,7 +18,9 @@ from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
 from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
 from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.distill_teacher import DistillTeacher
 from experiments.core.inference_runtime import load_checkpoint_state
+from experiments.core.known_warp import KnownWarpSource, anchor_loss, effective_points
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import resolve_dataset_dirs
 from experiments.core.train_runtime import TrainContext, run_train
@@ -56,6 +62,21 @@ _GMM_FIT_FILES = 40
 _CERT_WORK_EPS = 0.0011
 # P2b: epochs in which the parcellation learns alone before its consistency term reaches the flow.
 _LATENT_SOLO_EPOCHS = 5
+_AUX_CALIBRATION_PAIRS = 8
+_AUX_CALIBRATION_SEED = 2026
+_CHARBONNIER_EPS = 0.01  # voxels
+
+
+def _gradient_ratio(base, aux, tensors) -> float:
+    """Ratio of gradient norms, counting unused tensors as zero."""
+    tensors = list(tensors)
+    norms = []
+    for index, loss in enumerate((base, aux)):
+        grads = torch.autograd.grad(loss, tensors, retain_graph=index == 0, allow_unused=True)
+        norms.append(math.sqrt(sum(float((g.float() ** 2).sum()) for g in grads if g is not None)))
+    if any(not math.isfinite(n) or n <= 0.0 for n in norms):
+        raise RuntimeError(f"calibration requires finite nonzero gradients of both losses, got {norms}")
+    return norms[0] / norms[1]
 
 
 def certified_crop_warp(flow, moving, sweeps, size, origin):
@@ -107,6 +128,7 @@ class Runner:
                 raise ValueError("--init_ckpt starts a new run from given weights; do not combine it with --resume.")
             report = load_checkpoint_state(self.model, args.init_ckpt, strict=True)
             print(f">>> Initialised weights from {args.init_ckpt}: {report}")
+        self._init_auxiliary_objectives(args, device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
         self.img_size = tuple(self.model.img_size_full)
@@ -255,20 +277,97 @@ class Runner:
 
         return torch.zeros((), device=self.device, dtype=flow_xy.dtype), {}
 
-    def train_step(self, batch, epoch):
-        args, ctx = self.args, self.ctx
-        self._ema_update()
+    def _init_auxiliary_objectives(self, args, device):
+        """Known-warp synthetic steps or a distillation teacher (a zero --distill_beta disables the teacher)."""
+        self._step = 0
+        self.known_warp, self.known_warp_radius, self.distill = None, 0.0, None
+        if args.known_warp_every < 0 or not math.isfinite(args.distill_beta) or args.distill_beta < 0.0:
+            raise ValueError("--known_warp_every and --distill_beta must be non-negative and finite.")
+        if args.sim == "mse" and args.ncc_regions == "labels":
+            raise ValueError("--sim mse replaces the NCC; it cannot be combined with --ncc_regions labels.")
+        teaching = args.distill_teacher != "none" and (args.aux_calibrate or args.distill_beta > 0.0)
+        if not (args.known_warp_every or teaching):
+            return
+        if args.known_warp_every and args.distill_teacher != "none":
+            raise ValueError("known-warp steps and distillation are separate objectives.")
+        if args.batch_size != 1:
+            raise ValueError("known-warp steps and distillation teachers work on single pairs: --batch_size 1.")
+        if teaching:
+            if not args.init_ckpt:
+                raise ValueError("--distill_teacher teaches with a frozen copy of the starting weights: --init_ckpt.")
+            self.distill = DistillTeacher(
+                self.model,
+                args.distill_teacher,
+                args.distill_pairs,
+                device,
+                self._train_files(),
+                table=args.energy_table,
+                proxy=args.proxy_values,
+                seed=args.distill_seed,
+            )
+            return
+        if args.w_dice > 0.0 or self.is_synth or args.anatomy_loss != "none":
+            raise ValueError("known-warp steps are label-free: no --w_dice, --ds SYNTH or --anatomy_loss.")
+        if not args.aux_calibrate and not (math.isfinite(args.known_warp_gamma) and args.known_warp_gamma > 0.0):
+            raise ValueError("--known_warp_every needs --known_warp_gamma from an --aux_calibrate run.")
+        stats = json.loads(Path(args.known_warp_stats).read_text(encoding="utf-8")) if args.known_warp_stats else None
+        if args.known_warp_target == "deadzone":
+            if not stats:
+                raise ValueError("the dead-zone target needs --known_warp_stats")
+            self.known_warp_radius = float(stats["deadzone_radius"])
+        self.known_warp = KnownWarpSource(
+            self._train_files(),
+            device,
+            seed=args.known_warp_seed,
+            anchors=args.known_warp_anchors,
+            target=args.known_warp_target,
+            stats=stats,
+        )
 
+    def _train_files(self) -> list[str]:
+        train_dir, _, _ = resolve_dataset_dirs(self.args)
+        return sorted(glob.glob(os.path.join(train_dir, "*.pkl")))
+
+    def _load_image(self, path) -> torch.Tensor:
+        return torch.from_numpy(pkload(path)[0].copy()).to(self.device, torch.float32)[None, None]
+
+    def train_step(self, batch, epoch):
+        args = self.args
+        self._ema_update()
+        self._step += 1
+        if self.known_warp is not None and self._step % args.known_warp_every == 0:
+            pair = self.known_warp.sample()
+            loss, logs, flow_xy, flow_yx = self._pair_loss(pair.moving, pair.fixed, None, None, epoch)
+            aux, aux_logs = self._known_warp_loss(pair, flow_xy, flow_yx)
+            weighted = args.known_warp_gamma * aux
+            total = loss + weighted
+            logs = {f"syn_{k}": v for k, v in logs.items()} | aux_logs
+            logs.update(base=float(loss.detach()), kw_weighted=float(weighted.detach()), all=float(total.detach()))
+            return total, logs
+        x, y, x_seg, y_seg, ids = self._unpack(batch)
+        loss, logs, flow_xy, flow_yx = self._pair_loss(x, y, x_seg, y_seg, epoch)
+        if self.distill is not None:
+            aux, aux_logs = self._distill_loss(x, y, ids, flow_xy, flow_yx)
+            weighted = args.distill_beta * aux
+            logs["base"] = float(loss.detach())
+            loss = loss + weighted
+            logs.update(aux_logs)
+            logs.update(dist_weighted=float(weighted.detach()), all=float(loss.detach()))
+        return loss, logs
+
+    def _unpack(self, batch):
+        args = self.args
+        ids = (batch[4][0], batch[5][0]) if len(batch) == 6 else None
         if self.is_synth or args.w_dice > 0.0 or args.ncc_regions == "labels":
             if len(batch) < 4:
                 raise RuntimeError("--w_dice/--ncc_regions need a dataset that provides segmentations.")
-            x, y, x_seg, y_seg = batch[0], batch[1], batch[2], batch[3]
-            x_seg, y_seg = x_seg.to(self.device).long(), y_seg.to(self.device).long()
+            x_seg, y_seg = batch[2].to(self.device).long(), batch[3].to(self.device).long()
         else:
-            x, y = batch[0], batch[1]
             x_seg = y_seg = None
+        return batch[0].to(self.device).float(), batch[1].to(self.device).float(), x_seg, y_seg, ids
 
-        x, y = x.to(self.device).float(), y.to(self.device).float()
+    def _pair_loss(self, x, y, x_seg, y_seg, epoch):
+        args, ctx = self.args, self.ctx
 
         schedule_max_epoch = args.schedule_max_epoch if args.schedule_max_epoch > 0 else args.max_epoch
         alpha_l1, alpha_l3, warm = ctcf_schedule(epoch=epoch, max_epoch=schedule_max_epoch)
@@ -297,7 +396,11 @@ class Runner:
             def_yx, flow_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
 
         with torch.autocast(device_type="cuda", enabled=False):
-            if args.ncc_regions == "labels":
+            if args.sim == "mse":
+                L_ncc = (
+                    0.5 * (F.mse_loss(def_xy.float(), y.float()) + F.mse_loss(def_yx.float(), x.float())) * args.w_mse
+                )
+            elif args.ncc_regions == "labels":
                 # The control's exact per-voxel map (same operator, argument order, window and eps): only the
                 # averaging changes, from every voxel to every labelled structure of the fixed image.
                 win, eps = ctx.ncc.win, ctx.ncc.eps
@@ -418,7 +521,135 @@ class Runner:
                 def_seg_xy = self.reg_nearest((x_seg.float(), flow_xy.detach().float()))
                 logs["dice_tr"] = float(dice_val(def_seg_xy.long(), y_seg, num_clus=args.synth_num_labels).item())
 
-        return loss, logs
+        return loss, logs, flow_xy, flow_yx
+
+    def _known_warp_loss(self, pair, flow_xy, flow_yx):
+        kind, radius = self.args.known_warp_target, self.known_warp_radius
+        with torch.autocast(device_type="cuda", enabled=False):
+            aux = 0.5 * (anchor_loss(flow_xy, pair.fm, kind, radius) + anchor_loss(flow_yx, pair.mf, kind, radius))
+        with torch.no_grad():
+            psi = effective_points(flow_xy, pair.fm.anchors)
+            logs = {
+                "kw": aux.detach().item(),
+                "kw_epe": float(torch.linalg.vector_norm(psi - pair.fm.points, dim=-1).mean()),
+                "kw_valid": pair.valid_fraction,
+            }
+            if kind == "set":
+                inf = float("inf")
+                mask = pair.fm.member_mask
+                gap = torch.linalg.vector_norm(psi[:, None] - pair.fm.members, dim=-1).masked_fill(~mask, inf)
+                still = torch.linalg.vector_norm(pair.fm.members - pair.fm.anchors[:, None].float(), dim=-1)
+                logs["kw_set_size"] = float(mask.sum(1).float().mean())
+                logs["kw_near_member"] = float((gap.min(1).values <= 0.5).float().mean())
+                logs["kw_identity_admissible"] = float(
+                    (still.masked_fill(~mask, inf).min(1).values <= 0.5).float().mean()
+                )
+        return aux, logs
+
+    def _distill_targets(self, x, y, ids):
+        if ids is None:
+            raise RuntimeError("--distill_teacher needs subject stems from the dataset")
+        moving_id, fixed_id = ids
+        return (
+            self.distill.target(x, y, moving_id, fixed_id),
+            self.distill.target(y, x, fixed_id, moving_id),
+        )
+
+    def _distill_loss(self, x, y, ids, flow_xy, flow_yx, targets=None):
+        """Bidirectional Charbonnier distance inside each fixed brain."""
+        targets = self._distill_targets(x, y, ids) if targets is None else targets
+        terms, taught = [], 0
+        for flow, fixed, target in zip((flow_xy, flow_yx), (y, x), targets, strict=True):
+            if target is None:
+                terms.append(torch.zeros((), device=self.device))
+                continue
+            taught += 1
+            with torch.autocast(device_type="cuda", enabled=False):
+                diff = flow.float() - target
+                charbonnier = torch.sqrt((diff**2).sum(1) + _CHARBONNIER_EPS**2)[0]
+                terms.append(charbonnier[fixed[0, 0] > 0].mean())
+        aux = 0.5 * (terms[0] + terms[1])
+        return aux, {"dist": aux.detach().item(), "dist_taught": taught / 2}
+
+    def _amp(self):
+        return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.device.type == "cuda")
+
+    def _random_pair(self, files, rng):
+        i, j = rng.sample(range(len(files)), 2)
+        return self._load_image(files[i]), self._load_image(files[j]), (Path(files[i]).stem, Path(files[j]).stem)
+
+    def _known_warp_ratios(self, epoch) -> tuple[list[float], dict]:
+        """Base over anchor-loss gradient norms w.r.t. both flows, on synthetic pairs."""
+        args, ratios = self.args, []
+        source = KnownWarpSource(
+            self._train_files(),
+            self.device,
+            seed=args.known_warp_seed + _AUX_CALIBRATION_SEED,
+            anchors=args.known_warp_anchors,
+            target=args.known_warp_target,
+            stats=self.known_warp.stats,
+        )
+        for _ in range(_AUX_CALIBRATION_PAIRS):
+            pair = source.sample()
+            with self._amp():
+                base, _, flow_xy, flow_yx = self._pair_loss(pair.moving, pair.fixed, None, None, epoch)
+                aux, _ = self._known_warp_loss(pair, flow_xy, flow_yx)
+            ratios.append(_gradient_ratio(base, aux, (flow_xy, flow_yx)))
+        return ratios, {}
+
+    def _distill_ratios(self, epoch) -> tuple[list[float], dict]:
+        """Base over distillation gradient norms w.r.t. both flows, on real pairs the teacher teaches."""
+        files, rng, ratios = self._train_files(), random.Random(_AUX_CALIBRATION_SEED), []
+        examined = taught = 0
+        while len(ratios) < _AUX_CALIBRATION_PAIRS and examined < 50 * _AUX_CALIBRATION_PAIRS:
+            x, y, ids = self._random_pair(files, rng)
+            targets = self._distill_targets(x, y, ids)
+            examined += 1
+            taught += sum(target is not None for target in targets)
+            if all(target is None for target in targets):
+                continue
+            with self._amp():
+                base, _, flow_xy, flow_yx = self._pair_loss(x, y, None, None, epoch)
+                aux, _ = self._distill_loss(x, y, ids, flow_xy, flow_yx, targets=targets)
+            ratios.append(_gradient_ratio(base, aux, (flow_xy, flow_yx)))
+        exposure = taught / (2 * examined)
+        if exposure < 0.05:
+            print(f"WARNING: the teacher teaches only {exposure:.1%} of the directions it is shown", flush=True)
+        return ratios, {"examined_pairs": examined, "taught_direction_fraction": exposure}
+
+    def _mse_ratios(self) -> tuple[list[float], dict]:
+        """NCC over MSE gradient norms w.r.t. the trainable parameters."""
+        files, rng, ratios = self._train_files(), random.Random(_AUX_CALIBRATION_SEED), []
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        for _ in range(_AUX_CALIBRATION_PAIRS):
+            x, y, _ = self._random_pair(files, rng)
+            with self._amp():
+                def_xy, _ = self.model(x, y, alpha_l1=1.0, alpha_l3=1.0)
+                def_yx, _ = self.model(y, x, alpha_l1=1.0, alpha_l3=1.0)
+            ncc = 0.5 * (self.ctx.ncc(def_xy.float(), y) + self.ctx.ncc(def_yx.float(), x))
+            mse = 0.5 * (F.mse_loss(def_xy.float(), y) + F.mse_loss(def_yx.float(), x))
+            ratios.append(_gradient_ratio(ncc, mse, params))
+        return ratios, {}
+
+    def calibrate_aux(self, out_path: str) -> dict:
+        """The weight of the enabled auxiliary objective: the median ratio of base to auxiliary gradient norms at the
+        starting weights, every cascade level on. Written to ``out_path``; no training follows."""
+        epoch = self.args.max_epoch  # past the cascade schedule, as with --finetune
+        if self.known_warp is not None:
+            key, (ratios, details) = "known_warp_gamma", self._known_warp_ratios(epoch)
+        elif self.distill is not None:
+            key, (ratios, details) = "distill_beta", self._distill_ratios(epoch)
+        elif self.args.sim == "mse":
+            key, (ratios, details) = "w_mse", self._mse_ratios()
+        else:
+            raise ValueError("--aux_calibrate needs --known_warp_every, --distill_teacher or --sim mse.")
+        if len(ratios) < _AUX_CALIBRATION_PAIRS:
+            raise RuntimeError(f"only {len(ratios)} calibration pairs were taught; the policy is too selective")
+        result = {key: statistics.median(ratios), "ratios": ratios, "init_ckpt": self.args.init_ckpt, **details}
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(json.dumps(result, indent=1), encoding="utf-8")
+        print(f">>> {key} = {result[key]:.6g} from {len(ratios)} pairs -> {out_path}", flush=True)
+        return result
 
 
 def parse_args():
@@ -436,6 +667,9 @@ def main():
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
     device = setup_device(gpu_id=args.gpu, seed=args.seed, deterministic=False)
     runner = Runner(args, device)
+    if args.aux_calibrate:
+        runner.calibrate_aux(args.aux_calibrate)
+        return
     run_train(args=args, runner=runner, build_loaders=build_loaders)
 
 

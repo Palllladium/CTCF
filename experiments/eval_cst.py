@@ -28,7 +28,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from experiments.core.inference_metrics import metric_profile_for, write_results
+from experiments.core.field_scoring import score_ff_rep
+from experiments.core.inference_metrics import write_results
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import get_dataset_paths
@@ -36,27 +37,11 @@ from experiments.train_cst import normalise, volume
 from models.CST.adaptation import refine, solver_offsets, to_canonical
 from models.CST.core import make_feature_net
 from utils import logdet_std_from_flow, pkload, setup_device
-from utils.dice import dice_per_label
-from utils.field import (
-    _warp,
-    boundary_max_disp,
-    boundary_nonzero_count,
-    boundary_tangential_lip,
-    digital_min_det,
-    digital_project,
-    displacement_grad_norm_max,
-    trilinear_cert_bound,
-    trilinear_fold_percent,
-    trilinear_min_det,
-    trilinear_project,
-)
 
 CONTROL_CONFIG = "CTCF-CascadeA-VM-Unified"  # the P1 control: VXM-100 from scratch, seed 0
 CALIBRATION_SEED = 2026
 PROJECTION_SEED = 800_001  # random projections of the refinement, fixed per pair
 CALIBRATION_TOLERANCE = 0.03  # relative SDlogJ gap at which the refined fields count as geometry-matched
-REPAIR = {"project_eps": 0.0, "tri_eps": 0.001, "damp": 0.6, "iters": 80}  # experiments.inference REP settings
-PROFILE = metric_profile_for("OASIS")
 
 
 def training_files(args) -> list[str]:
@@ -170,35 +155,6 @@ def run_calibration(args, net, device) -> None:
     )
 
 
-def score(flow, case_id, seconds, x_seg, y_seg, eps) -> dict:
-    """The per-case columns of experiments.inference on a canonical flow."""
-    with torch.no_grad():
-        warped = _warp(x_seg.float(), flow, mode="nearest").long()
-        dice = dice_per_label(warped, y_seg.long(), labels=PROFILE.labels)
-    tri_bound = trilinear_cert_bound(flow, 0, eps)
-    tri_fold = trilinear_fold_percent(flow)
-    nonzero = boundary_nonzero_count(flow)
-    row = {
-        "case_id": case_id,
-        "time_sec": seconds,
-        "cert_min_det": digital_min_det(flow),
-        "tri_min_det": trilinear_min_det(flow),
-        "tri_cert_bound": tri_bound,
-        "bernstein_pass_float64": float(math.isfinite(tri_bound) and tri_bound >= eps),
-        "tri_fold_pct": tri_fold,
-        "tri_case_folds": float(tri_fold > 0.0),
-        "disp_grad_norm": displacement_grad_norm_max(flow),
-        "boundary_tan_lip": boundary_tangential_lip(flow),
-        "boundary_max_disp": boundary_max_disp(flow),
-        "boundary_nonzero_count": float(nonzero),
-        "identity_boundary_exact": float(nonzero == 0),
-        "dice_mean": float(np.mean(dice)),
-        **PROFILE.jac_metrics(flow, x_seg),
-    }
-    row.update({f"dice_lbl_{label}": float(v) for label, v in zip(PROFILE.labels, dice, strict=True)})
-    return row
-
-
 def run_evaluation(args, net, device) -> None:
     reg_fac, calibration = None, None
     if args.mode == "refined":
@@ -223,25 +179,8 @@ def run_evaluation(args, net, device) -> None:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         forward = time.perf_counter() - t0
-        rows["FF"].append(score(flow, case_id, forward, x_seg, y_seg, 0.0))
-        t0 = time.perf_counter()
-        repaired, folds, iters = digital_project(
-            flow, eps=REPAIR["project_eps"], damp=REPAIR["damp"], max_iters=REPAIR["iters"]
-        )
-        repaired, report = trilinear_project(
-            repaired, eps=REPAIR["tri_eps"], damp=REPAIR["damp"], max_iters=REPAIR["iters"], subdiv_depth=0
-        )
-        row = score(repaired, case_id, forward + time.perf_counter() - t0, x_seg, y_seg, REPAIR["tri_eps"])
-        row.update(
-            {
-                "proj_folds_end": folds,
-                "proj_iters": float(iters),
-                "tri_proj_certified": float(report.certified),
-                "tri_proj_uncertified_cells": float(report.n_uncertified_cells),
-                "tri_proj_sampled_negative_pct": report.sampled_negative_cell_percent,
-                "tri_proj_iters": float(report.iterations),
-            }
-        )
+        ff, row = score_ff_rep(flow, case_id, forward, x_seg, y_seg, "canonical")
+        rows["FF"].append(ff)
         rows["REP"].append(row)
         print(
             f"[{k + 1}/{len(files)}] {case_id} dice FF {rows['FF'][-1]['dice_mean']:.4f} REP {row['dice_mean']:.4f} "

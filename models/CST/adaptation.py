@@ -1,7 +1,7 @@
 """Corrected adaptation of CST (Bigalke et al., MICCAI 2023) with the affine-equivariance term of CoRe (Kats et al.,
 arXiv 2603.23694) for OASIS: the pseudo-label stream, training targets under affine augmentation, the equivariance
 InfoNCE and the conversion to the canonical voxel flow. Each correction against the published code names the code it
-replaces (EV-LIT-005 in the memory registry). Offsets are normalized grid_sample offsets in (x, y, z) channel order,
+replaces. Offsets are normalized grid_sample offsets in (x, y, z) channel order,
 sampled with align_corners=False, as in models.CST.core.
 """
 
@@ -223,7 +223,7 @@ def equivariance_loss(
 
 def make_pairs(n: int, per_subject: int, seed: int) -> list[tuple[int, int]]:
     """(fixed, moving) index pairs: every subject `per_subject` times as fixed and as moving, no self or repeated
-    pairs. All pairs of 394 OASIS images would need a 744 GiB pseudo-label buffer (EV-LIT-005)."""
+    pairs. All pairs of 394 OASIS images would need a 744 GiB pseudo-label buffer."""
     generator = torch.Generator().manual_seed(seed)
     taken: set[tuple[int, int]] = set()
     pairs: list[tuple[int, int]] = []

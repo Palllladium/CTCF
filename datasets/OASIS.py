@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -14,9 +15,10 @@ from utils import pkload
 class OASISBrainDataset(Dataset):
     """OASIS training pairs: random src/tar from the same split, with segmentation."""
 
-    def __init__(self, data_path, transforms):
+    def __init__(self, data_path, transforms, return_ids: bool = False):
         self.paths = list(data_path)
         self.transforms = transforms
+        self.return_ids = return_ids  # also return the two subjects' file stems (distillation teachers)
         if len(self.paths) < 2:
             raise RuntimeError("OASISBrainDataset requires at least 2 samples.")
 
@@ -41,6 +43,8 @@ class OASISBrainDataset(Dataset):
         y = torch.from_numpy(np.ascontiguousarray(y)).float()
         x_seg = torch.from_numpy(np.ascontiguousarray(x_seg)).long()
         y_seg = torch.from_numpy(np.ascontiguousarray(y_seg)).long()
+        if self.return_ids:
+            return x, y, x_seg, y_seg, Path(src_path).stem, Path(tar_path).stem
         return x, y, x_seg, y_seg
 
     def __len__(self):

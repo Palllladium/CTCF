@@ -13,7 +13,14 @@ from torchvision import transforms
 
 from datasets import IXI, OASIS
 from experiments.core.cli_ctcf import ctcf_overrides_from_args
-from experiments.core.inference_metrics import metric_profile_for, write_results, write_trace
+from experiments.core.inference_metrics import (
+    digital_projection_columns,
+    geometry_columns,
+    metric_profile_for,
+    trilinear_projection_columns,
+    write_results,
+    write_trace,
+)
 from experiments.core.model_adapters import get_model_adapter
 from experiments.core.path_profiles import get_dataset_paths
 from tools.analysis.run_artifacts import classify_checkpoint_incompatibilities
@@ -27,20 +34,14 @@ from utils import (
     setup_device,
 )
 from utils.field import (
-    boundary_max_disp,
     boundary_nonzero_count,
-    boundary_tangential_lip,
     boundary_vertex_mask,
     certified_local_clip,
-    digital_min_det,
     digital_project,
-    displacement_grad_norm_max,
     enforce_identity_boundary,
     identity_collar,
     perturb_flow,
     trilinear_cert_bound,
-    trilinear_fold_percent,
-    trilinear_min_det,
     trilinear_project,
 )
 from utils.tto import TTOConfig, refine_flow
@@ -398,37 +399,16 @@ class InferRunner:
             dt = time.perf_counter() - t0
 
             row, def_seg, dice_lbl = self._score(flow, x_seg, y_seg, reg_nearest)
-            # Two certificates of the final field. cert_min_det: min over the ten DIGITAL determinants
-            # (corner/tetrahedral). tri_min_det / tri_cert_bound: the actual TRILINEAR warp grid_sample
-            # applies — a sampled detection min and a sound Bernstein lower bound. digital>0 does NOT
-            # imply trilinear>0, so a gap between them is a real interpolation-consistency failure.
             fl = flow.float()
-            tri_fold = trilinear_fold_percent(fl)
             tri_bound = (
                 final_tri_bound
                 if final_tri_bound is not None
                 else trilinear_cert_bound(fl, args.tto_tri_subdiv_depth, args.tto_tri_project_eps)
             )
-            bnd_nonzero = boundary_nonzero_count(fl)
             row = {
                 "case_id": cid,
                 "time_sec": dt,
-                "cert_min_det": digital_min_det(fl),
-                "tri_min_det": trilinear_min_det(fl),
-                "tri_cert_bound": tri_bound,
-                "bernstein_pass_float64": float(math.isfinite(tri_bound) and tri_bound >= args.tto_tri_project_eps),
-                # Audit: percent of cells that PROVABLY fold trilinearly, and whether this case folds
-                # at all (mean over cases -> fraction of cases folding) — the numbers digital10 hides.
-                "tri_fold_pct": tri_fold,
-                "tri_case_folds": float(tri_fold > 0.0),
-                # Global-injectivity inputs (Ball/Kroemer): disp_grad_norm < 1 alone certifies GLOBAL
-                # injectivity. boundary_tan_lip < 1 only certifies each face separately; a merely "small"
-                # boundary displacement does not exclude cross-face collisions.
-                "disp_grad_norm": displacement_grad_norm_max(fl),
-                "boundary_tan_lip": boundary_tangential_lip(fl),
-                "boundary_max_disp": boundary_max_disp(fl),
-                "boundary_nonzero_count": float(bnd_nonzero),
-                "identity_boundary_exact": float(bnd_nonzero == 0),
+                **geometry_columns(fl, tri_bound, args.tto_tri_project_eps),
                 **row,
             }
             if self.tto.enabled:
@@ -440,13 +420,9 @@ class InferRunner:
                 row["tto_fold_budget"] = result.fold_budget
                 row["fwd_sec"] = t_fwd
             if args.tto_project:
-                row["proj_folds_end"] = proj_folds
-                row["proj_iters"] = float(proj_iters)
+                row.update(digital_projection_columns(proj_folds, proj_iters))
             if args.tto_tri_project:
-                row["tri_proj_certified"] = float(tri_proj_report.certified)
-                row["tri_proj_uncertified_cells"] = float(tri_proj_report.n_uncertified_cells)
-                row["tri_proj_sampled_negative_pct"] = tri_proj_report.sampled_negative_cell_percent
-                row["tri_proj_iters"] = float(tri_proj_report.iterations)
+                row.update(trilinear_projection_columns(tri_proj_report))
 
             if args.hd95:
                 with torch.no_grad():

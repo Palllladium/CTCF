@@ -4,7 +4,7 @@
 # --anatomy_loss: control (none), latent (co-trained self-taught parcellation) and foundation (frozen
 # anatomix features). Arms are spread over the given GPUs, run one after another on each GPU, and each is
 # scored (last.pth, feed-forward and after the certified repair chain) as soon as it finishes.
-# Decision rule (PILOTS.md): Dice35 gain over the control < 0.010 fails the arm, >= 0.015 is a signal.
+# Decision rule: Dice35 gain over the control < 0.010 fails the arm, >= 0.015 is a signal.
 #
 #   GPUS="0 1" nohup bash tools/runners/train/pilot_p2.sh > pilot_p2.out 2>&1 &
 #   ARMS="latent" GPUS="0" ...   # run a subset; the summary covers every P2 arm scored so far

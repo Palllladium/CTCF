@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CST/CoRe pilot (rules: PILOTS.md, "CST/CoRe pilot", in the memory registry): the corrected CST adaptation alone (cst)
+# CST/CoRe pilot: the corrected CST adaptation alone (cst)
 # and with CoRe's affine-equivariance term (cst_eq), trained on OASIS without labels from one shared start.
 #   1. The shared start on the first GPU (pair list, stage-0 pseudo labels, start check, measured cost of one arm), and
 #      at the same time the P1 control's SDlogJ on 20 fixed training pairs on the second GPU.

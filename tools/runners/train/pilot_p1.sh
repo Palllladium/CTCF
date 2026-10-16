@@ -2,7 +2,7 @@
 # Pilot P1: label-free GMM tissue target against an equal control (VXM Unified SVF, OASIS,
 # 100 epochs from scratch, seed 0). Both arms train in parallel; afterwards each last.pth is
 # scored feed-forward and after the certified repair chain, Dice is reported over 35/29/6 labels,
-# and everything compact is zipped for transfer. Decision rule: PILOTS.md (registry).
+# and everything compact is zipped for transfer.
 #
 #   GPUS="0 1" nohup bash tools/runners/train/pilot_p1.sh > pilot_p1.out 2>&1 &
 set -euo pipefail

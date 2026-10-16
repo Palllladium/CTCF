@@ -13,23 +13,19 @@ report must NOT be run with --require-zero-boundary.
 import argparse
 import glob
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from utils.field import legacy_sampling_displacement
+
 
 def materialize_psi_displacement(flow: torch.Tensor) -> torch.Tensor:
     """Phi displacement u [1,3,D,H,W] (voxel units, z,y,x) -> Psi displacement u_Psi = Psi - x."""
-    _, _, d, h, w = flow.shape
-    zz, yy, xx = torch.meshgrid(
-        torch.arange(d, dtype=flow.dtype),
-        torch.arange(h, dtype=flow.dtype),
-        torch.arange(w, dtype=flow.dtype),
-        indexing="ij",
-    )
-    grid = torch.stack((zz, yy, xx), dim=0).unsqueeze(0)
-    scale = flow.new_tensor((d / (d - 1), h / (h - 1), w / (w - 1))).view(1, 3, 1, 1, 1)
-    return scale * (grid + flow) - 0.5 - grid
+    return legacy_sampling_displacement(flow)
 
 
 def main() -> None:

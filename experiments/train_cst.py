@@ -1,5 +1,5 @@
 """Train the corrected CST adaptation on OASIS without labels: CST (Bigalke et al., MICCAI 2023) alone (--arm cst) or
-with CoRe's affine-equivariance term (--arm cst_eq). Rules: PILOTS.md, "CST/CoRe pilot", in the memory registry.
+with CoRe's affine-equivariance term (--arm cst_eq).
 
 --init_only builds the shared start once: the (fixed, moving) pair list, the stage-0 pseudo labels from a random
 feature net, the start check on the 19 test pairs and the measured cost of one arm. Each arm then trains a freshly

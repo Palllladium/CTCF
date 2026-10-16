@@ -39,6 +39,7 @@ from utils.field import (
     _warp,
     digital_fold_percent,
     jacobian_nonpositive_percent,
+    legacy_sampling_displacement,
     trilinear_cert_bound,
     trilinear_fold_percent,
     trilinear_project,
@@ -51,16 +52,7 @@ def _sha256_array(array: np.ndarray) -> str:
 
 def _materialize_ctcf_legacy_sampler(flow: torch.Tensor) -> torch.Tensor:
     """Convert a stored CTCF flow to the source-index pull map actually sampled by SpatialTransformer."""
-    _, _, d, h, w = flow.shape
-    zz, yy, xx = torch.meshgrid(
-        torch.arange(d, dtype=flow.dtype),
-        torch.arange(h, dtype=flow.dtype),
-        torch.arange(w, dtype=flow.dtype),
-        indexing="ij",
-    )
-    grid = torch.stack((zz, yy, xx), dim=0).unsqueeze(0)
-    scale = flow.new_tensor((d / (d - 1), h / (h - 1), w / (w - 1))).view(1, 3, 1, 1, 1)
-    return scale * (grid + flow) - 0.5 - grid
+    return legacy_sampling_displacement(flow)
 
 
 def to_contract(flow_np: np.ndarray, source: str) -> torch.Tensor:

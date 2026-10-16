@@ -65,7 +65,10 @@ def oasis_loaders(
     tr_files, va_files = _find_split_files(train_dir, val_dir, tag="OASIS")
 
     tfm = transforms.Compose([NumpyType((np.float32, np.int16))])
-    tr = train_cls(tr_files, transforms=tfm)
+    if getattr(args, "distill_teacher", "none") != "none":
+        tr = train_cls(tr_files, transforms=tfm, return_ids=True)
+    else:
+        tr = train_cls(tr_files, transforms=tfm)
     va = val_cls(va_files, transforms=tfm)
     return _build_loaders(
         train_ds=tr,

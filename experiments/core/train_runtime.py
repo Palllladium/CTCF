@@ -195,8 +195,10 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
             nan_streak = 0
 
             scaler.scale(loss).backward()
+            scale_before_step = scaler.get_scale()
             scaler.step(runner.optimizer)
             scaler.update()
+            logs = dict(logs or {}, amp_skipped=float(scaler.get_scale() < scale_before_step))
 
             if logs:
                 for k, v in logs.items():
