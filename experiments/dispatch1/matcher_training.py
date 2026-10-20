@@ -315,8 +315,8 @@ def run(args, device, build_model, losses, predict, method) -> None:
         if calibration["method"] != method:
             raise ValueError("lambda calibration belongs to a different matcher")
         lam = calibration["lambda"] * args.lambda_scale
-        if not math.isfinite(lam) or lam <= 0:
-            raise ValueError("lambda must be finite and positive")
+        if not math.isfinite(lam) or lam < 0:
+            raise ValueError("lambda must be finite and non-negative")
         directory = Path("results") / args.exp / "ckpt"
         directory.mkdir(parents=True, exist_ok=True)
         _, result = train(args, device, lam, args.iters, build_model, losses, method, directory)
