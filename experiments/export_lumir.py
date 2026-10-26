@@ -16,6 +16,7 @@ from experiments.core.cli_ctcf import add_ctcf_model_args, add_ctcf_override_arg
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter, volume_window_size
 from experiments.core.path_profiles import resolve_lumir_paths
+from experiments.core.precision import add_precision_arg, configure_precision, precision_autocast
 from utils.field import legacy_sampling_displacement
 
 # Which images/JSON a pair list comes from: the 2024 archive keeps its validation images next to imagesTr.
@@ -53,6 +54,7 @@ def _sha256(path: Path) -> str:
 def main() -> None:
     p = argparse.ArgumentParser(description="Export official LUMIR validation displacements of a CTCF checkpoint.")
     add_common_args(p, mode="infer", include_lumir=True)
+    add_precision_arg(p, default=None)
     add_ctcf_model_args(p)
     add_ctcf_override_args(p)
     p.set_defaults(ds="LUMIR")
@@ -80,6 +82,8 @@ def main() -> None:
         **ctcf_overrides_from_args(args),
     )
     load_report = load_checkpoint_state(model, args.ckpt, strict=True)
+    precision = args.precision or load_report["precision"]
+    configure_precision(precision, device)
     model = model.to(device).eval()
 
     folder = args.out / args.name
@@ -87,7 +91,7 @@ def main() -> None:
     files = []
     for fixed, moving in pairs:
         x, y = _load_pair(paths[root_key], fixed, moving, device)
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device.type == "cuda"):
+        with torch.no_grad(), precision_autocast(precision, device):
             _, flow = model(x, y, alpha_l1=0.0 if args.disable_l1 else 1.0, alpha_l3=0.0 if args.disable_l3 else 1.0)
         target = folder / f"{lumir_disp_name(fixed, moving)}.nii.gz"
         save_displacement(target, evaluator_displacement(flow))
@@ -101,6 +105,7 @@ def main() -> None:
     manifest = {
         "checkpoint": args.ckpt,
         "checkpoint_load": load_report,
+        "precision": precision,
         "config": args.config,
         "time_steps": args.time_steps,
         "overrides": ctcf_overrides_from_args(args),

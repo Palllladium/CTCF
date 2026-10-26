@@ -22,6 +22,7 @@ from experiments.core.data_loaders import baseline_loader_builder
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter, volume_window_size
 from experiments.core.path_profiles import resolve_dataset_dirs
+from experiments.core.precision import configure_precision, precision_autocast
 from experiments.core.train_runtime import TrainContext, run_train
 from experiments.dispatch1.distill_teacher import DistillTeacher
 from experiments.dispatch1.known_warp import KnownWarpSource, anchor_loss, effective_points
@@ -210,8 +211,7 @@ class Runner:
 
     @torch.no_grad()
     def _forward_flow(self, x, y):
-        use_amp = torch.cuda.is_available()
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+        with self._amp():
             _, flow = self.model(x, y, alpha_l1=self._val_alpha_l1, alpha_l3=self._val_alpha_l3)
         return flow.float()
 
@@ -574,7 +574,7 @@ class Runner:
         return aux, {"dist": aux.detach().item(), "dist_taught": taught / 2}
 
     def _amp(self):
-        return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.device.type == "cuda")
+        return precision_autocast(self.args.precision, self.device)
 
     def _random_pair(self, files, rng):
         i, j = rng.sample(range(len(files)), 2)
@@ -668,6 +668,7 @@ def main():
         args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
     device = setup_device(gpu_id=args.gpu, seed=args.seed, deterministic=False)
+    configure_precision(args.precision, device)
     runner = Runner(args, device)
     if args.aux_calibrate:
         runner.calibrate_aux(args.aux_calibrate)

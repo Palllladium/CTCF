@@ -22,6 +22,17 @@ def runner(tmp_path):
     package.mkdir(parents=True)
     (package.parent / "__init__.py").touch()
     (package / "__init__.py").touch()
+    certificate = tmp_path / "tools/analysis"
+    certificate.mkdir(parents=True)
+    (certificate.parent / "__init__.py").touch()
+    (certificate / "__init__.py").touch()
+    (certificate / "certify_psi.py").write_text(
+        "import argparse, os\nfrom pathlib import Path\n"
+        "p=argparse.ArgumentParser(); p.add_argument('--root'); p.add_argument('--out'); a=p.parse_args()\n"
+        "assert os.environ.get('CUDA_VISIBLE_DEVICES') == ''\n"
+        "out=Path(a.out); out.mkdir(parents=True,exist_ok=True); (out/'report.json').write_text('{}')\n"
+        "raise SystemExit(1 if os.environ.get('FAIL_TASK') == 'certificate' else 0)\n"
+    )
     (package / "profile.py").write_text(
         """import argparse, json, os, time
 from pathlib import Path
@@ -131,3 +142,14 @@ def test_runner_packages_failure_and_retries_only_failed_task(runner):
     assert sum(path.parent.name == "linear" for path in calls) == 2
     linear = [json.loads(path.read_text()) for path in calls if path.parent.name == "linear"]
     assert any(record["gpu"] in ("0", "1") for record in linear)
+
+
+def test_certificate_failure_is_packaged_without_cancelling_gpu_tasks(runner):
+    root, run = runner
+    failed = run(FAIL_TASK="certificate")
+    assert failed.returncode != 0
+    assert len(list((root / "results/population/test").glob("*/call_*.json"))) == 10
+    assert list((root / "results/exports").glob("*FAILED.zip"))
+    resumed = run()
+    assert resumed.returncode == 0
+    assert "SKIP a0" in resumed.stdout and "PASS certificate" in resumed.stdout

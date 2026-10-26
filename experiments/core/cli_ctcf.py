@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from experiments.core.cli_common import optional_bool
+from experiments.core.precision import add_precision_arg
 from models.CTCF.configs import CONFIGS
 
 _INT_OVERRIDES = ("l1_base_ch", "l3_base_ch", "l3_iters", "l3_num_heads")
@@ -39,6 +40,7 @@ CTCF_OVERRIDE_KEYS = (
 
 
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
+    add_precision_arg(p)
     add_ctcf_model_args(p)
     add_ctcf_loss_args(p)
     add_ctcf_schedule_args(p)

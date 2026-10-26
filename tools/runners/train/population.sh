@@ -4,6 +4,7 @@
 # Do not run the same RUN_ID concurrently. Payload arrays/checkpoints stay on the server, outside the compact ZIP.
 # Diagnostic PROFILE_WIDTH/LEVELS/PROFILE_EPOCHS/PROBE_STEPS/MAP_STEPS are frozen by prepare in config.json.
 # PY defaults to the node's ctcf environment; the population unit tests run first (PRETESTS=0 skips them).
+# Real OASIS/IXI Psi boundary checks run concurrently on CPU; CERTIFICATE_ROOT defaults to results.
 #
 #   EXPECTED_GIT_HEAD=<sha> GPUS="0 1 2 3" nohup bash tools/runners/train/population.sh > population.out 2>&1 &
 set -euo pipefail
@@ -36,17 +37,15 @@ else
     echo "$HEAD" > "$RUN/head.txt"
 fi
 echo "$(date -u +%FT%TZ) HEAD=$HEAD GPUS=${GPU[*]} DATA=$DATA PY=$PY" > "$RUN/logs/$ATTEMPT/run_info.txt"
-if [ "${PRETESTS:-1}" = 1 ]; then
-    "$PY" -m pytest -q -p no:cacheprovider tools/analysis/tests/population \
-        --ignore=tools/analysis/tests/population/test_runner.py > "$RUN/logs/$ATTEMPT/pre_tests.txt" 2>&1 \
-        || { echo "[population] unit tests failed: $RUN/logs/$ATTEMPT/pre_tests.txt"; exit 1; }
-fi
+if command -v nvidia-smi >/dev/null; then nvidia-smi topo -m > "$RUN/logs/$ATTEMPT/gpu_topology.txt" 2>&1 || true; fi
 PIDS=()
+CERT_PID=""
 TASKS=(a0 linear a1 probe_ref probe_train0 probe_train1 probe_train2 probe_val0 probe_val1 k3)
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$RUN/status.txt"; }
 finish() {
     local code=$? pid_file pid
     trap - EXIT INT TERM
+    [ -z "$CERT_PID" ] || kill -TERM "$CERT_PID" 2>/dev/null || true
     for pid_file in "$RUN/.pids/$ATTEMPT/"*; do
         [ -f "$pid_file" ] || continue
         read -r pid < "$pid_file"
@@ -63,7 +62,7 @@ from pathlib import Path
 
 run, prefix, exit_code = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 codes = {path.stem: int(path.read_text().strip()) for path in (run / "exit_codes").glob("*.txt")}
-complete = exit_code == 0 and all(codes.get(task) == 0 for task in ("prepare", *sys.argv[4:], "summary"))
+complete = exit_code == 0 and all(codes.get(task) == 0 for task in ("pretests", "prepare", "certificate", *sys.argv[4:], "summary"))
 status = "COMPLETE" if complete else "PARTIAL" if exit_code in (130, 143) else "FAILED"
 archive = Path(f"{prefix}__{status}.zip")
 manifest = {"status": status, "head": (run / "head.txt").read_text().strip(), "exit_codes": codes, "runner_exit_code": exit_code,
@@ -93,11 +92,31 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 log "RUN_ID=$RUN_ID HEAD=$HEAD GPUS=${GPU[*]}"
+if [ "${PRETESTS:-1}" = 1 ]; then
+    if CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider tools/analysis/tests/population \
+        tools/analysis/tests/test_cert_boundary.py tools/analysis/tests/test_certify_psi.py tools/dev/check_certificate_soundness.py \
+        tools/analysis/tests/test_precision.py tools/analysis/tests/test_lumir.py \
+        --ignore=tools/analysis/tests/population/test_runner.py > "$RUN/logs/$ATTEMPT/pre_tests.txt" 2>&1; then
+        echo 0 > "$RUN/exit_codes/pretests.txt"
+    else
+        code=$?; echo "$code" > "$RUN/exit_codes/pretests.txt"; log "ERROR pretests"; exit "$code"
+    fi
+else
+    echo 0 > "$RUN/exit_codes/pretests.txt"
+fi
 worker() { "$PY" -m experiments.population.profile --task "$1" --run "$RUN" --data-root "$DATA" --parent-checkpoint "$PARENT_CHECKPOINT" "${@:2}"; }
 if worker prepare > "$RUN/logs/$ATTEMPT/prepare.log" 2>&1; then
     echo 0 > "$RUN/exit_codes/prepare.txt"
 else
     code=$?; echo "$code" > "$RUN/exit_codes/prepare.txt"; log "ERROR prepare"; exit "$code"
+fi
+if [ -f "$RUN/certificate.done" ] && [ -s "$RUN/certificate/report.json" ]; then
+    log "SKIP certificate (completed)"
+else
+    log "START certificate on CPU"
+    CUDA_VISIBLE_DEVICES="" "$PY" -m tools.analysis.certify_psi --root "${CERTIFICATE_ROOT:-results}" \
+        --out "$RUN/certificate" > "$RUN/logs/$ATTEMPT/certificate.log" 2>&1 &
+    CERT_PID=$!
 fi
 job() {
     local task=$1 gpu=$2 child code=0
@@ -129,6 +148,11 @@ while [ "$next" -lt "${#TASKS[@]}" ] || [ "$running" -gt 0 ]; do
     [ "$running" = 0 ] || sleep 1
 done
 PIDS=()
+if [ -n "$CERT_PID" ]; then
+    code=0; wait "$CERT_PID" || code=$?; CERT_PID=""
+    echo "$code" > "$RUN/exit_codes/certificate.txt"
+    if [ "$code" = 0 ]; then touch "$RUN/certificate.done"; log "PASS certificate"; else failed=1; log "ERROR certificate (exit $code)"; fi
+fi
 if worker summary > "$RUN/logs/$ATTEMPT/summary.log" 2>&1; then
     echo 0 > "$RUN/exit_codes/summary.txt"
 else

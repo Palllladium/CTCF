@@ -22,6 +22,7 @@ from experiments.core.helpers import (
     select_lr_policy,
 )
 from experiments.core.path_profiles import PATHS, print_experiment_header
+from experiments.core.precision import configure_precision, precision_autocast
 from experiments.core.train_logging import (
     append_epoch_metrics,
     format_iter_log,
@@ -124,7 +125,11 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
     max_train_iters = args.max_train_iters
     raw_max_val = args.max_val_batches
     max_val_batches = None if raw_max_val <= 0 else raw_max_val
-    scaler = torch.amp.GradScaler("cuda")
+    precision = getattr(args, "precision", "fp16")
+    if hasattr(args, "precision"):
+        configure_precision(precision, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
+    print(f">>> precision={precision} scaler={scaler.is_enabled()}")
     train_total = len(train_loader) if max_train_iters <= 0 else min(len(train_loader), max_train_iters)
 
     ds_key = args.ds.upper()
@@ -178,7 +183,7 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
 
             t_it = time.perf_counter()
             runner.optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+            with precision_autocast(precision, device):
                 loss, logs = runner.train_step(batch, epoch)
 
             if not torch.isfinite(loss):
@@ -195,6 +200,14 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
             nan_streak = 0
 
             scaler.scale(loss).backward()
+            if precision != "fp16":
+                # The infinite threshold checks finiteness without clipping finite gradients.
+                torch.nn.utils.clip_grad_norm_(
+                    (p for group in runner.optimizer.param_groups for p in group["params"]),
+                    float("inf"),
+                    norm_type=float("inf"),
+                    error_if_nonfinite=True,
+                )
             scale_before_step = scaler.get_scale()
             scaler.step(runner.optimizer)
             scaler.update()
@@ -288,6 +301,7 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
             "optimizer": runner.optimizer.state_dict(),
             "best_dsc": best_dsc,
             "scaler": scaler.state_dict(),
+            "precision": precision,
         }
         if save_ckpt_enabled:
             save_ckpt(state, ckpt_dir, is_best)

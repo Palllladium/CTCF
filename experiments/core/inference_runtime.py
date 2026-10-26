@@ -50,6 +50,10 @@ from utils.tto import TTOConfig, refine_flow
 def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> dict[str, object]:
     """Load checkpoint weights and return an explicit, machine-readable load report."""
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    numerical = {
+        "precision": ckpt.get("precision", "fp16") if isinstance(ckpt, dict) else "fp16",
+        "precision_recorded": isinstance(ckpt, dict) and "precision" in ckpt,
+    }
     sd = ckpt.get("state_dict", ckpt.get("model", ckpt)) if isinstance(ckpt, dict) else ckpt
 
     if strict:
@@ -69,6 +73,7 @@ def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) 
                 f"[INFO] Strict checkpoint compatibility succeeded with regenerated deterministic buffer(s): {allowed}"
             )
             return {
+                **numerical,
                 "strict": True,
                 "torch_strict": False,
                 "state_key_count": len(sd),
@@ -77,6 +82,7 @@ def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) 
                 "unexpected_keys": [],
             }
         report = {
+            **numerical,
             "strict": True,
             "torch_strict": True,
             "state_key_count": len(sd),
@@ -93,6 +99,7 @@ def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) 
     if unexpected:
         print(f"[WARN] Unexpected keys: {len(unexpected)} (first 10): {unexpected[:10]}")
     return {
+        **numerical,
         "strict": False,
         "state_key_count": len(sd),
         "missing_keys": list(missing),

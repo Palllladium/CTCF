@@ -90,6 +90,13 @@ it is not a rejection gate. Raw label-fit maps are not treated as ground-truth d
 - six multiscale label fits, including the reference self-fit, followed by the K2' ridge readout;
 - K3: appearance/residual diagnostics with the frozen Mamba parent, in FP32/TF32.
 
+In parallel, one CPU task checks the new global certificate on all 19 OASIS and 115 IXI materialized fields.
+It uses `results/psi_cert/{oas_w4,ixi_w4}/exact_psi.json` and matching `flows/`. Missing Psi payload can be
+reconstructed from `results/collar/{OAS_COLLAR_w4,IXI_COLLAR_w4}/flows/` only if its SHA matches the old report.
+The cell certificate is reused only for the same bytes; the worst lower-bound case of each set is also certified
+from scratch. Missing fields, changed bytes or failed checks make this task fail while GPU tasks continue.
+`CERTIFICATE_ROOT` overrides the root `results` directory. Boundary/operator tests run in the pretests as well.
+
 All six subjects come deterministically from the existing frozen OASIS Train split: four inner-Train and two
 inner-heldout. The latter are held out only from the small A fit; the historical parent may have seen them.
 No Dev/Test subject is used. The Train mean, split, selected input bytes, parent bytes and diagnostic settings
@@ -106,11 +113,12 @@ The runner requires `EXPECTED_GIT_HEAD`; `PYBIN`, `OASIS_ALL_ROOT`, `PARENT_CHEC
 configure its environment. `GPUS` accepts free numeric device IDs separated by spaces or commas. With the same
 `RUN_ID`, completed tasks are skipped only when their completion marker and report both exist. Failed tasks
 restart in a new attempt directory, preserving earlier outputs; GPU count and IDs may change. Do not run the
-same `RUN_ID` concurrently. A missing parent fails only K3, which can be retried after uploading its checkpoint.
+same `RUN_ID` concurrently. The parent checkpoint must exist before dispatch starts.
 
 Per-task logs and compact reports are under `results/population/<RUN_ID>/`. The final single-root ZIP and SHA-256
 sidecar are written to `results/exports/`; arrays and checkpoints stay on the server. `COMPLETE` requires all ten
-tasks and the summary to succeed. Interrupted or failed attempts still produce a compact package.
+GPU tasks, the CPU certificate checks, pretests and the summary to succeed. GPU topology is included when
+`nvidia-smi` is available. Interrupted or failed attempts still produce a compact package.
 
 New branch heads change the layout of earlier debug A checkpoints, which must be regenerated. Existing CTCF
 and Mamba checkpoints are unaffected.

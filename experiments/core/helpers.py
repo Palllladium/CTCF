@@ -53,6 +53,9 @@ def resume_from_ckpt(
     if ckpt is None:
         return 0, best_dsc_init
 
+    if hasattr(args, "precision") and ckpt.get("precision", "fp16") != args.precision:
+        raise ValueError("resume precision differs from the checkpoint; use --init_ckpt for a new experiment")
+
     epoch_start = int(ckpt.get("epoch", -1)) + 1
     best_dsc = float(ckpt.get("best_dsc", best_dsc_init))
     if ckpt.get("scaler"):
