@@ -8,8 +8,8 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from datasets import IXI, OASIS
-from experiments.core.path_profiles import resolve_dataset_dirs
+from datasets import IXI, LUMIR, OASIS
+from experiments.core.path_profiles import resolve_dataset_dirs, resolve_lumir_paths
 from utils import NumpyType, RandomFlip, SegNorm
 
 
@@ -109,6 +109,28 @@ def ixi_loaders(
     )
 
 
+def lumir_loaders(args, val_bs: int = 1) -> tuple[DataLoader, DataLoader]:
+    """Build LUMIR loaders: the official training list; the labelled T1 pairs of the official validation list."""
+    paths = resolve_lumir_paths(args)
+    training, _ = LUMIR.read_lumir_json(paths["train_json"])
+    _, official_pairs = LUMIR.read_lumir_json(paths["val_json"])
+    pairs = LUMIR.labelled_t1_pairs(official_pairs, paths["label_dir"])
+    if not pairs:
+        raise RuntimeError(f"LUMIR: no official validation pair has two T1 label maps in {paths['label_dir']}")
+    print(
+        f"LUMIR: {len(training)} training images; {len(pairs)}/{len(official_pairs)} validation pairs are T1 with labels"
+    )
+    return _build_loaders(
+        train_ds=LUMIR.LUMIRTrainDataset(paths["train_root"], training),
+        val_ds=LUMIR.LUMIRValDataset(paths["val_root"], pairs, paths["label_dir"]),
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        val_bs=val_bs,
+        drop_last_train=False,
+        drop_last_val=False,
+    )
+
+
 def loaders_baseline(args, ixi_flip_axes: tuple[int, ...] = (1, 2, 3)) -> tuple[DataLoader, DataLoader]:
     """Dispatch baseline data-loader factory by dataset name."""
     match args.ds:
@@ -131,6 +153,8 @@ def loaders_baseline(args, ixi_flip_axes: tuple[int, ...] = (1, 2, 3)) -> tuple[
                 drop_last_val=True,
                 flip_axes=ixi_flip_axes,
             )
+        case "LUMIR":
+            return lumir_loaders(args)
         case _:
             raise ValueError(f"Unsupported dataset = '{args.ds}' for baseline loaders.")
 

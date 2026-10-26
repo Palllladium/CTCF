@@ -14,12 +14,13 @@ import torch
 import torch.nn.functional as F
 from torch import optim
 
+from datasets.LUMIR import LUMIR_SHAPE
 from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
 from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
 from experiments.core.data_loaders import baseline_loader_builder
 from experiments.core.inference_runtime import load_checkpoint_state
-from experiments.core.model_adapters import get_model_adapter
+from experiments.core.model_adapters import get_model_adapter, volume_window_size
 from experiments.core.path_profiles import resolve_dataset_dirs
 from experiments.core.train_runtime import TrainContext, run_train
 from experiments.dispatch1.distill_teacher import DistillTeacher
@@ -109,18 +110,19 @@ class Runner:
         self.is_synth = args.ds == "SYNTH"
         self.adapter = get_model_adapter("ctcf")
 
-        synth_img_size = None
-        synth_dwin = None
+        img_size = None
         if self.is_synth:
-            synth_img_size = tuple(args.synth_vol_size)
-            synth_dwin = self._adapt_swin_windows(synth_img_size)
+            img_size = tuple(args.synth_vol_size)
+        elif args.ds == "LUMIR":
+            img_size = LUMIR_SHAPE
+        dwin_size = None if img_size is None else self._adapt_swin_windows(img_size)
 
         self.model = self.adapter.build(
             time_steps=args.time_steps,
             config_key=args.config,
             use_checkpoint=bool(args.use_checkpoint),
-            synth_img_size=synth_img_size,
-            synth_dwin=synth_dwin,
+            img_size=img_size,
+            dwin_size=dwin_size,
             **ctcf_overrides_from_args(args),
         ).to(device)
         if args.init_ckpt:
@@ -202,10 +204,8 @@ class Runner:
 
     @staticmethod
     def _adapt_swin_windows(img):
-        if any(v % 32 != 0 for v in img):
-            raise ValueError(f"synth_vol_size={img} must be divisible by 32.")
-        window_size = tuple(max(2, v // 32) for v in img)
-        print(f"Synth cfg: img_size={img}, window_size={window_size}, dwin_size={window_size}")
+        window_size = volume_window_size(img)
+        print(f"Volume cfg: img_size={img}, window_size={window_size}, dwin_size={window_size}")
         return window_size
 
     @torch.no_grad()
@@ -656,7 +656,7 @@ class Runner:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    add_common_args(p, include_synth=True)
+    add_common_args(p, include_synth=True, include_lumir=True)
     p.set_defaults(exp="CTCF")
     add_ctcf_train_args(p)
     return p.parse_args()

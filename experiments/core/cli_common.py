@@ -149,12 +149,17 @@ def add_common_args(
     p: argparse.ArgumentParser,
     include_synth: bool = False,
     mode: str = "train",
+    include_lumir: bool = False,
 ) -> argparse.ArgumentParser:
     """Add shared CLI args for train/infer experiment scripts."""
     if mode not in ("train", "infer"):
         raise ValueError(f"Unsupported mode='{mode}'. Expected 'train' or 'infer'.")
 
-    ds_choices = ["OASIS", "IXI", "SYNTH"] if include_synth else ["OASIS", "IXI"]
+    ds_choices = ["OASIS", "IXI"]
+    if include_synth:
+        ds_choices.append("SYNTH")
+    if include_lumir:
+        ds_choices.append("LUMIR")
     _add_io_args(p, ds_choices)
     _add_path_profile_args(p)
     if mode == "train":

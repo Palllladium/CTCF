@@ -1,13 +1,13 @@
-"""Materialize the DEPLOYED source-index pull map Psi as a displacement field, so the artifact-bound
-verifier (utils.cert_exact) certifies the map grid_sample actually applies, not only the canonical Phi.
+"""Materialize the source-index pull map Psi of the checkpoint-compatible sampler as a float32 displacement field.
 
-The checkpoint-compatible CTCF SpatialTransformer combines normalization by (N_j-1) with align_corners=False.
-The canonical certified map is Phi(x)=x+u(x); the effective sampler map is Psi_j = N_j/(N_j-1) * Phi_j - 1/2
-= A o Phi with A an orientation-preserving diagonal affine (identical transform to
-tools/analysis/field_audit.py:_materialize_ctcf_legacy_sampler). Since A preserves orientation,
-det D Psi = (prod_j N_j/(N_j-1)) det D Phi > 0 iff Phi is fold-free, so a Psi certificate at eps carries the
-same fold-free conclusion for the deployed coordinates. Psi has an AFFINE (not identity) boundary, so its
-report must NOT be run with --require-zero-boundary.
+The CTCF SpatialTransformer normalizes by (N_j-1) and samples with align_corners=False, so a stored canonical flow
+u is read at Psi_j = N_j/(N_j-1) * Phi_j - 1/2 = A o Phi, with Phi(x) = x + u(x) and A an orientation-preserving
+diagonal affine (the transform of tools/analysis/field_audit.py:_materialize_ctcf_legacy_sampler).
+utils.cert_exact on the output decides the cellwise Bernstein predicate for the trilinear interpolant of these
+float32 values. That is not a global homeomorphism of the deployed map: the materialized boundary equals A only up
+to float32 rounding, so the global statement rests on the zero-boundary Phi certificate and the exact affine A.
+Nor does it verify the coordinate arithmetic inside the grid_sample kernel. Psi has an approximately affine (not
+identity) boundary, so its report must NOT be run with --require-zero-boundary.
 """
 
 import argparse

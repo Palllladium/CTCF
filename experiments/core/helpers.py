@@ -16,13 +16,20 @@ from utils import (
 )
 
 
+def _dice_fixed_labels(pred: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
+    labels = torch.unique(true)
+    return dice_val_subset(pred, true, labels=labels[labels > 0].tolist())
+
+
 def build_val_dice_fn(args, ds_key: str):
-    """Pick the validation Dice function matching the dataset key."""
+    """Pick the validation Dice function matching the dataset key (LUMIR: the labels present in the fixed map)."""
     if ds_key == "SYNTH":
         num_labels = getattr(args, "synth_num_labels", 36)
         return lambda p, t: dice_val(p, t, num_labels)
     if ds_key == "IXI":
         return lambda p, t: dice_val_subset(p, t, labels=IXI_VOI_LABELS)
+    if ds_key == "LUMIR":
+        return _dice_fixed_labels
     return lambda p, t: dice_val_subset(p, t, labels=OASIS_VOI_LABELS)
 
 

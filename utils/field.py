@@ -987,13 +987,13 @@ def perturb_flow(flow: torch.Tensor, mode: str = "none", scale: float = 0.02) ->
 
 
 def certified_max_step(candidate_fn, eps: float = 0.0, max_bisect: int = 12) -> tuple[float, torch.Tensor]:
-    """Largest step t in [0,1] whose candidate field is trilinear-certified (tri_cert_bound >= eps), by
-    bisection. ``candidate_fn(t)`` builds the field for step t, and ``candidate_fn(0)`` must be feasible
-    (the pre-step flow). Returns (t, certified_flow). This is the heart of certified iterative refinement:
-    an L3 (or TTO) update d is clipped to the largest topologically-safe fraction of itself, so every
-    iterate stays fold-free (orientation-preserving) on the DEPLOYED warp — no post-hoc repair, no folds introduced. The
-    caller chooses the space by how it builds candidate_fn (velocity: integrate t*d then compose;
-    displacement: t*d added / t*integrated-d composed)."""
+    """Bisect for a step passing the floating-point trilinear Bernstein screen.
+
+    ``candidate_fn(0)`` must already be feasible; this is assumed, not checked. A largest feasible
+    step is approximated only when feasible steps form a prefix of [0,1]. The returned field is not
+    exact-certified, and this screen alone does not establish global injectivity or CUDA sampler
+    behaviour. Callers choose velocity or displacement space through ``candidate_fn``.
+    """
     with torch.no_grad():
         full = candidate_fn(1.0)
         if trilinear_cert_bound(full) >= eps:

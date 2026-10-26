@@ -7,6 +7,13 @@ import torch
 import torch.nn.functional as F
 
 
+def volume_window_size(img_size: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Swin/DCA window size of the CTCF cascade for a non-default volume shape divisible by 32."""
+    if any(v % 32 != 0 for v in img_size):
+        raise ValueError(f"img_size={img_size} must be divisible by 32.")
+    return tuple(max(2, v // 32) for v in img_size)
+
+
 def _apply_optional_overrides(cfg: Any, **overrides: Any) -> None:
     """Assign each override to cfg as an attribute, skipping entries whose value is None."""
     for name, value in overrides.items():
@@ -101,8 +108,8 @@ class CtcfAdapter(ModelAdapter):
         time_steps: int = 12,
         config_key: str = "CTCF-CascadeA",
         use_checkpoint: bool | None = None,
-        synth_img_size: tuple[int, int, int] | None = None,
-        synth_dwin: tuple[int, int, int] | None = None,
+        img_size: tuple[int, int, int] | None = None,
+        dwin_size: tuple[int, int, int] | None = None,
         l1_base_ch: int | None = None,
         l3_base_ch: int | None = None,
         l3_error_mode: str | None = None,
@@ -123,15 +130,14 @@ class CtcfAdapter(ModelAdapter):
         cfg = deepcopy(CONFIGS[config_key])
         cfg.time_steps = time_steps
 
-        if synth_img_size is not None:
-            d, h, w = synth_img_size
+        if img_size is not None:
+            d, h, w = img_size
             cfg.img_size = (d, h, w)
             cfg.window_size = (d // 32, h // 32, w // 32)
 
-        dwin_size = None if synth_dwin is None else tuple(synth_dwin)
         _apply_optional_overrides(
             cfg=cfg,
-            dwin_size=dwin_size,
+            dwin_size=None if dwin_size is None else tuple(dwin_size),
             use_checkpoint=use_checkpoint,
             level1_base_ch=l1_base_ch,
             level3_base_ch=l3_base_ch,

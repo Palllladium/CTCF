@@ -145,10 +145,12 @@ class CTCFCascadeA(nn.Module):
         flow_cur: torch.Tensor,
         st: SpatialTransformer,
     ) -> torch.Tensor:
-        """Certified line-search (inference-only): clip the L3 update to the largest trilinear-
-        diffeomorphic fraction of itself. 'vel' re-integrates t*delta per probe (each candidate a proper
-        SVF map); 'disp' integrates once and scales the increment (cheaper, cruder). Both are enforced
-        feasible by tri_cert_bound, so every iterate stays diffeomorphic on the deployed warp."""
+        """Screen an L3 update using the floating-point trilinear Bernstein bound (inference only).
+
+        'vel' re-integrates t*delta per probe; 'disp' integrates once and scales the increment.
+        The search assumes a feasible start and a feasible prefix of steps. It is not an exact
+        output certificate, a global injectivity proof, or a verification of the deployment sampler.
+        """
         if self.l3_svf and self.l3_ls_space == "vel":
 
             def candidate(t: float) -> torch.Tensor:
