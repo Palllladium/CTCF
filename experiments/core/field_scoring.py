@@ -64,12 +64,23 @@ def score(flow, case_id, seconds, x_seg, y_seg, eps, convention, extra=None) -> 
     return row
 
 
-def repair(flow) -> tuple[torch.Tensor, dict]:
+def repair(flow, fixed_mask=None, fixed_values=None) -> tuple[torch.Tensor, dict]:
     repaired, folds, iters = digital_project(
-        flow, eps=REPAIR["project_eps"], damp=REPAIR["damp"], max_iters=REPAIR["iters"]
+        flow,
+        eps=REPAIR["project_eps"],
+        damp=REPAIR["damp"],
+        max_iters=REPAIR["iters"],
+        fixed_mask=fixed_mask,
+        fixed_values=fixed_values,
     )
     repaired, report = trilinear_project(
-        repaired, eps=REPAIR["tri_eps"], damp=REPAIR["damp"], max_iters=REPAIR["iters"], subdiv_depth=0
+        repaired,
+        eps=REPAIR["tri_eps"],
+        damp=REPAIR["damp"],
+        max_iters=REPAIR["iters"],
+        subdiv_depth=0,
+        fixed_mask=fixed_mask,
+        fixed_values=fixed_values,
     )
     return repaired, {**digital_projection_columns(folds, iters), **trilinear_projection_columns(report)}
 
