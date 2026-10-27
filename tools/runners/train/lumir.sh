@@ -15,7 +15,8 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 : "${EXPECTED_GIT_HEAD:?Set EXPECTED_GIT_HEAD to the reviewed commit}"
-[ "$(git rev-parse HEAD)" = "$EXPECTED_GIT_HEAD" ] || { echo "[lumir] unexpected HEAD"; exit 1; }
+HEAD="$(git rev-parse HEAD)"
+[ "$HEAD" = "$EXPECTED_GIT_HEAD" ] || { echo "[lumir] unexpected HEAD"; exit 1; }
 case "${PAIRS:-}" in lumir24|lumir25) ;; *) echo "[lumir] set PAIRS=lumir24 or lumir25 explicitly"; exit 1 ;; esac
 git diff --quiet HEAD -- || { echo "[lumir] tracked files differ from HEAD: commit or restore them"; exit 1; }
 
@@ -27,6 +28,8 @@ export CUDA_VISIBLE_DEVICES="$GPU"
 CONFIG="${CONFIG:-CTCF-CascadeA-Mamba}"
 MODEL="${MODEL:-}"
 TRAIN="${TRAIN:-}"
+read -r -a model_args <<< "${MODEL//$'\n'/ }"
+read -r -a training_args <<< "${TRAIN//$'\n'/ }"
 : "${PRECISION:?Set PRECISION to fp16, bf16, fp32 or tf32}"
 case "$PRECISION" in fp16|bf16|fp32|tf32) ;; *) echo "[lumir] invalid PRECISION=$PRECISION"; exit 1 ;; esac
 STAGES="${STAGES:-ramp}"
@@ -34,14 +37,14 @@ case "$STAGES" in ramp|full) ;; *) echo "[lumir] STAGES must be ramp or full"; e
 BATCH_SIZE="${BATCH_SIZE:-1}"
 TIME_STEPS="${TIME_STEPS:-6}"
 case "$TIME_STEPS" in ''|*[!0-9]*) echo "[lumir] TIME_STEPS must be a non-negative integer"; exit 1 ;; esac
-for arg in $MODEL $TRAIN; do
+for arg in "${model_args[@]}" "${training_args[@]}"; do
     case "$arg" in --time_steps|--time_steps=*) echo "[lumir] use TIME_STEPS instead of --time_steps"; exit 1 ;; esac
     case "$arg" in --config|--config=*) echo "[lumir] use CONFIG instead of --config"; exit 1 ;; esac
     case "$arg" in --precision|--precision=*|--finetune|--finetune=*|--batch_size|--batch_size=*)
         echo "[lumir] use PRECISION, STAGES and BATCH_SIZE instead of overriding their CLI flags"; exit 1 ;;
     esac
 done
-for arg in $TRAIN; do
+for arg in "${training_args[@]}"; do
     case "$arg" in --l1_from_start|--l1_from_start=*) ;;
     --disable_l1|--disable_l1=*|--disable_l3|--disable_l3=*|--l1_*|--l2_*|--l3_*|--use_checkpoint|--use_checkpoint=*)
         echo "[lumir] put architecture overrides in MODEL so export uses the same configuration"; exit 1 ;;
@@ -73,53 +76,54 @@ if [ "$RESUME" = 1 ]; then
 elif [ -e "$RUN" ] || [ -e "results/$EXP" ] || [ -e "logs/$EXP" ]; then
     echo "[lumir] EXP already exists; choose another EXP or RESUME=1"; exit 1
 fi
-ATTEMPT="$RUN/attempts/${STAMP}_$$"
-
-mkdir -p "$ATTEMPT"
-recipe="$CONFIG|$MODEL|$TRAIN|$TIME_STEPS|$PRECISION|$STAGES|$BATCH_SIZE|$EPOCHS|$ITERS|$CTCF_DATA_DIR|$PAIRS"
+common_args=(--ds LUMIR --paths 3 --gpu 0 --config "$CONFIG" "${model_args[@]}" --time_steps "$TIME_STEPS" --precision "$PRECISION")
+train_args=("${common_args[@]}" --exp "$EXP" "${training_args[@]}" --max_epoch "$EPOCHS" --max_train_iters "$ITERS" \
+    --use_tb 0 --quiet 1 --batch_size "$BATCH_SIZE" "${stage_args[@]}")
+printf -v recipe '%q ' "CTCF_DATA_DIR=$CTCF_DATA_DIR" "${train_args[@]}" "PAIRS=$PAIRS"
 if [ "$RESUME" = 1 ]; then
     [ -f "$RUN/recipe.txt" ] && [ "$(cat "$RUN/recipe.txt")" = "$recipe" ] \
         || { echo "[lumir] resume recipe differs or is missing; start a new EXP for a changed recipe"; exit 1; }
 else
+    mkdir -p "$RUN"
     echo "$recipe" > "$RUN/recipe.txt"
 fi
-echo "$(date -u +%FT%TZ) HEAD $(git rev-parse HEAD) CONFIG=$CONFIG MODEL=$MODEL TRAIN=$TRAIN TIME_STEPS=$TIME_STEPS ITERS=$ITERS EPOCHS=$EPOCHS" \
-    > "$ATTEMPT/run_info.txt"
-echo "training=lumir24 coarse_monitor=lumir25 official_export=$PAIRS RESUME=$RESUME PRECISION=$PRECISION STAGES=$STAGES BATCH_SIZE=$BATCH_SIZE" | tee -a "$ATTEMPT/run_info.txt"
-CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider tools/analysis/tests/test_lumir.py tools/analysis/tests/test_precision.py > "$ATTEMPT/pre_tests.txt" 2>&1 \
-    || { echo "[lumir] unit tests failed: $ATTEMPT/pre_tests.txt"; exit 1; }
-
+ATTEMPT="$RUN/attempts/${STAMP}_$$"
+mkdir -p "$ATTEMPT/exit_codes"
+echo "$(date -u +%FT%TZ) HEAD=$HEAD GPU=$GPU PROFILE=${PROFILE:-0} RESUME=$RESUME" > "$ATTEMPT/run_info.txt"
+echo "$recipe" >> "$ATTEMPT/run_info.txt"
+CHILD=""
+required=(pretests train)
+[ "${PROFILE:-0}" = 1 ] || required+=(export)
+finish() {
+    local code=$?
+    trap - EXIT INT TERM
+    if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
+    if [ -d "logs/$EXP" ]; then cp -r "logs/$EXP" "$ATTEMPT/training_logs" || { [ "$code" != 0 ] || code=1; }; fi
+    "$PY" -m tools.analysis.run_artifacts package --run-root "$ATTEMPT" --prefix "results/exports/${EXP}__${STAMP}_$$" \
+        --exit-code "$code" --git-head "$HEAD" --label LUMIR --required-steps "${required[@]}" || { [ "$code" != 0 ] || code=1; }
+    exit "$code"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+step() {
+    local name=$1 code=0; shift
+    echo "[lumir] START $name: $ATTEMPT/$name.log"
+    PYTHONUNBUFFERED=1 "$@" > "$ATTEMPT/$name.log" 2>&1 & CHILD=$!
+    wait "$CHILD" || code=$?; CHILD=""
+    echo "$code" > "$ATTEMPT/exit_codes/$name.txt"
+    if [ "$code" = 0 ]; then echo "[lumir] PASS $name"; else echo "[lumir] ERROR $name (exit $code)"; fi
+    return "$code"
+}
+echo "[lumir] EXP=$EXP PID=$$ ATTEMPT=$ATTEMPT"
+step pretests env CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider tools/analysis/tests/test_lumir.py tools/analysis/tests/test_precision.py
 started=$SECONDS
-# shellcheck disable=SC2086
-"$PY" -m experiments.train_CTCF --ds LUMIR --paths 3 --gpu 0 --exp "$EXP" --config "$CONFIG" $MODEL $TRAIN \
-    --time_steps "$TIME_STEPS" "${resume_args[@]}" --max_epoch "$EPOCHS" --max_train_iters "$ITERS" --use_tb 0 --quiet 1 \
-    --precision "$PRECISION" --batch_size "$BATCH_SIZE" "${stage_args[@]}" \
-    > "$ATTEMPT/train.txt" 2>&1
+step train "$PY" -m experiments.train_CTCF "${train_args[@]}" "${resume_args[@]}"
 echo "wall_seconds=$((SECONDS - started)) includes=model_setup,training,validation,checkpoint_io" > "$ATTEMPT/train_timing.txt"
-cp -r "logs/$EXP" "$ATTEMPT/training_logs"
 if [ "${PROFILE:-0}" = 1 ]; then
-    grep "\[perf" "$ATTEMPT/train.txt" | tail -n 1
+    grep "\[perf" "$ATTEMPT/train.log" | tail -n 1
     cat "$ATTEMPT/train_timing.txt"
-    exit 0
+else
+    step export "$PY" -m experiments.export_lumir "${common_args[@]}" --ckpt "results/$EXP/ckpt/last.pth" \
+        --pairs "$PAIRS" --out "$ATTEMPT/export_$PAIRS" --name "$EXP"
 fi
-
-# shellcheck disable=SC2086
-"$PY" -m experiments.export_lumir --paths 3 --gpu 0 --config "$CONFIG" $MODEL --ckpt "results/$EXP/ckpt/last.pth" \
-    --time_steps "$TIME_STEPS" --pairs "$PAIRS" --out "$ATTEMPT/export_$PAIRS" --name "$EXP" \
-    --precision "$PRECISION" \
-    > "$ATTEMPT/export_$PAIRS.txt" 2>&1
-
-mkdir -p results/exports
-ARCHIVE="results/exports/${EXP}__${STAMP}_$$.zip"
-"$PY" - "$RUN" "$ARCHIVE" << 'EOF'
-import sys
-import zipfile
-from pathlib import Path
-
-run, archive = Path(sys.argv[1]), sys.argv[2]
-with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
-    for path in sorted(run.rglob("*")):
-        if path.is_file() and not path.name.endswith((".pth", ".pt", ".nii.gz", ".zip")):
-            z.write(path, Path(Path(archive).stem) / path.relative_to(run))
-EOF
-echo "[lumir] done: $ARCHIVE (manifests and logs; displacements stay in $RUN)"

@@ -26,6 +26,7 @@ def runner(tmp_path):
     certificate.mkdir(parents=True)
     (certificate.parent / "__init__.py").touch()
     (certificate / "__init__.py").touch()
+    shutil.copyfile(SCRIPT.parents[2] / "analysis/run_artifacts.py", certificate / "run_artifacts.py")
     (certificate / "certify_psi.py").write_text(
         "import argparse, os\nfrom pathlib import Path\n"
         "p=argparse.ArgumentParser(); p.add_argument('--root'); p.add_argument('--out'); a=p.parse_args()\n"
@@ -34,11 +35,14 @@ def runner(tmp_path):
         "raise SystemExit(1 if os.environ.get('FAIL_TASK') == 'certificate' else 0)\n"
     )
     (package / "profile.py").write_text(
-        """import argparse, json, os, time
+        """import argparse, json, os, subprocess, time
 from pathlib import Path
 p = argparse.ArgumentParser()
 for key in ('task', 'run', 'data-root', 'device', 'parent-checkpoint'): p.add_argument('--'+key)
 a = p.parse_args(); root = Path(a.run); root.mkdir(parents=True, exist_ok=True)
+if os.environ.get('STOP_TASK') == a.task:
+    subprocess.run([os.environ['RUNNER_TEST_BASH'], '-c', 'kill -TERM $(cat "$RUNNER_TEST_ROOT/runner.pid")'], check=True)
+    time.sleep(15)
 if a.task == 'prepare':
     config = {'data': a.data_root, 'width': os.environ.get('PROFILE_WIDTH', '4')}
     path = root/'config.json'
@@ -85,11 +89,14 @@ else:
         "GPUS": "2 3",
         "RUNNER_TEST_BIN": bin_dir.as_posix(),
         "RUNNER_TEST_SCRIPT": SCRIPT.as_posix(),
+        "RUNNER_TEST_BASH": Path(BASH).as_posix(),
     }
 
     def run(**updates):
         prefix = '$(cygpath -u "$RUNNER_TEST_BIN")' if os.name == "nt" else "$RUNNER_TEST_BIN"
-        command = f'export PATH="{prefix}:$PATH"; exec bash "$RUNNER_TEST_SCRIPT"'
+        command = (
+            f'export PATH="{prefix}:$PATH"; echo $$ > "$RUNNER_TEST_ROOT/runner.pid"; exec bash "$RUNNER_TEST_SCRIPT"'
+        )
         return subprocess.run(
             [BASH, "-c", command],
             cwd=tmp_path,
@@ -153,3 +160,15 @@ def test_certificate_failure_is_packaged_without_cancelling_gpu_tasks(runner):
     resumed = run()
     assert resumed.returncode == 0
     assert "SKIP a0" in resumed.stdout and "PASS certificate" in resumed.stdout
+
+
+@pytest.mark.parametrize("task", ("prepare", "a0"))
+def test_stop_during_cpu_or_gpu_work_keeps_partial_delivery(runner, task):
+    root, run = runner
+    stopped = run(STOP_TASK=task)
+    assert stopped.returncode == 143, stopped.stdout + stopped.stderr
+    archive = next((root / "results/exports").glob("*__PARTIAL.zip"))
+    with zipfile.ZipFile(archive) as handle:
+        manifest = json.loads(handle.read(archive.stem + "/package_manifest.json"))
+        assert manifest["status"] == "PARTIAL" and manifest["runner_exit_code"] == 143
+    assert not (root / "results/population/test" / f"{task}.done").exists()

@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import tempfile
+import zipfile
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -324,9 +325,64 @@ def finalize_run(args: argparse.Namespace) -> Path:
     return manifest_path
 
 
+def package_run(
+    run_root: Path, prefix: Path, exit_code: int, required_steps: list[str], git_head: str, label: str
+) -> str:
+    """Package compact diagnostics, including failed/interrupted runs, without weights or field payloads."""
+    codes = {path.stem: int(path.read_text().strip()) for path in (run_root / "exit_codes").glob("*.txt")}
+    complete = exit_code == 0 and all(codes.get(step) == 0 for step in required_steps)
+    status = "COMPLETE" if complete else "PARTIAL" if exit_code in (130, 143) else "FAILED"
+    archive = Path(f"{prefix}__{status}.zip")
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        run_root / "package_manifest.json",
+        {
+            "status": status,
+            "head": git_head,
+            "exit_codes": codes,
+            "runner_exit_code": exit_code,
+            "payload": "arrays, displacements and checkpoints retained on the server",
+        },
+    )
+    temporary = archive.with_suffix(".zip.tmp")
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as handle:
+            sums = []
+            for path in sorted(run_root.rglob("*")):
+                if not path.is_file() or path.suffix not in (".json", ".csv", ".txt", ".log", ".py", ".md"):
+                    continue
+                name = path.relative_to(run_root).as_posix()
+                digest = hashlib.sha256()
+                with path.open("rb") as source, handle.open(f"{archive.stem}/{name}", "w") as target:
+                    while chunk := source.read(8 * 1024 * 1024):
+                        target.write(chunk)
+                        digest.update(chunk)
+                sums.append(f"{digest.hexdigest()}  {name}")
+            handle.writestr(f"{archive.stem}/SHA256SUMS", "\n".join(sums) + "\n")
+        temporary.replace(archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    digest = sha256_file(archive)
+    sidecar = Path(str(archive) + ".sha256")
+    atomic_write_text(sidecar, f"{digest}  {archive.name}\n")
+    print(f"[{label} PACKAGE] {archive.resolve()}")
+    print(f"[{label} SIDECAR] {sidecar.resolve()}")
+    print(f"{digest}  {archive.name}")
+    print(f"[{label} HEAVY RETAINED] {run_root}")
+    return status
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Reusable manifests and validation for CTCF runs.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    package = subparsers.add_parser("package")
+    package.add_argument("--run-root", type=Path, required=True)
+    package.add_argument("--prefix", type=Path, required=True)
+    package.add_argument("--exit-code", type=int, required=True)
+    package.add_argument("--required-steps", nargs="+", required=True)
+    package.add_argument("--git-head", required=True)
+    package.add_argument("--label", default="RUN")
 
     dataset = subparsers.add_parser("dataset-manifest")
     dataset.add_argument("--paths-profile", type=int, required=True)
@@ -372,6 +428,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.command == "package":
+        status = package_run(args.run_root, args.prefix, args.exit_code, args.required_steps, args.git_head, args.label)
+        return 0 if status == "COMPLETE" else 1
     if args.command == "dataset-manifest":
         count = write_dataset_manifest(args.paths_profile, args.dataset_split, args.output)
         print(f"[DATASET MANIFEST] {args.output} ({count} rows)")

@@ -14,6 +14,7 @@ from tools.analysis.run_artifacts import (
     aggregate_summaries,
     classify_checkpoint_incompatibilities,
     finalize_run,
+    package_run,
     validate_result_directory,
     write_dataset_manifest,
     write_output_index,
@@ -21,6 +22,16 @@ from tools.analysis.run_artifacts import (
 
 
 class RunArtifactsTest(unittest.TestCase):
+    def test_zero_exit_does_not_complete_a_package_with_missing_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run"
+            (root / "exit_codes").mkdir(parents=True)
+            (root / "exit_codes/train.txt").write_text("0")
+            status = package_run(root, Path(tmp) / "exports/run", 0, ["train", "export"], "reviewed", "TEST")
+            self.assertEqual(status, "FAILED")
+            manifest = json.loads((root / "package_manifest.json").read_text())
+            self.assertEqual(manifest["exit_codes"], {"train": 0})
+
     def test_output_index_keeps_nested_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
