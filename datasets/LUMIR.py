@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import random
 from pathlib import Path
 
 import nibabel as nib
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DistributedSampler
 
 LUMIR_SHAPE = (160, 224, 192)
 LUMIR_INTENSITY_MAX = 255.0
@@ -74,15 +76,44 @@ class LUMIRTrainDataset(Dataset):
             raise RuntimeError("LUMIRTrainDataset requires at least 2 images.")
 
     def __getitem__(self, index):
-        partner = random.randrange(len(self.paths) - 1)
-        if partner >= index:
-            partner += 1
+        if isinstance(index, tuple):
+            index, partner = index
+        else:
+            partner = random.randrange(len(self.paths) - 1)
+            if partner >= index:
+                partner += 1
         x = load_lumir_volume(self.root / self.paths[index], self.shape) / LUMIR_INTENSITY_MAX
         y = load_lumir_volume(self.root / self.paths[partner], self.shape) / LUMIR_INTENSITY_MAX
         return torch.from_numpy(x[None]), torch.from_numpy(y[None])
 
     def __len__(self):
         return len(self.paths)
+
+
+class LUMIRPairSampler(DistributedSampler):
+    """One epoch's global pair stream, partitioned across ranks; independent of worker/rank RNG."""
+
+    def __init__(self, dataset, *, global_batch, updates, rank, world, seed):
+        super().__init__(dataset, num_replicas=world, rank=rank, seed=seed)
+        if len(dataset) < 2 or updates < 0 or global_batch <= 0 or global_batch % world:
+            raise ValueError("invalid global pair budget")
+        self.total_size = (updates or math.ceil(len(dataset) / global_batch)) * global_batch
+        self.num_samples = self.total_size // world
+        self.fingerprint = hashlib.sha256(
+            json.dumps(getattr(dataset, "paths", list(range(len(dataset))))).encode("utf-8")
+        ).hexdigest()
+
+    def __iter__(self):
+        seed = int(np.random.SeedSequence(self.seed, spawn_key=(0, self.epoch)).generate_state(1, dtype=np.uint64)[0])
+        generator = torch.Generator().manual_seed(seed)
+        count = len(self.dataset)
+        moving = []
+        while len(moving) < self.total_size:
+            moving.extend(torch.randperm(count, generator=generator).tolist())
+        moving = moving[: self.total_size]
+        fixed = torch.randint(count - 1, (self.total_size,), generator=generator).tolist()
+        pairs = [(m, f + (f >= m)) for m, f in zip(moving, fixed, strict=True)]
+        return iter(pairs[self.rank :: self.num_replicas])
 
 
 class LUMIRValDataset(Dataset):

@@ -10,6 +10,8 @@ dependencies:
   - ninja
   - numpy
   - scipy
+  - nibabel
+  - pytest
   - scikit-image
   - matplotlib
   - imageio

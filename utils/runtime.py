@@ -21,6 +21,7 @@ class Logger:
     _ECHO_PREFIXES = (
         "[epoch",
         "[perf",
+        "[throughput",
         ">>> ",
         "WARNING",
         "ABORT",

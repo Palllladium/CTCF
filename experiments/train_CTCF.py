@@ -11,6 +11,7 @@ import statistics
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import optim
 
@@ -19,6 +20,7 @@ from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
 from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
 from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.distributed import accumulation_steps
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter, volume_window_size
 from experiments.core.path_profiles import resolve_dataset_dirs
@@ -667,13 +669,34 @@ def main():
     if args.w_reg is None:
         args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
-    device = setup_device(gpu_id=args.gpu, seed=args.seed, deterministic=False)
-    configure_precision(args.precision, device)
-    runner = Runner(args, device)
-    if args.aux_calibrate:
-        runner.calibrate_aux(args.aux_calibrate)
-        return
-    run_train(args=args, runner=runner, build_loaders=build_loaders)
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    if (world > 1 or args.global_batch_size) and args.ds != "LUMIR":
+        raise ValueError("global batch/DDP is currently supported for the LUMIR training protocol")
+    if args.global_batch_size and (
+        args.anatomy_loss != "none"
+        or args.known_warp_every
+        or args.distill_teacher != "none"
+        or (args.ema_decay > 0 and args.ema_lambda > 0)
+    ):
+        raise ValueError(
+            "global-batch LUMIR uses the core CTCF losses; historical auxiliary pilot state is not resumable"
+        )
+    accumulation_steps(args, world)
+    device = setup_device(gpu_id=int(os.environ.get("LOCAL_RANK", args.gpu)), seed=args.seed, deterministic=False)
+    if world > 1:
+        dist.init_process_group("nccl", device_id=device)
+    try:
+        configure_precision(args.precision, device)
+        runner = Runner(args, device)
+        if args.aux_calibrate:
+            if world > 1:
+                raise ValueError("auxiliary calibration must run as a single process")
+            runner.calibrate_aux(args.aux_calibrate)
+            return
+        run_train(args=args, runner=runner, build_loaders=build_loaders)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

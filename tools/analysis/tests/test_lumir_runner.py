@@ -25,11 +25,18 @@ def dispatch(tmp_path):
     (artifacts.parent / "__init__.py").touch()
     (artifacts / "__init__.py").touch()
     shutil.copyfile(SCRIPT.parents[2] / "analysis/run_artifacts.py", artifacts / "run_artifacts.py")
+    (artifacts / "check_lumir.py").write_text(
+        "import json,sys,os\nfrom pathlib import Path\na=sys.argv[1:]\n"
+        "Path(a[a.index('--out')+1]).write_text(json.dumps({'args':a,'gpus':os.environ.get('CUDA_VISIBLE_DEVICES')}))\n"
+        "raise SystemExit(6 if os.environ.get('FAIL_STAGE') == 'preflight' else 0)\n"
+    )
     (package / "train_CTCF.py").write_text(
         "import sys,json,os,subprocess,time\nfrom pathlib import Path\na=sys.argv[1:]; exp=a[a.index('--exp')+1]\n"
         "logs=Path('logs')/exp; logs.mkdir(parents=True,exist_ok=True); (logs/'args.json').write_text(json.dumps(a))\n"
-        "ckpt=Path('results')/exp/'ckpt'; ckpt.mkdir(parents=True,exist_ok=True); (ckpt/'last.pth').write_text('weights')\n"
+        "if a[a.index('--save_ckpt')+1]=='1':\n"
+        "    ckpt=Path('results')/exp/'ckpt'; ckpt.mkdir(parents=True,exist_ok=True); (ckpt/'last.pth').write_text('weights')\n"
         "print('[perf 000] example')\n"
+        "print('[throughput] pairs_per_second=2.5')\n"
         "if os.environ.get('FAIL_STAGE') == 'interrupt':\n"
         "    subprocess.run([os.environ['TEST_BASH'], '-c', 'kill -TERM $(cat \"$TEST_ROOT/runner.pid\")'], check=True)\n"
         "    time.sleep(15)\n"
@@ -38,6 +45,7 @@ def dispatch(tmp_path):
     (package / "export_lumir.py").write_text(
         "import sys,json,os\nfrom pathlib import Path\na=sys.argv[1:]; out=Path(a[a.index('--out')+1]); out.mkdir(parents=True)\n"
         "(out/'args.json').write_text(json.dumps(a))\n"
+        "(out/'env.json').write_text(json.dumps({'gpus':os.environ.get('CUDA_VISIBLE_DEVICES')}))\n"
         "(out/'heavy.nii.gz').write_bytes(b'field'); (out/'submission.zip').write_bytes(b'payload')\n"
         "raise SystemExit(9 if os.environ.get('FAIL_STAGE') == 'export' else 0)\n"
     )
@@ -51,7 +59,10 @@ def dispatch(tmp_path):
     )
     (binary / "python_stub").write_text(
         '#!/usr/bin/env bash\nif [[ "$*" == "-m pytest "* ]]; then\n'
-        '[ "${FAIL_STAGE:-}" != pretests ] || exit 5\nexit 0\nfi\nexec "$REALPY" "$@"\n',
+        '[ "${FAIL_STAGE:-}" != pretests ] || exit 5\nexit 0\nfi\n'
+        'if [[ "$*" == "-m torch.distributed.run "* ]]; then\n'
+        'printf "%s\\n" "$@" > "$TEST_ROOT/torchrun_args.txt"\nshift 6\nexec "$REALPY" -m "$@"\nfi\n'
+        'exec "$REALPY" "$@"\n',
         newline="\n",
     )
     for path in binary.iterdir():
@@ -66,6 +77,9 @@ def dispatch(tmp_path):
         PYTHONPATH=tmp_path.as_posix(),
         EXPECTED_GIT_HEAD="reviewed",
         PRECISION="bf16",
+        GLOBAL_BATCH="1",
+        ITERS="3",
+        EPOCHS="2",
         PAIRS="lumir25",
         EXP="test",
     )
@@ -93,6 +107,11 @@ def test_profile_activates_selected_configured_stages_and_preserves_precision(di
     assert args[args.index("--config") + 1] == config
     assert args[args.index("--precision") + 1] == "bf16"
     assert args[args.index("--finetune") + 1] == "1"
+    assert args[args.index("--max_train_iters") + 1] == "205"
+    assert args[args.index("--perf_warmup_updates") + 1] == "5"
+    assert args[args.index("--save_ckpt") + 1] == "0"
+    assert not list((root / "results").rglob("*.pth"))
+    assert "[throughput] pairs_per_second=2.5" in result.stdout
     assert "--l3_svf" not in args
 
 
@@ -125,7 +144,9 @@ def test_training_only_architecture_override_is_rejected_before_work_starts(disp
     assert not (root / "logs").exists()
 
 
-@pytest.mark.parametrize("stage,code", (("pretests", 5), ("train", 7), ("export", 9), ("interrupt", 143), ("", 0)))
+@pytest.mark.parametrize(
+    "stage,code", (("pretests", 5), ("preflight", 6), ("train", 7), ("export", 9), ("interrupt", 143), ("", 0))
+)
 def test_delivery_on_success_failure_and_stop(dispatch, stage, code):
     root, run = dispatch
     result = run(FAIL_STAGE=stage)
@@ -143,3 +164,40 @@ def test_delivery_on_success_failure_and_stop(dispatch, stage, code):
         for line in handle.read(prefix + "SHA256SUMS").decode().splitlines():
             digest, name = line.split("  ", 1)
             assert hashlib.sha256(handle.read(prefix + name)).hexdigest() == digest
+
+
+def test_ddp_uses_selected_devices_and_exports_on_only_one(dispatch):
+    root, run = dispatch
+    result = run(GPUS="2,3", GLOBAL_BATCH="4")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--nproc-per-node=2" in (root / "torchrun_args.txt").read_text()
+    args = json.loads((root / "logs/test/args.json").read_text())
+    assert args[args.index("--global_batch_size") + 1] == "4"
+    preflight = json.loads(next((root / "results/lumir").rglob("preflight.json")).read_text())
+    assert preflight["gpus"] == "2,3"
+    exported = json.loads(next((root / "results/lumir").rglob("export_lumir25/env.json")).read_text())
+    assert exported["gpus"] == "2"
+
+
+def test_invalid_global_batch_is_rejected_before_work(dispatch):
+    root, run = dispatch
+    result = run(GPUS="0 1 2", GLOBAL_BATCH="4")
+    assert result.returncode != 0 and "divisible" in result.stdout
+    assert not (root / "logs").exists()
+
+
+def test_full_training_requires_an_explicit_update_budget(dispatch):
+    root, run = dispatch
+    result = run(ITERS="")
+    assert result.returncode != 0 and "Set ITERS" in result.stderr
+    assert not (root / "logs").exists()
+
+
+def test_skipped_pretests_are_not_reported_as_passed(dispatch):
+    root, run = dispatch
+    result = run(PRETESTS="0", FAIL_STAGE="pretests")
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = json.loads(next((root / "results/lumir").rglob("package_manifest.json")).read_text())
+    assert manifest["status"] == "COMPLETE" and "pretests" not in manifest["exit_codes"]
+    assert "SKIPPED pretests" in result.stdout
+    assert "SKIPPED" in next((root / "results/lumir").rglob("pretests.log")).read_text()

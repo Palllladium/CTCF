@@ -191,3 +191,34 @@ def test_saved_displacement_reads_back_in_the_evaluator_layout(tmp_path):
     np.testing.assert_array_equal(loaded.affine, np.eye(4))
     with pytest.raises(ValueError):
         save_displacement(tmp_path / "bad.nii.gz", displacement.transpose(3, 0, 1, 2))
+
+
+def test_readiness_checks_complete_coarse_pairs_and_grids(tmp_path, monkeypatch):
+    from tools.analysis import check_lumir
+
+    training = [f"./imagesTr/LUMIRMRI_000{i}_0000.nii.gz" for i in range(2)]
+    pairs = [(VAL.format("3455_0000"), VAL.format("3454_0000"))]
+    _write_json(tmp_path / "train.json", training, [])
+    _write_json(tmp_path / "val.json", training, pairs)
+    sample = np.arange(np.prod(SHAPE), dtype=np.float32).reshape(SHAPE)
+    for name in training + list(pairs[0]):
+        _write(tmp_path / name, sample)
+    for name in pairs[0]:
+        _write(tmp_path / "labels" / name.split("/")[-1], np.ones(SHAPE))
+    paths = dict(
+        train_root=tmp_path,
+        train_json=tmp_path / "train.json",
+        val_root=tmp_path,
+        val_json=tmp_path / "val.json",
+        label_dir=tmp_path / "labels",
+    )
+    monkeypatch.setattr(check_lumir, "LUMIR_SHAPE", SHAPE)
+    report = check_lumir.check_data(paths, "lumir25", expected_coarse_pairs=1)
+    assert report["training_images"] == 2 and report["coarse_validation_pairs"] == 1
+    label = next(paths["label_dir"].iterdir())
+    _write(label, np.ones(SHAPE), affine=np.diag([2, 1, 1, 1]))
+    with pytest.raises(ValueError, match="grid differs"):
+        check_lumir.check_data(paths, "lumir25", expected_coarse_pairs=1)
+    label.unlink()
+    with pytest.raises(ValueError, match="coarse-labelled"):
+        check_lumir.check_data(paths, "lumir25", expected_coarse_pairs=1)

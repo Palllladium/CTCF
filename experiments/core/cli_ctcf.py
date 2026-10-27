@@ -41,6 +41,19 @@ CTCF_OVERRIDE_KEYS = (
 
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     add_precision_arg(p)
+    p.add_argument(
+        "--global_batch_size",
+        type=int,
+        default=0,
+        help="LUMIR global pairs per optimizer update, including accumulation; required with torchrun. "
+        "Positive values make max_train_iters the update budget per epoch (0: one padded full pass).",
+    )
+    p.add_argument(
+        "--perf_warmup_updates",
+        type=int,
+        default=0,
+        help="Exclude this many initial updates per epoch from synchronized throughput timing.",
+    )
     add_ctcf_model_args(p)
     add_ctcf_loss_args(p)
     add_ctcf_schedule_args(p)

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import nullcontext
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 
 from experiments.core.cli_common import add_common_args
@@ -14,6 +16,15 @@ from experiments.core.data_loaders import (
     ixi_loaders,
     loaders_baseline,
     oasis_loaders,
+)
+from experiments.core.distributed import (
+    accumulation_steps,
+    finite_on_all,
+    reduce_epoch,
+    restore_training_state,
+    training_objective,
+    training_state,
+    world_info,
 )
 from experiments.core.helpers import (
     build_val_dice_fn,
@@ -110,9 +121,13 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         raise RuntimeError("CUDA is required for training.")
 
     device = runner.device
+    rank, world = world_info()
+    accumulation = accumulation_steps(args, world)
+    global_batch = getattr(args, "global_batch_size", 0)
     experiment_name = args.exp or "EXP"
     paths = make_exp_dirs(experiment_name)
-    attach_stdout_logger(paths.log_dir, quiet=bool(args.quiet))
+    log_dir = paths.log_dir if rank == 0 else os.path.join(paths.log_dir, f"rank_{rank}")
+    attach_stdout_logger(log_dir, quiet=bool(args.quiet) or rank != 0)
 
     save_ckpt_enabled = bool(args.save_ckpt)
     use_tb = bool(args.use_tb)
@@ -130,36 +145,58 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         configure_precision(precision, device)
     scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
     print(f">>> precision={precision} scaler={scaler.is_enabled()}")
-    train_total = len(train_loader) if max_train_iters <= 0 else min(len(train_loader), max_train_iters)
+    train_total = len(train_loader) // accumulation
+    if not global_batch and max_train_iters > 0:
+        train_total = min(train_total, max_train_iters)
+    if not train_total:
+        raise ValueError("training loader does not contain a full optimizer update")
+    warmup_updates = getattr(args, "perf_warmup_updates", 0)
+    if not 0 <= warmup_updates < train_total:
+        raise ValueError("perf_warmup_updates must leave at least one measured update")
+    print(
+        f">>> world_size={world} micro_batch={args.batch_size} global_batch={global_batch or args.batch_size} "
+        f"accumulation={accumulation} updates_per_epoch={train_total}"
+    )
 
     ds_key = args.ds.upper()
     jac_name = "j<=0%"
     jac_tb_tag = "val/J<=0%"
     val_dice_fn = build_val_dice_fn(args, ds_key)
 
-    epoch_start, best_dsc = resume_from_ckpt(
+    epoch_start, best_dsc, resumed_training = resume_from_ckpt(
         args,
         runner,
         scaler,
         device,
         best_dsc_init=-1.0,
     )
-    metrics_journal = prepare_metrics_csv(
-        os.path.join(paths.log_dir, "metrics.csv"),
-        experiment=experiment_name,
-        dataset=ds_key,
-        epoch_start=epoch_start,
+    objective = training_objective(runner)
+    restore_training_state(resumed_training, args, device, epoch_start, train_loader.sampler)
+    metrics_journal = (
+        prepare_metrics_csv(
+            os.path.join(paths.log_dir, "metrics.csv"),
+            experiment=experiment_name,
+            dataset=ds_key,
+            epoch_start=epoch_start,
+        )
+        if rank == 0
+        else None
     )
-    writer = SummaryWriter(log_dir=paths.log_dir) if use_tb else None
+    writer = SummaryWriter(log_dir=paths.log_dir) if use_tb and rank == 0 else None
     print_experiment_header(args, ds_key)
 
-    nan_streak_limit = 3
+    nonfinite_streak_limit = 3
     zero_dice_streak_limit = 3
     nan_streak = 0
     zero_dice_streak = 0
+    amp_skip_streak = resumed_training.get("amp_skip_streak", 0)
 
     for epoch in range(epoch_start, args.max_epoch):
         runner.model.train()
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+        if world > 1:
+            dist.barrier()
         t0 = perf_epoch_start()
 
         lr_now = select_lr_policy(
@@ -175,31 +212,47 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         meters: dict[str, AverageMeter] = {}
         iter_time_sum = 0.0
         train_iters_done = 0
+        optimizer_updates = 0
         print(f"Training Starts (epoch {epoch:03d})")
 
-        for it, batch in enumerate(train_loader, start=1):
-            if max_train_iters > 0 and it > max_train_iters:
-                break
-
+        batches = iter(train_loader)
+        measured_start = None
+        for it in range(1, train_total + 1):
+            if it == warmup_updates + 1:
+                torch.cuda.synchronize(device)
+                if world > 1 and warmup_updates:
+                    dist.barrier()
+                measured_start = time.perf_counter()
             t_it = time.perf_counter()
             runner.optimizer.zero_grad(set_to_none=True)
-            with precision_autocast(precision, device):
-                loss, logs = runner.train_step(batch, epoch)
-
-            if not torch.isfinite(loss):
-                nan_streak += 1
-                print(
-                    f"WARNING: non-finite loss at epoch {epoch} iter {it} (streak {nan_streak}/{nan_streak_limit})",
-                )
-                if nan_streak >= nan_streak_limit:
-                    raise RuntimeError(
-                        f"ABORT: {nan_streak_limit} consecutive non-finite losses. Check model/hyperparams.",
-                    )
-                runner.optimizer.zero_grad(set_to_none=True)
+            micro_logs = []
+            bad_loss = False
+            for micro in range(accumulation):
+                batch = next(batches)
+                sync = objective.no_sync() if world > 1 and micro + 1 < accumulation else nullcontext()
+                with sync:
+                    with precision_autocast(precision, device):
+                        loss, logs = objective(batch, epoch)
+                    if not finite_on_all(loss):
+                        if global_batch or world > 1:
+                            raise FloatingPointError(
+                                f"non-finite loss: seed={args.seed} epoch={epoch} update={it} "
+                                f"rank={rank} local_loss={float(loss.detach())}; "
+                                "GradScaler cannot repair a non-finite forward pass"
+                            )
+                        nan_streak += 1
+                        print(
+                            f"WARNING: non-finite loss at epoch {epoch} iter {it} (streak {nan_streak}/{nonfinite_streak_limit})"
+                        )
+                        if nan_streak >= nonfinite_streak_limit:
+                            raise RuntimeError(f"ABORT: {nonfinite_streak_limit} consecutive non-finite losses")
+                        bad_loss = True
+                        break
+                    nan_streak = 0
+                    scaler.scale(loss / accumulation).backward()
+                    micro_logs.append(logs or {})
+            if bad_loss:
                 continue
-            nan_streak = 0
-
-            scaler.scale(loss).backward()
             if precision != "fp16":
                 # The infinite threshold checks finiteness without clipping finite gradients.
                 torch.nn.utils.clip_grad_norm_(
@@ -211,47 +264,86 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
             scale_before_step = scaler.get_scale()
             scaler.step(runner.optimizer)
             scaler.update()
-            logs = dict(logs or {}, amp_skipped=float(scaler.get_scale() < scale_before_step))
-
-            if logs:
+            skipped = scaler.get_scale() < scale_before_step
+            optimizer_updates += int(not skipped)
+            amp_skip_streak = amp_skip_streak + 1 if skipped else 0
+            if skipped and (global_batch or world > 1):
+                if rank == 0:
+                    print(
+                        f"WARNING: FP16 optimizer update skipped: seed={args.seed} epoch={epoch} update={it} "
+                        f"scale={scale_before_step:g}->{scaler.get_scale():g} "
+                        f"consecutive={amp_skip_streak}/{nonfinite_streak_limit}",
+                        flush=True,
+                    )
+                if amp_skip_streak >= nonfinite_streak_limit:
+                    raise FloatingPointError(
+                        f"{nonfinite_streak_limit} consecutive FP16 updates skipped for nonfinite gradients; "
+                        "diagnose the failing update before resuming"
+                    )
+            for logs in micro_logs:
                 for k, v in logs.items():
                     meters.setdefault(k, AverageMeter()).update(float(v), 1)
+            meters.setdefault("amp_skipped", AverageMeter()).update(float(skipped))
 
             iter_time_sum += time.perf_counter() - t_it
             train_iters_done += 1
 
-            if it % 10 == 0 and meters:
+            if rank == 0 and it % 10 == 0 and meters:
                 print(format_iter_log(meters, it, train_total, lr_now))
 
+        torch.cuda.synchronize(device)
+        perf, measured_wall, allocated = reduce_epoch(
+            meters,
+            perf_epoch_end(t0, iters=train_iters_done, iter_time_sum=iter_time_sum),
+            device,
+            time.perf_counter() - measured_start,
+        )
+        if global_batch:
+            for name, value in (
+                ("global_batch_size", global_batch),
+                ("world_size", world),
+                ("accumulation_steps", accumulation),
+                ("pairs_per_epoch", train_iters_done * global_batch),
+                ("optimizer_updates", optimizer_updates),
+                ("measured_updates", train_total - warmup_updates),
+                ("measured_wall_seconds", measured_wall),
+                ("measured_pairs_per_second", (train_total - warmup_updates) * global_batch / measured_wall),
+                ("peak_allocated_gib", allocated),
+            ):
+                meters.setdefault(name, AverageMeter()).update(value)
+            if rank == 0:
+                print(
+                    f"[throughput] measured_updates={train_total - warmup_updates} "
+                    f"pairs_per_second={(train_total - warmup_updates) * global_batch / measured_wall:.3f} "
+                    f"peak_allocated_gib={allocated:.3f}"
+                )
         if writer is not None:
             for k, m in meters.items():
                 writer.add_scalar(f"Loss/train_{k}", m.avg, epoch)
-
-        perf = perf_epoch_end(t0, iters=train_iters_done, iter_time_sum=iter_time_sum)
-        if writer is not None:
             _log_perf_scalars(writer, perf, epoch)
 
         runner.model.eval()
         need_vis = writer is not None and args.tb_images_every and epoch % args.tb_images_every == 0
         with torch.no_grad():
-            val_res = validate(
-                model=runner.model,
-                val_loader=val_loader,
-                device=device,
-                forward_flow_fn=runner.forward_flow,
-                dice_fn=val_dice_fn,
-                register_model_cls=RegisterModel,
-                mk_grid_img_fn=mk_grid_img if need_vis else None,
-                grid_step=8,
-                line_thickness=1,
-                max_batches=max_val_batches,
-                ds=args.ds,
-            )
-
-        dsc = val_res.dsc
-        jacp = val_res.jac_nonpos_percent
-        ndvp = val_res.ndv_percent
-        sdlogj = val_res.sdlogj
+            val_res = None
+            if rank == 0:
+                val_res = validate(
+                    model=runner.model,
+                    val_loader=val_loader,
+                    device=device,
+                    forward_flow_fn=runner.forward_flow,
+                    dice_fn=val_dice_fn,
+                    register_model_cls=RegisterModel,
+                    mk_grid_img_fn=mk_grid_img if need_vis else None,
+                    grid_step=8,
+                    line_thickness=1,
+                    max_batches=max_val_batches,
+                    ds=args.ds,
+                )
+        values = [(val_res.dsc, val_res.jac_nonpos_percent, val_res.ndv_percent, val_res.sdlogj) if rank == 0 else None]
+        if world > 1:
+            dist.broadcast_object_list(values, src=0)
+        dsc, jacp, ndvp, sdlogj = values[0]
 
         if dsc < 1e-6:
             zero_dice_streak += 1
@@ -276,6 +368,11 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         if is_best:
             best_dsc = dsc
 
+        saved_training = training_state(args, device, train_loader.sampler) if save_ckpt_enabled else None
+        if saved_training is not None:
+            saved_training["amp_skip_streak"] = amp_skip_streak
+        if rank != 0:
+            continue
         append_epoch_metrics(
             metrics_journal,
             experiment=experiment_name,
@@ -302,6 +399,7 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
             "best_dsc": best_dsc,
             "scaler": scaler.state_dict(),
             "precision": precision,
+            "training": saved_training,
         }
         if save_ckpt_enabled:
             save_ckpt(state, ckpt_dir, is_best)

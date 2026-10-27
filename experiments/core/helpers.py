@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -39,10 +39,10 @@ def resume_from_ckpt(
     scaler: torch.amp.GradScaler,
     device: torch.device,
     best_dsc_init: float,
-) -> tuple[int, float]:
-    """Load resume checkpoint into runner + scaler; return (epoch_start, best_dsc)."""
+) -> tuple[int, float, dict]:
+    """Load model/optimizer/scaler; return epoch, best Dice and the checkpoint's training state."""
     if not args.resume:
-        return 0, best_dsc_init
+        return 0, best_dsc_init, {}
 
     ckpt = load_checkpoint_if_exists(
         args.resume,
@@ -51,7 +51,7 @@ def resume_from_ckpt(
         map_location=device,
     )
     if ckpt is None:
-        return 0, best_dsc_init
+        raise FileNotFoundError(f"resume checkpoint is missing: {args.resume}")
 
     if hasattr(args, "precision") and ckpt.get("precision", "fp16") != args.precision:
         raise ValueError("resume precision differs from the checkpoint; use --init_ckpt for a new experiment")
@@ -61,7 +61,7 @@ def resume_from_ckpt(
     if ckpt.get("scaler"):
         scaler.load_state_dict(ckpt["scaler"])
     print(f">>> Resumed from {args.resume} @ epoch {epoch_start}, best={best_dsc:.4f}")
-    return epoch_start, best_dsc
+    return epoch_start, best_dsc, ckpt.get("training", {})
 
 
 def select_lr_policy(runner, optimizer, epoch: int, max_epoch: int, init_lr: float) -> float:
@@ -73,6 +73,11 @@ def select_lr_policy(runner, optimizer, epoch: int, max_epoch: int, init_lr: flo
 
 def save_ckpt(state: dict[str, Any], ckpt_dir: str, is_best: bool) -> None:
     """Persist `state` as last.pth and (if `is_best`) best.pth."""
-    torch.save(state, os.path.join(ckpt_dir, "last.pth"))
-    if is_best:
-        torch.save(state, os.path.join(ckpt_dir, "best.pth"))
+    for name in (["best.pth"] if is_best else []) + ["last.pth"]:
+        destination = Path(ckpt_dir) / name
+        temporary = destination.with_suffix(".pth.tmp")
+        try:
+            torch.save(state, temporary)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)

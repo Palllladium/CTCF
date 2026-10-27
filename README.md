@@ -259,6 +259,133 @@ Rounds:
 | `--l3_error_mode` | ncc | Error map: `absdiff`, `gradmag`, or `ncc` |
 | `--time_steps` | 6 | L2 integration steps |
 
+## LUMIR and single-node DDP
+
+LUMIR uses the existing `experiments.train_CTCF` / `experiments.core.train_runtime` training loop.
+The CLI accepts all CTCF presets and explicit `fp16`, `bf16`, `fp32`, `tf32` policies. This does not establish
+native CUDA/DDP compatibility of every backbone; the selected full model must pass the node profile. DDP wraps the entire
+bidirectional objective, so its two model forwards share one reducer. Dynamic cascade stages use
+`find_unused_parameters=True`; enabled activation checkpointing uses the non-reentrant implementation.
+There is no separate distributed trainer. The global-batch path currently covers the core LUMIR recipe;
+historical auxiliary pilot objectives with extra training state are rejected before training.
+
+Use the official [LUMIR 2024](https://github.com/JHU-MedImage-Reg/LUMIR_L2R) training data and
+[LUMIR 2025](https://github.com/JHU-MedImage-Reg/LUMIR25_L2R25) public validation data/coarse labels.
+The latter are a local monitor; the organizer's fine-label score is a separate evaluation.
+The training and validation lists are checked for overlap. Labels are not used by the training loader.
+
+### Prepare the node and data
+
+Wait for existing runs to finish before updating their source checkout or Python environment.
+Keep the node's working PyTorch/CUDA/Mamba environment and install the additional dependencies through its
+interpreter. For a fresh environment, `environment.yml` supplies the Python dependencies; a CUDA-enabled
+PyTorch and the matching native Mamba/selective-scan extension are needed for Mamba presets. Follow the
+[Mamba installation instructions](https://github.com/state-spaces/mamba#installation) for that CUDA build;
+recent Mamba packages require an explicit CUDA-build opt-in. The preflight imports `selective_scan_cuda`.
+
+```bash
+cd /data/mooncake/P/CTCF
+PY=/data/mooncake/P/envs/ctcf/bin/python
+"$PY" -m pip install nibabel scipy pytest
+```
+
+Download the data on a workstation, arrange the layout below and transfer the `LUMIR/` directory through
+Yandex Disk to `/data/mooncake/P/LUMIR` on the node. No repository downloader is required.
+The five resources linked by the official dataset pages are:
+
+- [2024 training/validation images](https://drive.google.com/file/d/1PTHAX9hZX7HBXXUGVvI1ar1LUf4aVbq9/view)
+  and [2024 dataset JSON](https://drive.google.com/file/d/1b0hyH7ggjCysJG-VGvo38XVE8bFVRMxb/view).
+- [2025 validation images](https://drive.google.com/file/d/1Zsgt03tvOe9SGMo85d1fM_wZpRkSDLVv/view),
+  [coarse labels](https://drive.google.com/file/d/1c1gY-2c43uiEt599yha5FszdfZLcUZxa/view)
+  and [2025 dataset JSON](https://drive.google.com/file/d/164Flc1C6oufONGimvpKlrNtq5t3obXEo/view).
+
+Keep the original image filenames and JSON contents. Remove only extra archive nesting; the JSON paths define
+which 2024 images belong in `imagesTr` and `imagesVal`. If images are supplied together, sort them by those
+lists before transfer. Give the final transfer archive a SHA-256 checksum and verify it on the node before extraction.
+
+Expected layout with `CTCF_DATA_DIR=/data/mooncake/P`:
+
+```text
+LUMIR/imagesTr/*.nii.gz
+LUMIR/imagesVal/*.nii.gz
+LUMIR/LUMIR_dataset.json
+LUMIR/LUMIR25/imagesVal/*.nii.gz
+LUMIR/LUMIR25/simplelabelsVal/*.nii.gz
+LUMIR/LUMIR25/LUMIR25_dataset.json
+```
+
+The runner checks required image headers, label/image grids, the complete 18 coarse-labelled T1 monitor pairs,
+one full training image, selected CUDA devices, BF16 support when selected, and NCCL/native Mamba availability.
+It records dataset-JSON hashes, software versions, device properties, GPU state and topology.
+The check is preparation for a full-volume profile, not a throughput or accuracy result.
+
+### Profile before selecting a training budget
+
+Update the source checkout once its existing runs have finished. Replace `<reviewed-full-sha>` below with the
+reviewed commit. This example profiles Mamba NoSVF on four GPUs; the numerical policy is an explicit example,
+not an automatically selected final recipe.
+
+```bash
+LOG="/tmp/lumir_profile_$(date -u +%Y%m%dT%H%M%SZ).log"
+EXPECTED_GIT_HEAD="<reviewed-full-sha>" GPUS="0 1 2 3" GLOBAL_BATCH=8 BATCH_SIZE=1 \
+CONFIG=CTCF-CascadeA-Mamba MODEL="--l3_svf 0" PRECISION=bf16 PAIRS=lumir25 \
+PROFILE=1 PROFILE_UPDATES=20 PERF_WARMUP_UPDATES=5 \
+nohup bash tools/runners/train/lumir.sh > "$LOG" 2>&1 &
+echo "PID=$! LOG=$LOG"
+tail -f "$LOG"
+```
+
+The profile trains 5 warm-up plus 20 measured updates, with every configured cascade stage active.
+Checkpoint writes are disabled for profiling; full training still saves `best.pth` and `last.pth`.
+It measures synchronized training throughput separately from validation and checkpoint IO. Metadata in
+`metrics.csv` includes the measured pair rate, global batch, accumulation, accepted optimizer updates and
+peak allocated memory; the existing peak field is maximum reserved memory per GPU. Rank maxima are used
+for elapsed time and memory. Compare 1/2/4/8 GPUs at the same global batch, microbatch, precision and
+update count; for global batch 8 and microbatch 1 the accumulation factors are 8/4/2/1.
+This controls the pair budget, not every floating-point operation or stochastic trajectory. BatchNorm keeps
+standard DDP rank-zero buffer behavior; it is not silently converted into SyncBatchNorm.
+This is a scaling benchmark, not a test of final registration quality. At the same pair exposure, global batch 8
+has eight times fewer attempted Adam updates than batch 1; keeping LR unchanged is not evidence of equal quality.
+Before the full budget, compare short learning curves at the candidate batch sizes; do not scale LR automatically.
+
+### Training, continuation and output
+
+For training, omit `PROFILE` and supply the agreed `EPOCHS` and `ITERS` explicitly. `ITERS` counts attempted
+optimizer updates per epoch; each consumes `GLOBAL_BATCH` pairs, and each pair is evaluated in both directions.
+Positive budgets repeat/shuffle the training list as needed. `ITERS=0` visits every moving image and pads to a
+whole global batch. FP16 scaler skips are logged and accepted update counts are recorded. The total pair
+exposure is `EPOCHS * ITERS * GLOBAL_BATCH` for a positive budget, so GPU count alone cannot increase it.
+`STAGES=ramp|full` selects the schedule; `MODEL` holds shared training/export architecture flags.
+`NUM_WORKERS` is workers per rank (default 2). All these values are recorded in the run recipe.
+
+The global-batch path stops all ranks at the first NaN/Inf loss in every precision: loss scaling cannot repair
+a nonfinite forward pass. With a finite loss, FP16 GradScaler may skip a nonfinite-gradient update and reduce
+its scale. Each skip reports seed/epoch/update/scale; the third consecutive skip aborts for diagnosis.
+Successful updates reset that streak, which is also saved for resume. BF16/FP32/TF32 nonfinite gradients abort
+immediately. No automatic precision switch or replacement of NaNs is performed. Skipped FP16 batches are not
+retried or counted as accepted optimizer updates. Repeated resume is not a repair for a reproducible failure.
+
+`EXP=<original-name> RESUME=1` restores model, optimizer, scaler and per-rank Python/NumPy/Torch/CUDA RNG
+at the last completed epoch. Checkpoint writes are atomic. At the same world size, saved RNG streams resume;
+with a different GPU count, the same global pair stream/budget is retained, rank RNG streams restart and the
+log explicitly disclaims bitwise continuation. Physical GPU IDs may change. A changed global batch, seed or
+epoch update budget requires a new experiment. `GLOBAL_BATCH` must be divisible by `BATCH_SIZE * number_of_GPUs`.
+
+The runner prints its PID and attempt directory. Follow the outer log and its `train.log`, plus
+`logs/<EXP>/metrics.csv`. `kill -TERM <runner-PID>` stops the training launcher/workers and packages the partial
+attempt; resume with the same recipe. `Ctrl+C` in `tail -f` only closes the log viewer.
+
+Each attempt produces a compact `COMPLETE`, `FAILED` or `PARTIAL` ZIP plus `.zip.sha256` in `results/exports`.
+Return those two files and the outer log. Full arrays and checkpoints stay on the node. A successful profile
+does not launch full training. A completed training exports the selected official `PAIRS=lumir24|lumir25`
+from `last.pth` on one GPU; the submission ZIP remains at
+`results/lumir/<EXP>/attempts/<attempt>/export_<PAIRS>/<EXP>.zip` and is excluded from the compact report.
+Upload to the organizer is a separate action. The exporter preserves the checkpoint-compatible sampling
+convention; training/export use the same model flags, precision and integration count. This path does not
+claim topology certification or repair of raw LUMIR predictions.
+Pretests run by default. With an explicit `PRETESTS=0`, `pretests.log` says `SKIPPED` and the package has no
+successful pretest exit-code entry; `COMPLETE` then describes only the steps that were enabled.
+
 ## Certified Search Research Utilities
 
 The completed C0–C7 inference-gate producers are no longer duplicated in the

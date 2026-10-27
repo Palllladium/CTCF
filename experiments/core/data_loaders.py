@@ -5,6 +5,7 @@ import os
 from functools import partial
 
 import numpy as np
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
@@ -120,8 +121,35 @@ def lumir_loaders(args, val_bs: int = 1) -> tuple[DataLoader, DataLoader]:
     print(
         f"LUMIR: {len(training)} training images; {len(pairs)}/{len(official_pairs)} validation pairs are T1 with labels"
     )
+    train = LUMIR.LUMIRTrainDataset(paths["train_root"], training)
+    if getattr(args, "global_batch_size", 0):
+        rank, world = (dist.get_rank(), dist.get_world_size()) if dist.is_initialized() else (0, 1)
+        sampler = LUMIR.LUMIRPairSampler(
+            train,
+            global_batch=args.global_batch_size,
+            updates=args.max_train_iters,
+            rank=rank,
+            world=world,
+            seed=args.seed,
+        )
+        return (
+            DataLoader(
+                train,
+                batch_size=args.batch_size,
+                sampler=sampler,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=True,
+            ),
+            DataLoader(
+                LUMIR.LUMIRValDataset(paths["val_root"], pairs, paths["label_dir"]),
+                batch_size=val_bs,
+                num_workers=args.num_workers,
+                pin_memory=True,
+            ),
+        )
     return _build_loaders(
-        train_ds=LUMIR.LUMIRTrainDataset(paths["train_root"], training),
+        train_ds=train,
         val_ds=LUMIR.LUMIRValDataset(paths["val_root"], pairs, paths["label_dir"]),
         batch_size=args.batch_size,
         num_workers=args.num_workers,

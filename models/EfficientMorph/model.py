@@ -271,7 +271,7 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             blk.H, blk.W, blk.T = H, W, T
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, None)
+                x = checkpoint.checkpoint(blk, x, None, use_reentrant=False)
             else:
                 x = blk(x, None)
         if self.downsample is not None:

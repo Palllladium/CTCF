@@ -6,7 +6,7 @@ import json
 import math
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
@@ -19,6 +19,19 @@ from experiments.core.train_logging import (
     prepare_metrics_csv,
 )
 from utils import AverageMeter
+from utils.runtime import Logger
+
+
+def test_quiet_logger_echoes_profile_throughput(tmp_path):
+    terminal = StringIO()
+    with redirect_stdout(terminal):
+        logger = Logger(str(tmp_path), quiet=True)
+    try:
+        logger.write("hidden iteration\n[throughput] pairs_per_second=2.5\n")
+        logger.flush()
+        assert terminal.getvalue() == "[throughput] pairs_per_second=2.5\n"
+    finally:
+        logger.log.close()
 
 
 def _meter(*values: float) -> AverageMeter:
