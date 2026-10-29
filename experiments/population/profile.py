@@ -39,6 +39,41 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def reference_training_options(template, levels, width, epochs):
+    """Explicit Gaussian-reference recipe shared by the profile and calibration dispatch."""
+    gain = float(template.double().std(correction=0))
+    if not math.isfinite(gain) or gain <= 0:
+        raise ValueError("Train-mean template has no finite contrast")
+    scales = [1.0 / 2**stage * 2 ** (1.5 * depth) for stage, depth in enumerate((levels, *range(levels, 0, -1)))]
+    return dict(
+        epochs=epochs,
+        warmup_epochs=1,
+        levels=levels,
+        collar=2,
+        width=width,
+        seed=0,
+        lr=0.001,
+        scale_min=min(scales) * 0.02,
+        scale_max=max(scales) * 10,
+        prior_std=scales,
+        posterior_std=[scale / 4 for scale in scales],
+        integration_steps=7,
+        atlas_precision=0.01,
+        weight_precision=1e-4,
+        noise_shape=2.0,
+        noise_rate=3 * (gain / 4) ** 2,
+        image_scale=1.0,
+        noise_std=gain / 4,
+        gain_mean=gain,
+        gain_std=gain / 2,
+        offset_mean=float(template.double().mean()),
+        offset_std=gain / 2,
+        bias_std=gain / 10,
+        gain_min=gain / 100,
+        tf32=1,
+    )
+
+
 def prepare(args) -> dict:
     path = args.run / "config.json"
     if path.exists():
@@ -80,39 +115,8 @@ def prepare(args) -> dict:
             raise ValueError("selected Train subjects must share the processed grid")
         template.add_(image)
     template = (template / 4).float()
-    gain = float(template.double().std(correction=0))
-    if not math.isfinite(gain) or gain <= 0:
-        raise ValueError("Train-mean template has no finite contrast")
     levels = settings["PROFILE_LEVELS"]
-    # Coefficient std = voxel-unit amplitude x 2^(3*depth/2): about 1 voxel at the coarse band, halving per stage.
-    scales = [1.0 / 2**stage * 2 ** (1.5 * depth) for stage, depth in enumerate((levels, *range(levels, 0, -1)))]
-    training = dict(
-        epochs=settings["PROFILE_EPOCHS"],
-        warmup_epochs=1,
-        levels=levels,
-        collar=2,
-        width=settings["PROFILE_WIDTH"],
-        seed=0,
-        lr=0.001,
-        scale_min=min(scales) * 0.02,
-        scale_max=max(scales) * 10,
-        prior_std=scales,
-        posterior_std=[scale / 4 for scale in scales],
-        integration_steps=7,
-        atlas_precision=0.01,
-        weight_precision=1e-4,
-        noise_shape=2.0,
-        noise_rate=3 * (gain / 4) ** 2,
-        image_scale=1.0,
-        noise_std=gain / 4,
-        gain_mean=gain,
-        gain_std=gain / 2,
-        offset_mean=float(template.double().mean()),
-        offset_std=gain / 2,
-        bias_std=gain / 10,
-        gain_min=gain / 100,
-        tf32=1,
-    )
+    training = reference_training_options(template, levels, settings["PROFILE_WIDTH"], settings["PROFILE_EPOCHS"])
     haar_forward(torch.zeros(1, 3, *(n - 4 for n in template.shape[2:])), levels)
     config = dict(
         scope="PRELIMINARY_DIAGNOSTICS_NOT_MAIN_TRAINING_OR_MODEL_SELECTION",

@@ -234,7 +234,7 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
                     with precision_autocast(precision, device):
                         loss, logs = objective(batch, epoch)
                     if not finite_on_all(loss):
-                        if global_batch or world > 1:
+                        if global_batch or world > 1 or precision != "fp16":
                             raise FloatingPointError(
                                 f"non-finite loss: seed={args.seed} epoch={epoch} update={it} "
                                 f"rank={rank} local_loss={float(loss.detach())}; "

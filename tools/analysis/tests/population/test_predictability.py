@@ -9,6 +9,7 @@ import torch
 from experiments.population.geometry import HaarLevel, HaarPyramid, coefficient_bands, haar_forward, haar_inverse
 from experiments.population.predictability import (
     evaluate_predictability,
+    local_predictability,
     main,
     replace_coarse,
     ridge_weights,
@@ -77,7 +78,7 @@ def test_readout_from_probe_folders_does_not_create_a_negative_gate(tmp_path, mo
     for i, value in enumerate((0.0, -0.1, 0.1, 0.2, 0.25)):
         subject = tmp_path / f"subject{i}.pkl"
         with subject.open("wb") as handle:
-            pickle.dump((np.zeros_like(labels, dtype=np.float32), labels), handle)
+            pickle.dump((np.linspace(0, 1, labels.size, dtype=np.float32).reshape(labels.shape), labels), handle)
         directory = tmp_path / f"fit{i}"
         directory.mkdir()
         details = tuple(torch.full_like(band, 2 * value) for band in base.levels[0].details)
@@ -128,3 +129,29 @@ def test_readout_from_probe_folders_does_not_create_a_negative_gate(tmp_path, mo
     )
     main()
     assert json.loads(output.read_text())["kind"] == "SUPERVISED_DIAGNOSTIC"
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        for arm in ("A0", "A_lin", "A1"):
+            result = local_predictability(
+                directories[:4],
+                directories[4:],
+                dict(
+                    levels=1,
+                    collar=1,
+                    width=2,
+                    scale_min=0.001,
+                    scale_max=0.5,
+                    prior_std=0.03,
+                    posterior_std=0.03,
+                    integration_steps=2,
+                    arm=arm,
+                ),
+                tmp_path / arm,
+                epochs=1,
+            )
+            assert result["training_subjects"] == 3
+            assert np.isfinite(result["cases"][0]["fine_nll_per_coefficient"])
+            assert len(result["cases"][0]["stage_mse"]) == 1
+    finally:
+        torch.set_num_threads(previous_threads)

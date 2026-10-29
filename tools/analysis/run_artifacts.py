@@ -326,7 +326,13 @@ def finalize_run(args: argparse.Namespace) -> Path:
 
 
 def package_run(
-    run_root: Path, prefix: Path, exit_code: int, required_steps: list[str], git_head: str, label: str
+    run_root: Path,
+    prefix: Path,
+    exit_code: int,
+    required_steps: list[str],
+    git_head: str,
+    label: str,
+    include_roots: list[Path] | None = None,
 ) -> str:
     """Package compact diagnostics, including failed/interrupted runs, without weights or field payloads."""
     codes = {path.stem: int(path.read_text().strip()) for path in (run_root / "exit_codes").glob("*.txt")}
@@ -338,26 +344,31 @@ def package_run(
         run_root / "package_manifest.json",
         {
             "status": status,
+            "label": label,
+            "required_steps": required_steps,
             "head": git_head,
             "exit_codes": codes,
             "runner_exit_code": exit_code,
             "payload": "arrays, displacements and checkpoints retained on the server",
+            "included_compact_roots": [str(p) for p in include_roots or []],
         },
     )
     temporary = archive.with_suffix(".zip.tmp")
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as handle:
             sums = []
-            for path in sorted(run_root.rglob("*")):
-                if not path.is_file() or path.suffix not in (".json", ".csv", ".txt", ".log", ".py", ".md"):
-                    continue
-                name = path.relative_to(run_root).as_posix()
-                digest = hashlib.sha256()
-                with path.open("rb") as source, handle.open(f"{archive.stem}/{name}", "w") as target:
-                    while chunk := source.read(8 * 1024 * 1024):
-                        target.write(chunk)
-                        digest.update(chunk)
-                sums.append(f"{digest.hexdigest()}  {name}")
+            roots = [(run_root, ""), *[(p, f"external/{i}_{p.name}/") for i, p in enumerate(include_roots or [])]]
+            for root, folder in roots:
+                for path in sorted(root.rglob("*")):
+                    if not path.is_file() or path.suffix not in (".json", ".csv", ".txt", ".log", ".py", ".md"):
+                        continue
+                    name = folder + path.relative_to(root).as_posix()
+                    digest = hashlib.sha256()
+                    with path.open("rb") as source, handle.open(f"{archive.stem}/{name}", "w") as target:
+                        while chunk := source.read(8 * 1024 * 1024):
+                            target.write(chunk)
+                            digest.update(chunk)
+                    sums.append(f"{digest.hexdigest()}  {name}")
             handle.writestr(f"{archive.stem}/SHA256SUMS", "\n".join(sums) + "\n")
         temporary.replace(archive)
     finally:
@@ -383,6 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--required-steps", nargs="+", required=True)
     package.add_argument("--git-head", required=True)
     package.add_argument("--label", default="RUN")
+    package.add_argument("--include-root", type=Path, action="append", default=[])
 
     dataset = subparsers.add_parser("dataset-manifest")
     dataset.add_argument("--paths-profile", type=int, required=True)
@@ -429,7 +441,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     if args.command == "package":
-        status = package_run(args.run_root, args.prefix, args.exit_code, args.required_steps, args.git_head, args.label)
+        status = package_run(
+            args.run_root,
+            args.prefix,
+            args.exit_code,
+            args.required_steps,
+            args.git_head,
+            args.label,
+            args.include_root,
+        )
         return 0 if status == "COMPLETE" else 1
     if args.command == "dataset-manifest":
         count = write_dataset_manifest(args.paths_profile, args.dataset_split, args.output)

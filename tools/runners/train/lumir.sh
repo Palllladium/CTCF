@@ -12,7 +12,7 @@
 #   EXP fixes the run name; RESUME=1 continues its last.pth with the same total EPOCHS and training recipe.
 #   Put --disable_l1/--disable_l3 in MODEL so training and export use the same active levels.
 #   TIME_STEPS (default 6) sets the same integration count for training and export.
-#   PROFILE disables checkpoint writes; PRETESTS=0 explicitly records skipped tests.
+#   PROFILE disables checkpoint writes; PROFILE_EXP can name that profile. PRETESTS=0 records skipped tests.
 #   Layout under $CTCF_DATA_DIR/LUMIR: imagesTr/, imagesVal/ and LUMIR_dataset.json of the 2024 archive;
 #   LUMIR25/{imagesVal, simplelabelsVal, LUMIR25_dataset.json} of the public 2025 validation download.
 #
@@ -86,7 +86,7 @@ if [ "${PROFILE:-0}" = 1 ]; then
     PERF_WARMUP_UPDATES="${PERF_WARMUP_UPDATES:-5}"
     ITERS=$(( ${PROFILE_UPDATES:-200} + PERF_WARMUP_UPDATES ))
     EPOCHS=1
-    EXP="LUMIR_PROFILE_$STAMP"
+    EXP="${PROFILE_EXP:-LUMIR_PROFILE_$STAMP}"
     STAGES=full
     save_ckpt=0
 fi

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -25,16 +26,19 @@ from experiments.population.geometry import (
 from experiments.population.observation import appearance_prior, load_image
 from experiments.population.train import load_population_checkpoint, observation_nll
 from utils import pkload
+from utils.cert_boundary import boundary_report, global_verdict
 from utils.cert_exact import certify_flow_exact
 from utils.field import _warp, compose_flows
 from utils.field_io import load_flow_npz, save_flow_npz_atomic
 
 
-def velocity_energy(model, observed, interior, variance, mean, covariance, gain_min):
+def velocity_energy(model, observed, interior, variance, mean, covariance, gain_min, observation_mask=None):
     """The unchanged data/prior energy in native voxel-unit velocity coordinates."""
     flow = canonical_flow(pad_velocity(interior, model.collar), model.integration_steps)
     template = _warp(model.atlas().expand(observed.shape[0], -1, -1, -1, -1), flow)
-    data = -appearance_marginal(observed, template, variance, mean, covariance, gain_min).log_prob.sum()
+    data = -appearance_marginal(
+        observed, template, variance, mean, covariance, gain_min, observation_mask=observation_mask
+    ).log_prob.sum()
     prior = -model.log_prior(haar_forward(interior, model.levels)).sum()
     return data, prior
 
@@ -46,7 +50,21 @@ def velocity_rms_by_scale(change: torch.Tensor, levels: int) -> list[float]:
     return [float((sum(band.double().square().sum() for band in group) / change.numel()).sqrt()) for group in groups]
 
 
-def fit_subject(model, observed, variance, mean, covariance, gain_min, *, steps: int, lr: float, log_every: int = 10):
+def fit_subject(
+    model,
+    observed,
+    variance,
+    mean,
+    covariance,
+    gain_min,
+    *,
+    steps: int,
+    lr: float,
+    log_every: int = 10,
+    observation_mask=None,
+    readout_steps=(),
+    on_readout=None,
+):
     """Optimize full interior velocity at fixed globals, retaining the best visited MAP state."""
     if steps < 0 or not math.isfinite(lr) or lr <= 0:
         raise ValueError("MAP steps must be nonnegative and lr finite and positive")
@@ -56,14 +74,17 @@ def fit_subject(model, observed, variance, mean, covariance, gain_min, *, steps:
     model.requires_grad_(False)
     try:
         with torch.no_grad():
-            initial = haar_inverse(model.posterior_mean(observed)).detach()
+            encoder_input = observed if observation_mask is None else observed.masked_fill(~observation_mask, 0)
+            initial = haar_inverse(model.posterior_mean(encoder_input)).detach()
         interior = torch.nn.Parameter(initial.clone())
         optimizer = torch.optim.Adam([interior], lr=lr)
         best, best_loss, best_info, trace = None, float("inf"), {}, []
         previous_gradient_rms = previous_update_rms = None
         for step in range(steps + 1):
             optimizer.zero_grad(set_to_none=True)
-            data, prior = velocity_energy(model, observed, interior, variance, mean, covariance, gain_min)
+            data, prior = velocity_energy(
+                model, observed, interior, variance, mean, covariance, gain_min, observation_mask
+            )
             objective = (data + prior) / observed.numel()
             value = float(objective.detach())
             if not math.isfinite(value):
@@ -87,6 +108,8 @@ def fit_subject(model, observed, variance, mean, covariance, gain_min, *, steps:
                         "previous_update_rms": previous_update_rms,
                     }
                 )
+            if on_readout is not None and step in readout_steps:
+                on_readout(step, pad_velocity(interior.detach(), model.collar))
             if step == steps:
                 break
             objective.backward()
@@ -121,6 +144,48 @@ def fit_subject(model, observed, variance, mean, covariance, gain_min, *, steps:
             parameter.requires_grad_(flag)
 
 
+def spatial_holdout(shape, device, *, block_size=32, gap=4):
+    """Fixed spatial target blocks, with an excluded halo between targets and visible observations."""
+    if block_size < 1 or gap < 0:
+        raise ValueError("positive block_size and nonnegative gap are required")
+    axes = torch.meshgrid(*(torch.arange(n, device=device) // block_size for n in shape), indexing="ij")
+    target = ((axes[0] + 2 * axes[1] + 3 * axes[2]) % 7 == 0)[None, None]
+    excluded = target.float()
+    for axis in range(3):
+        kernel = [1, 1, 1]
+        kernel[axis] = 2 * gap + 1
+        padding = [0, 0, 0]
+        padding[axis] = gap
+        excluded = torch.nn.functional.max_pool3d(excluded, kernel, stride=1, padding=padding)
+    return ~excluded.bool(), target
+
+
+def predictive_subject(model, observed, variance, mean, covariance, gain_min, *, steps, lr, block_size=32, gap=4):
+    visible, target = spatial_holdout(observed.shape[2:], observed.device, block_size=block_size, gap=gap)
+    _velocity, flow, information = fit_subject(
+        model, observed, variance, mean, covariance, gain_min, steps=steps, lr=lr, observation_mask=visible
+    )
+    scores = {}
+    with torch.no_grad():
+        for name, transformed in (("identity", model.atlas()), ("map", _warp(model.atlas(), flow))):
+            joint = appearance_marginal(
+                observed, transformed, variance, mean, covariance, gain_min, observation_mask=visible | target
+            )
+            context = appearance_marginal(
+                observed, transformed, variance, mean, covariance, gain_min, observation_mask=visible
+            )
+            scores[name] = float((joint.log_prob - context.log_prob).sum() / target.sum())
+    return {
+        "log_predictive_per_target_voxel": scores,
+        "visible_voxels": int(visible.sum()),
+        "target_voxels": int(target.sum()),
+        "block_size": block_size,
+        "gap": gap,
+        "map": information,
+        "scope": "appearance marginalized; geometry plug-in fitted only to visible voxels; not model evidence or a Dice verdict",
+    }
+
+
 @torch.no_grad()
 def importance_diagnostic(model, observed, variance, mean, covariance, gain_min, samples: int) -> dict:
     """Finite-sample importance estimate; neither exact evidence nor an automatic selection verdict."""
@@ -142,6 +207,38 @@ def importance_diagnostic(model, observed, variance, mean, covariance, gain_min,
         "samples": samples,
         "scope": "finite-sample importance diagnostic; log-estimator bias and proposal failure remain possible; no model-selection verdict",
     }
+
+
+def score_pair_field(raw, x_seg, y_seg, case_id, case_dir, seconds, *, repair_output, certify_output):
+    """Score and serialize one composed field; certification reloads those final bytes."""
+    case_dir.mkdir(parents=True, exist_ok=True)
+    report, rows = {}, {}
+    outputs = {"FF": (raw, seconds)}
+    if repair_output:
+        mask = torch.ones_like(raw[:, :1], dtype=torch.bool)
+        mask[:, :, 1:-1, 1:-1, 1:-1] = False
+        if torch.count_nonzero(raw.masked_select(mask.expand_as(raw))):
+            raise ValueError("canonical pair has nonzero boundary; refusing a zero-boundary repair claim")
+        started = time.perf_counter()
+        repaired, report["repair"] = repair(raw, fixed_mask=mask, fixed_values=torch.zeros_like(raw))
+        outputs["REP"] = (repaired, seconds + time.perf_counter() - started)
+    for mode, (flow, elapsed) in outputs.items():
+        path = case_dir / f"{mode}.npz"
+        save_flow_npz_atomic(path, flow)
+        rows[mode] = score(
+            flow, case_id, elapsed, x_seg, y_seg, REPAIR["tri_eps"] if mode == "REP" else 0.0, "canonical"
+        )
+        if certify_output:
+            stored = load_flow_npz(path)
+            cell = certify_flow_exact(stored, eps=str(REPAIR["tri_eps"]))
+            boundary = boundary_report(stored)
+            verdict = global_verdict(cell, boundary)
+            cell["global_homeomorphism_hypotheses_met"] = verdict["global_homeomorphism"]
+            report[f"certificate_{mode}"] = cell
+            report[f"boundary_{mode}"] = boundary
+            report[f"global_{mode}"] = verdict
+    report["certification"] = "SEE_PER_FIELD_REPORTS" if certify_output else "NOT_RUN"
+    return rows, report
 
 
 def evaluate_model(args) -> None:
@@ -187,6 +284,7 @@ def evaluate_model(args) -> None:
         )
         return
     all_rows = {"FF": [], "REP": []}
+    fitted = {}
     for path in args.pairs:
         payload_pair = pkload(path)
         if not isinstance(payload_pair, (tuple, list)) or len(payload_pair) != 4:
@@ -210,18 +308,29 @@ def evaluate_model(args) -> None:
         if torch.device(args.device).type == "cuda":
             torch.cuda.synchronize(args.device)
             torch.cuda.reset_peak_memory_stats(args.device)
-        started = time.perf_counter()
-        moving_velocity, _, moving_info = fit_subject(
-            model, x, variance, mean, covariance, trained.gain_min, steps=args.map_steps, lr=args.map_lr
-        )
-        fixed_velocity, _, fixed_info = fit_subject(
-            model, y, variance, mean, covariance, trained.gain_min, steps=args.map_steps, lr=args.map_lr
-        )
+        subjects = []
+        for array, image in zip(arrays[:2], (x, y), strict=True):
+            key = hashlib.sha256(
+                str(array.shape).encode() + np.ascontiguousarray(array, dtype=np.float32).tobytes()
+            ).hexdigest()
+            if key not in fitted:
+                if torch.device(args.device).type == "cuda":
+                    torch.cuda.synchronize(args.device)
+                fit_start = time.perf_counter()
+                velocity, _, information = fit_subject(
+                    model, image, variance, mean, covariance, trained.gain_min, steps=args.map_steps, lr=args.map_lr
+                )
+                if torch.device(args.device).type == "cuda":
+                    torch.cuda.synchronize(args.device)
+                fitted[key] = (velocity.cpu(), information, time.perf_counter() - fit_start)
+            velocity, information, fit_seconds = fitted[key]
+            subjects.append((velocity.to(args.device), information, fit_seconds))
+        (moving_velocity, moving_info, moving_seconds), (fixed_velocity, fixed_info, fixed_seconds) = subjects
         with torch.no_grad():
             raw = subject_pair_flow(fixed_velocity, moving_velocity, model.integration_steps).float()
         if torch.device(args.device).type == "cuda":
             torch.cuda.synchronize(args.device)
-        seconds = time.perf_counter() - started
+        seconds = moving_seconds + fixed_seconds
         case_dir = args.output / path.stem
         case_dir.mkdir()
         report = {
@@ -230,34 +339,17 @@ def evaluate_model(args) -> None:
             "fixed": fixed_info,
             "certification": "NOT_RUN",
             "convention": "fixed_to_moving, zyx voxel displacement, align_corners=True",
-            "timing": "two subject MAP fits plus pair composition; excludes IO and scoring",
+            "timing": "sum of two cached subject fit costs; excludes IO, composition and scoring",
             "peak_allocated_gib": torch.cuda.max_memory_allocated(args.device) / 2**30
             if torch.device(args.device).type == "cuda"
             else None,
         }
-        outputs = {"FF": (raw, seconds)}
-        if args.repair:
-            mask = torch.ones_like(raw[:, :1], dtype=torch.bool)
-            mask[:, :, 1:-1, 1:-1, 1:-1] = False
-            if torch.count_nonzero(raw.masked_select(mask.expand_as(raw))):
-                raise ValueError("canonical pair has nonzero boundary; refusing a zero-boundary repair claim")
-            repair_started = time.perf_counter()
-            repaired, repair_info = repair(raw, fixed_mask=mask, fixed_values=torch.zeros_like(raw))
-            report["repair"] = repair_info
-            outputs["REP"] = (repaired, seconds + time.perf_counter() - repair_started)
-        for mode, (flow, elapsed) in outputs.items():
-            field_path = case_dir / f"{mode}.npz"
-            save_flow_npz_atomic(field_path, flow)
-            all_rows[mode].append(
-                score(flow, path.stem, elapsed, x_seg, y_seg, REPAIR["tri_eps"] if mode == "REP" else 0.0, "canonical")
-            )
-            if args.certify:
-                certificate = certify_flow_exact(load_flow_npz(field_path), eps=str(REPAIR["tri_eps"]))
-                certificate["global_homeomorphism_hypotheses_met"] = (
-                    certificate["certified"] and certificate["boundary_nonzero_count"] == 0
-                )
-                report[f"certificate_{mode}"] = certificate
-        report["certification"] = "SEE_PER_FIELD_REPORTS" if args.certify else "NOT_RUN"
+        rows, details = score_pair_field(
+            raw, x_seg, y_seg, path.stem, case_dir, seconds, repair_output=args.repair, certify_output=args.certify
+        )
+        report.update(details)
+        for mode, row in rows.items():
+            all_rows[mode].append(row)
         (case_dir / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         print(json.dumps({"case": path.stem, "raw_dice": all_rows["FF"][-1]["dice_mean"]}), flush=True)
     for mode, rows in all_rows.items():

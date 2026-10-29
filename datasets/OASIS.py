@@ -59,7 +59,13 @@ class OASISBrainInferDataset(Dataset):
         self.transforms = transforms
 
     def __getitem__(self, index):
-        x, y, x_seg, y_seg = pkload(self.paths[index])
+        source = self.paths[index]
+        if isinstance(source, (tuple, list)):
+            moving, fixed = (pkload(path) for path in source)
+            x, x_seg = moving
+            y, y_seg = fixed
+        else:
+            x, y, x_seg, y_seg = pkload(source)
         x, y = x[None, ...], y[None, ...]
         x_seg, y_seg = x_seg[None, ...], y_seg[None, ...]
         x, x_seg = self.transforms([x, x_seg])

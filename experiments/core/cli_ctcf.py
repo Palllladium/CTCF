@@ -42,6 +42,9 @@ CTCF_OVERRIDE_KEYS = (
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     add_precision_arg(p)
     p.add_argument(
+        "--oasis_split", default="", help="Train/Dev manifest; validation uses the adjacent pair_manifest.json"
+    )
+    p.add_argument(
         "--global_batch_size",
         type=int,
         default=0,

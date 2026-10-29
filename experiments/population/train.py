@@ -9,6 +9,7 @@ import math
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from experiments.population.appearance import appearance_marginal
@@ -54,6 +55,18 @@ def _write_history(path: Path, history: list[dict]) -> None:
 
 
 def train_model(args) -> dict:
+    for name, default in (
+        ("warmup_updates", None),
+        ("initial_atlas", None),
+        ("snapshot_epochs", []),
+        ("snapshot_updates", []),
+    ):
+        if not hasattr(args, name):
+            setattr(args, name, default)
+    if args.warmup_updates is not None and args.warmup_updates < 0:
+        raise ValueError("warmup_updates must be nonnegative")
+    if any(step < 1 for step in (*args.snapshot_epochs, *args.snapshot_updates)):
+        raise ValueError("snapshot epochs/updates must be positive")
     arm = getattr(args, "arm", None)
     alias = getattr(args, "conditional", None)
     if arm is None:
@@ -86,6 +99,8 @@ def train_model(args) -> dict:
     history, epoch_start = [], 0
     if args.resume:
         model, payload = load_population_checkpoint(checkpoint_path, device)
+        if payload.get("evaluation_only", False):
+            raise ValueError("an intra-epoch snapshot is for evaluation, not exact continuation")
         ignored = {"epochs", "output", "device", "resume"}
         if {k: v for k, v in arguments.items() if k not in ignored} != {
             k: v for k, v in payload["arguments"].items() if k not in ignored
@@ -101,13 +116,18 @@ def train_model(args) -> dict:
     else:
         if args.output.exists():
             raise FileExistsError(f"use a fresh output directory or --resume: {args.output}")
-        template = load_image(paths[0], args.image_scale, "cpu").double()
-        for path in paths[1:]:
-            image = load_image(path, args.image_scale, "cpu")
-            if image.shape != template.shape:
-                raise ValueError("training subjects must share the processed voxel grid")
-            template.add_(image)
-        template = (template / len(paths)).float()
+        if args.initial_atlas:
+            template = torch.from_numpy(np.load(args.initial_atlas, allow_pickle=False)).float()
+            if template.shape != load_image(paths[0], args.image_scale, "cpu").shape:
+                raise ValueError("initial atlas and training images must share the voxel grid")
+        else:
+            template = load_image(paths[0], args.image_scale, "cpu").double()
+            for path in paths[1:]:
+                image = load_image(path, args.image_scale, "cpu")
+                if image.shape != template.shape:
+                    raise ValueError("training subjects must share the processed voxel grid")
+                template.add_(image)
+            template = (template / len(paths)).float()
         model_options = {
             name: getattr(args, name)
             for name in (
@@ -135,16 +155,42 @@ def train_model(args) -> dict:
     (args.output / "config.json").write_text(json.dumps(arguments, indent=2) + "\n", encoding="utf-8")
     _write_history(args.output / "metrics.csv", history)
     voxels = model.raw_atlas.numel()
+
+    def save(path, completed_epochs, completed_updates, *, evaluation_only=False):
+        payload = {
+            "model": model.state_dict(),
+            "model_options": model_options,
+            "arguments": arguments,
+            "log_noise_variance": log_noise_variance.detach(),
+            "optimizer": optimizer.state_dict(),
+            "completed_epochs": completed_epochs,
+            "completed_updates": completed_updates,
+            "history": history,
+            "shuffle_rng": generator.get_state(),
+            "torch_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
+            "evaluation_only": evaluation_only,
+        }
+        temporary = path.with_suffix(".tmp")
+        torch.save(payload, temporary)
+        temporary.replace(path)
+
+    if args.resume and epoch_start in args.snapshot_epochs and not (args.output / f"epoch_{epoch_start}.pth").exists():
+        save(args.output / f"epoch_{epoch_start}.pth", epoch_start, epoch_start * len(paths))
     for epoch in range(epoch_start, args.epochs):
-        for parameter in model.prior_parameters():
-            parameter.requires_grad_(epoch >= args.warmup_epochs)
         model.train()
         started = time.perf_counter()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
         totals = torch.zeros(4, dtype=torch.float64)
         compute_seconds = 0.0
-        for index in torch.randperm(len(paths), generator=generator).tolist():
+        for position, index in enumerate(torch.randperm(len(paths), generator=generator).tolist()):
+            update = epoch * len(paths) + position
+            active = update >= (
+                args.warmup_updates if args.warmup_updates is not None else args.warmup_epochs * len(paths)
+            )
+            for parameter in model.prior_parameters():
+                parameter.requires_grad_(active)
             observed = load_image(paths[index], args.image_scale, device)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -186,6 +232,8 @@ def train_model(args) -> dict:
                 dtype=torch.float64,
             )
             compute_seconds += time.perf_counter() - compute_started
+            if update + 1 in args.snapshot_updates:
+                save(args.output / f"update_{update + 1}.pth", epoch, update + 1, evaluation_only=True)
         row = dict(
             zip(
                 ("objective_per_voxel", "nll_per_voxel", "kl_per_voxel", "global_per_subject_voxel"),
@@ -203,21 +251,9 @@ def train_model(args) -> dict:
             noise_std=float((0.5 * log_noise_variance.detach()).exp()),
         )
         history.append(row)
-        payload = {
-            "model": model.state_dict(),
-            "model_options": model_options,
-            "arguments": arguments,
-            "log_noise_variance": log_noise_variance.detach(),
-            "optimizer": optimizer.state_dict(),
-            "completed_epochs": epoch + 1,
-            "history": history,
-            "shuffle_rng": generator.get_state(),
-            "torch_rng": torch.get_rng_state(),
-            "cuda_rng": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
-        }
-        temporary = checkpoint_path.with_suffix(".tmp")
-        torch.save(payload, temporary)
-        temporary.replace(checkpoint_path)
+        save(checkpoint_path, epoch + 1, (epoch + 1) * len(paths))
+        if epoch + 1 in args.snapshot_epochs:
+            save(args.output / f"epoch_{epoch + 1}.pth", epoch + 1, (epoch + 1) * len(paths))
         _write_history(args.output / "metrics.csv", history)
         print(json.dumps(row, allow_nan=False), flush=True)
     return {"checkpoint": str(checkpoint_path), "completed_epochs": len(history), "history": history}
@@ -248,6 +284,14 @@ def main() -> None:
     parser.add_argument("--tf32", type=int, choices=[0, 1], default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--initial-atlas", type=Path, help="shared Train-only initialization, stored as [1,1,D,H,W] npy"
+    )
+    parser.add_argument("--warmup-updates", type=int, help="override warmup epochs with a shared update budget")
+    parser.add_argument("--snapshot-epochs", type=int, nargs="*", default=[])
+    parser.add_argument(
+        "--snapshot-updates", type=int, nargs="*", default=[], help="evaluation-only intermediate snapshots"
+    )
     add_appearance_args(parser)
     print(json.dumps(train_model(parser.parse_args()) | {"history": "metrics.csv and checkpoint"}))
 

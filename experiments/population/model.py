@@ -281,7 +281,7 @@ class PopulationAtlas(nn.Module):
         """Return the autoregressive conditional-mean path, not the joint posterior expectation or mode."""
         return self.sample(observed, stochastic=False).coefficients
 
-    def log_prior(self, coefficients: HaarPyramid) -> torch.Tensor:
+    def log_prior(self, coefficients: HaarPyramid, *, include_coarse: bool = True) -> torch.Tensor:
         values = coefficient_bands(self.with_bands(coefficient_bands(coefficients)))
         prefix = self._empty_bands(values[0].shape[0])
         result = values[0].new_zeros(values[0].shape[0], dtype=torch.float64)
@@ -291,7 +291,8 @@ class PopulationAtlas(nn.Module):
                 means, scales = self._prior_step(stage, prefix)
                 selected = values[offset : offset + len(means)]
                 for value, mean, std in zip(selected, means, scales, strict=True):
-                    result = result + _normal_log_prob(value, mean, std)
+                    if stage or include_coarse:
+                        result = result + _normal_log_prob(value, mean, std)
                 prefix[offset : offset + len(means)] = selected
                 offset += len(means)
         return result

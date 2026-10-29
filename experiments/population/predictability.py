@@ -11,6 +11,8 @@ import numpy as np
 import torch
 
 from experiments.population.geometry import HaarPyramid, canonical_flow, coefficient_bands, haar_forward, haar_inverse
+from experiments.population.model import PopulationAtlas
+from experiments.population.observation import load_image
 from experiments.population.probe import _load_labels
 from utils.dice import dice_per_label
 from utils.field import _warp
@@ -195,20 +197,21 @@ def evaluate_predictability(
     else:
         selection = {"method": "fixed_before_heldout", "selected": ridge, "heldout_used": False}
     template = _load_labels(train[0]["template"], "cpu")
+    unconditional_mean = torch.zeros_like(_interior(train[0], collar), dtype=torch.float64)
+    for record in train:
+        unconditional_mean += _interior(record, collar).double() / len(train)
     cases = []
     for record in heldout:
         actual = _interior(record, collar)
         coarse = haar_forward(actual, levels).coarse
         weights = ridge_weights(features, coarse.flatten()[None], ridge)[0]
-        unconditional = torch.zeros_like(actual, dtype=torch.float64)
-        conditional = torch.zeros_like(unconditional)
+        conditional = torch.zeros_like(unconditional_mean)
         for weight, source in zip(weights, train, strict=True):
             values = _interior(source, collar).double()
             if values.shape != actual.shape:
                 raise ValueError("all fitted velocities must share the processed grid")
-            unconditional += values / len(train)
             conditional += values * weight
-        unconditional = replace_coarse(unconditional, coarse, levels).float()
+        unconditional = replace_coarse(unconditional_mean, coarse, levels).float()
         conditional = replace_coarse(conditional, coarse, levels).float()
         labels = _load_labels(record["subject"], "cpu")
         if labels.shape != template.shape or labels.shape[2:] != tuple(size + 2 * collar for size in actual.shape[2:]):
@@ -259,6 +262,76 @@ def evaluate_predictability(
         "f_denominator_min": f_denominator_min,
         "cases": cases,
     }
+
+
+def local_predictability(train_dirs, heldout_dirs, options, output, *, epochs=20, lr=0.001, device="cpu"):
+    """Fit the actual local hierarchical prior to supervised diagnostic velocities, with a fixed template."""
+    train, heldout = _read_fits(train_dirs), _read_fits(heldout_dirs)
+    settings = validate_fits(train, heldout)
+    train = [row for row in train if row["subject"] != row["template"]]
+    torch.manual_seed(0)
+    model = PopulationAtlas(load_image(train[0]["template"], 1.0, device), **options).to(device)
+    model.requires_grad_(False)
+    for parameter in model.prior_parameters():
+        parameter.requires_grad_(True)
+    optimizer = torch.optim.Adam(list(model.prior_parameters()), lr=lr)
+    history = []
+    for epoch in range(epochs):
+        total = 0.0
+        for i in torch.randperm(len(train)).tolist():
+            coefficients = haar_forward(_interior(train[i], settings["collar"]).to(device), settings["levels"])
+            optimizer.zero_grad(set_to_none=True)
+            loss = -model.log_prior(coefficients).mean() / model.raw_atlas.numel() + 1e-4 * model.weight_penalty() / (
+                len(train) * model.raw_atlas.numel()
+            )
+            if not torch.isfinite(loss):
+                raise FloatingPointError("nonfinite local-prior loss")
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(model.prior_parameters()), float("inf"), norm_type=float("inf"), error_if_nonfinite=True
+            )
+            optimizer.step()
+            total += float(loss.detach())
+        history.append({"epoch": epoch + 1, "objective_per_voxel": total / len(train)})
+        print(json.dumps(history[-1]), flush=True)
+    cases = []
+    with torch.no_grad():
+        for record in heldout:
+            actual = haar_forward(_interior(record, settings["collar"]).to(device), settings["levels"])
+            values = coefficient_bands(actual)
+            prefix, errors, offset = model._empty_bands(1), [], 0
+            for stage in range(model.levels + 1):
+                means, _ = model._prior_step(stage, prefix)
+                selected = values[offset : offset + len(means)]
+                if stage:
+                    errors.append(
+                        float(
+                            sum((a.double() - b.double()).square().sum() for a, b in zip(selected, means, strict=True))
+                            / sum(a.numel() for a in selected)
+                        )
+                    )
+                prefix[offset : offset + len(means)] = selected
+                offset += len(means)
+            cases.append(
+                {
+                    "subject": str(record["subject"]),
+                    "fine_nll_per_coefficient": float(
+                        -model.log_prior(actual, include_coarse=False)[0] / sum(v.numel() for v in values[1:])
+                    ),
+                    "stage_mse": errors,
+                }
+            )
+    output.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": model.state_dict(), "options": options}, output / "prior.pth")
+    report = {
+        "arm": model.arm,
+        "training_subjects": len(train),
+        "history": history,
+        "cases": cases,
+        "scope": "supervised diagnostic with true previous scales; not image-trained A, not predicted-map Dice or a rejection gate",
+    }
+    (output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return report
 
 
 def main() -> None:

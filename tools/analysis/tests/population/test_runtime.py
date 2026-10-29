@@ -1,6 +1,7 @@
 import argparse
 import json
 import pickle
+import shutil
 
 import numpy as np
 import pytest
@@ -135,3 +136,79 @@ def test_pair_evaluation_checks_saved_raw_and_repaired_bytes(tmp_path):
     predictive = json.loads((args.output / "importance.json").read_text())
     assert np.isfinite(predictive[0]["log_importance_estimate"]).all()
     assert 1 <= predictive[0]["effective_sample_size"][0] <= args.importance_samples
+
+
+def test_milestones_shared_update_warmup_and_evaluation_only_snapshots(tmp_path):
+    paths, _images = _inputs(tmp_path)
+    args = _args(paths, tmp_path / "training", 1)
+    args.warmup_updates, args.snapshot_updates, args.snapshot_epochs = 1, [1, 3], [1]
+    train_model(args)
+    (args.output / "epoch_1.pth").unlink()
+    args.epochs, args.resume = 2, True
+    train_model(args)
+    first = torch.load(args.output / "update_1.pth", weights_only=False)
+    final = torch.load(args.output / "last.pth", weights_only=False)
+    assert first["completed_updates"] == 1 and first["evaluation_only"] is True
+    assert final["completed_updates"] == 4 and final["evaluation_only"] is False
+    assert (args.output / "epoch_1.pth").is_file()
+    assert not torch.equal(first["model"]["prior_scale_logits"], final["model"]["prior_scale_logits"])
+    args.output = tmp_path / "invalid_resume"
+    args.output.mkdir()
+    shutil.copyfile(tmp_path / "training/update_1.pth", args.output / "last.pth")
+    args.resume = True
+    with pytest.raises(ValueError, match="evaluation"):
+        train_model(args)
+
+
+def test_masked_map_cannot_read_hidden_encoder_or_likelihood_values(tmp_path):
+    paths, images = _inputs(tmp_path)
+    args = _args(paths, tmp_path / "trained", 1)
+    train_model(args)
+    model, payload = load_population_checkpoint(args.output / "last.pth", "cpu")
+    observed = torch.from_numpy(images[0])[None, None]
+    mask = torch.ones_like(observed, dtype=torch.bool)
+    mask[:, :, 3:6, 3:6, 3:6] = False
+    altered = observed.clone()
+    altered[~mask] = 100
+    mean, covariance = appearance_prior(args, "cpu")
+    kwargs = dict(steps=2, lr=0.01, observation_mask=mask)
+    variance = payload["log_noise_variance"].double().exp()
+    a, _, _ = fit_subject(model, observed, variance, mean, covariance, args.gain_min, **kwargs)
+    b, _, _ = fit_subject(model, altered, variance, mean, covariance, args.gain_min, **kwargs)
+    torch.testing.assert_close(a, b, atol=0, rtol=0)
+
+
+def test_pair_evaluation_reuses_subject_map(tmp_path, monkeypatch):
+    import experiments.population.evaluate as evaluation
+
+    paths, images = _inputs(tmp_path)
+    trained = _args(paths, tmp_path / "trained", 1)
+    train_model(trained)
+    pairs = []
+    for i, indices in enumerate(((0, 1), (1, 0))):
+        a, b = (images[j] for j in indices)
+        path = tmp_path / f"pair_{i}.pkl"
+        path.write_bytes(pickle.dumps((a, b, (a > 0.5).astype(np.int16), (b > 0.5).astype(np.int16))))
+        pairs.append(path)
+    original, calls = evaluation.fit_subject, []
+
+    def count(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation, "fit_subject", count)
+    evaluation.evaluate_model(
+        argparse.Namespace(
+            checkpoint=trained.output / "last.pth",
+            output=tmp_path / "out",
+            pairs=pairs,
+            subjects=None,
+            map_steps=0,
+            map_lr=0.01,
+            repair=0,
+            certify=0,
+            seed=0,
+            device="cpu",
+        )
+    )
+    assert len(calls) == 2

@@ -56,6 +56,7 @@ def appearance_marginal(
     *,
     bias_order: int = 2,
     chunk_size: int = 65536,
+    observation_mask: torch.Tensor | None = None,
 ) -> AppearanceMarginal:
     """Evaluate p(y|template), with gain constrained above ``gain_min``.
 
@@ -78,6 +79,15 @@ def appearance_marginal(
     if not math.isfinite(gain_min) or gain_min <= 0:
         raise ValueError("gain_min must be finite and positive")
     batch, count = observed.shape[0], math.prod(shape)
+    if observation_mask is not None:
+        if observation_mask.shape != observed.shape or observation_mask.dtype != torch.bool:
+            raise ValueError("observation_mask must be boolean and have the observation shape")
+        mask = observation_mask.to(observed.device).flatten(1)
+        observed_count = mask.sum(1, dtype=torch.float64)
+        if bool((observed_count == 0).any()):
+            raise ValueError("each observation mask must retain at least one voxel")
+    else:
+        mask, observed_count = None, count
     coefficients = (bias_order + 1) ** 3 + 1
     mean = prior_mean.to(device=observed.device, dtype=torch.float64)
     covariance = prior_covariance.to(device=observed.device, dtype=torch.float64)
@@ -97,8 +107,9 @@ def appearance_marginal(
     for start in range(0, count, chunk_size):
         end = min(start + chunk_size, count)
         design = _design_chunk(template, start, end, axes)
-        gram = gram + design.transpose(1, 2) @ design
-        projection = projection + (design.transpose(1, 2) @ values[:, start:end, None]).squeeze(-1)
+        weights = mask[:, start:end, None] if mask is not None else 1
+        gram = gram + design.transpose(1, 2) @ (design * weights)
+        projection = projection + (design.transpose(1, 2) @ (values[:, start:end, None] * weights)).squeeze(-1)
     prior_cholesky = torch.linalg.cholesky(covariance)
     precision = torch.cholesky_inverse(prior_cholesky)
     posterior_cholesky = torch.linalg.cholesky(precision[None] + gram / variance)
@@ -112,18 +123,21 @@ def appearance_marginal(
         design = _design_chunk(template, start, end, axes)
         fitted = (design @ posterior_mean[..., None]).squeeze(-1)
         predictions.append(fitted)
-        residual_square = residual_square + (values[:, start:end] - fitted).square().sum(dim=-1)
+        errors = (values[:, start:end] - fitted).square()
+        if mask is not None:
+            errors = errors * mask[:, start:end]
+        residual_square = residual_square + errors.sum(dim=-1)
     displacement = posterior_mean - mean
     quadratic = residual_square / variance + (displacement @ precision * displacement).sum(dim=-1)
     log_determinant = (
-        count * variance.log()
+        observed_count * variance.log()
         + 2 * prior_cholesky.diagonal().log().sum()
         + 2 * posterior_cholesky.diagonal(dim1=-2, dim2=-1).log().sum(dim=-1)
     )
     prior_z = (mean[:, 0] - gain_min) / covariance[0, 0].sqrt()
     posterior_z = (posterior_mean[:, 0] - gain_min) / posterior_covariance[:, 0, 0].sqrt()
     log_prob = (
-        -0.5 * (count * math.log(2 * math.pi) + log_determinant + quadratic)
+        -0.5 * (observed_count * math.log(2 * math.pi) + log_determinant + quadratic)
         + torch.special.log_ndtr(posterior_z)
         - torch.special.log_ndtr(prior_z)
     )

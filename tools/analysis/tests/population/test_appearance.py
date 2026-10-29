@@ -77,3 +77,34 @@ def test_positive_gain_normalizer_matches_direct_numerical_integration():
 
     density, _ = quad(integrand, 0.2, np.inf, epsabs=1e-12)
     assert fitted.log_prob.item() == pytest.approx(math.log(density), abs=1e-9)
+
+
+def test_masked_marginal_matches_dense_selected_observations_and_has_no_hidden_gradient():
+    template = torch.linspace(-1, 1, 8, dtype=torch.float64).reshape(1, 1, 2, 2, 2).requires_grad_()
+    observed = (template.detach() * 0.7 + 0.1).requires_grad_()
+    mask = torch.tensor([True, False, True, True, False, True, False, False]).reshape_as(observed)
+    mean = torch.tensor([0.9, 0.1], dtype=torch.float64)
+    covariance = torch.diag(torch.tensor([0.2, 0.1], dtype=torch.float64))
+    actual = appearance_marginal(observed, template, 0.3, mean, covariance, 0.1, bias_order=0, observation_mask=mask)
+    design = _dense_design(template, 0)[:, mask.flatten()]
+    values = observed.flatten(1)[:, mask.flatten()]
+    noise = torch.eye(int(mask.sum()), dtype=torch.float64) * 0.3
+    sigma = noise + design @ covariance @ design.transpose(1, 2)
+    posterior_cov = torch.linalg.inv(torch.linalg.inv(covariance) + design.transpose(1, 2) @ design / 0.3)
+    posterior_mean = (
+        posterior_cov
+        @ (torch.linalg.solve(covariance, mean)[None] + (design.transpose(1, 2) @ values[..., None]).squeeze(-1) / 0.3)[
+            ..., None
+        ]
+    ).squeeze(-1)
+    expected = torch.distributions.MultivariateNormal(design @ mean, covariance_matrix=sigma).log_prob(values)
+    expected += torch.special.log_ndtr(
+        (posterior_mean[:, 0] - 0.1) / posterior_cov[:, 0, 0].sqrt()
+    ) - torch.special.log_ndtr((mean[0] - 0.1) / covariance[0, 0].sqrt())
+    torch.testing.assert_close(actual.log_prob, expected, atol=1e-10, rtol=1e-10)
+    gradient = torch.autograd.grad(actual.log_prob.sum(), observed)[0]
+    assert torch.count_nonzero(gradient[~mask]) == 0
+    changed = observed.detach().clone()
+    changed[~mask] += 100
+    again = appearance_marginal(changed, template, 0.3, mean, covariance, 0.1, bias_order=0, observation_mask=mask)
+    torch.testing.assert_close(actual.log_prob, again.log_prob, atol=0, rtol=0)

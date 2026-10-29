@@ -41,6 +41,7 @@ Run each command with `--help` for its required numerical parameters. No MRI hyp
 | `train` | Single-subject Train pickles; joint atlas/encoder/prior/noise fit, `last.pth`, per-epoch `metrics.csv`. |
 | `evaluate` | Checkpoint plus paired OASIS pickles, or heldout single-subject images for importance diagnostics. |
 | `profile` | Worker for the preliminary full-volume dispatch described below. |
+| `calibrate` | Expanded image-only calibration, cached subject MAP, and separate label-driven geometry diagnostics. |
 
 Single-subject pickles contain `(image, segmentation)`; main model training uses only the image. The caller must
 establish subject-disjoint splits and a common affine-aligned voxel grid. Pickles contain no raw-world affine.
@@ -125,3 +126,130 @@ and Mamba checkpoints are unaffected.
 
 Training and evaluation outputs remain exploratory until an observation model, budgets, thresholds and an
 independent evaluation protocol are fixed. Synthetic tests and crop-level IO checks do not establish MRI quality.
+
+## Expanded calibration dispatch
+
+`tools/runners/train/calibration.sh` runs one fixed package on disjoint GPU pools. Its defaults allocate seven
+GPUs: `A_GPUS="1 2"`, `MAMBA_GPU=3`, `LUMIR_GPUS="4 5 6 7"`. IDs may change; LUMIR needs four devices and
+the other two pools need at least one each. Overlapping pools are rejected. Do not run two instances with the
+same `RUN_ID`, or update the checkout while it is running.
+The worker holds a nonblocking `flock` on `<run>/.lock` before touching logs/status or starting jobs. A second
+worker for that RUN_ID is rejected; `resume` also checks the lock before backgrounding. The lock file stays
+after exit but its existence does not mean it is held. Do not delete it to bypass an active run.
+
+The A cohort is nested within the frozen 294-subject Train split: 64 and 278 training subjects, with the same
+16 inner-heldout subjects. Seven image-only fits use a shared 64-subject initial atlas, appearance settings,
+and 320-update prior warm-up:
+
+| Prior | Subjects | Width | Seeds | Epochs |
+|---|---:|---:|---|---:|
+| A_lin, A1 | 64 | 8 | 0, 1 | 100 |
+| A_lin, A1 | 278 | 8 | 0 | 50 |
+| A1 | 64 | 16 | 0 | 100 |
+
+Training retains epoch-50/100 and update-3200/6400 milestones when reached. Intra-epoch update snapshots
+are evaluation-only: they cannot resume an exact subject-shuffle trajectory. Last checkpoints resume from
+the last complete epoch. Full inner-heldout MAP evaluation uses each final checkpoint, plus update 6400 for
+the 278-subject fits, matching the update budget of 64x100. Epoch-50 and update-3200 weights are retained
+for further readouts; no additional 500-step MAP evaluation is scheduled for them.
+
+For each assessed checkpoint, each inner-heldout subject is fitted once for 500 native-velocity MAP updates.
+Steps 0/40/100/200/500 are saved and scored as raw fixed-step diagnostics; final FF/REP evaluation uses the
+best data-plus-prior objective visited, never Dice-based state selection. Pair composition and exact cell and
+boundary checks reuse the common operators. A calculation completing does not imply its certificate passed:
+inspect each field's global verdict and repair cost. Cached final velocities and pair fields are hash-checked.
+
+All 294 Train subjects also receive independent label-driven fits. The reference self-fit is excluded from
+regression. A global ridge curve uses 16/32/63/127/277 subjects and selects its penalty by inner-Train LOO;
+three local priors use the same existing A0/A_lin/A1 heads, conditioned on true previous scales. These are
+supervised diagnostics, not image-only training or a rejection gate. One final A_lin fit also receives a spatial
+predictive diagnostic: 32-cube targets, four-voxel excluded halos, encoder/MAP fitted only to visible voxels,
+and normalized conditional appearance likelihood versus an identity predictor. Geometry remains plug-in;
+this is not exact model evidence, a comparison of observation families, or an automatic model choice.
+Failed label fits skip only ridge/local-prior diagnostics: all seven image-only fits still run. Their failure
+remains visible in the package status. A historical Mamba reference is scored on exactly the same 16 cyclic
+pairs, in TF32, before waiting for Mamba294; `PARENT_CHECKPOINT` selects its weights (default P10 `best.pth`).
+Its legacy flow is materialized into sampler-map coordinates before raw/repair scoring. No identity-boundary
+assumption or global certificate is claimed for that parent. It saw these images during training, and the
+reference is not an equal-inference-time optimization comparison.
+
+A fresh Mamba NoSVF trains from scratch on the 294 Train subjects, with both pair partners restricted to
+Train. Its fixed recipe is BF16, batch 1, LR 1e-4, 500 epochs, last checkpoint, and validation on the frozen
+`pair_manifest.json`: 50 Dev pairs in both directions. The split and pair manifests are copied and hashed.
+The trainer also writes a Dev-selected `best.pth`; only `last.pth` belongs to this comparison.
+It sees the inner-heldout 16, so comparisons with it there are descriptive; the clean comparison is on Dev100.
+The historically inspected OASIS-19 is not a new independent final test.
+Mamba294 versus historical P10 is not an isolated effect of the data split: update counts, training schedule,
+resume history and potentially precision differ. The historical log does not establish its precision.
+
+Before heavy concurrent workloads, five sequential LUMIR profiles measure full-stage BF16 on one GPU/global8,
+four GPUs/global8, four GPUs/global4, and four GPUs/micro2/global8, plus a four-GPU TF32/global8 reference.
+Each uses 5 warm-up and 20 measured updates. Micro2 may OOM; optional profile failures do not choose a recipe
+or block the independently checked production configuration. Eight-GPU scaling is not measured in this allocation.
+
+The node readiness check then compares two continuous runs with actual TERM/resume (four epochs, ten updates
+per epoch, global4, BF16). It exercises off/partial/full cascade graphs, optimizer and per-rank RNG restoration,
+CSV continuity, all official export members and one independently reproduced displacement. Engineering limits
+for the first continuous/resumed exported field are RMS <=0.05 and maximum <=0.5 voxels; same-checkpoint export
+reproduction requires maximum <=1e-4 voxels. The continuous repeat is tested against the same fixed bounds;
+excess noise is reported separately from a resume mismatch. Two repeats do not estimate a reliable noise
+distribution, and cannot silently enlarge the bounds. These are operational tolerances, not scientific equivalence claims.
+A supplemental global8 ramp run uses five updates per epoch: both batch sizes see 160 pairs with matching
+per-epoch stage progress and LR. This short quality contrast is descriptive and does not choose the long recipe.
+
+After the mandatory global4 readiness PASS, the authorized LUMIR control starts automatically: Mamba NoSVF,
+four GPUs, BF16, microbatch 1/global4, LR 1e-4, 40 epochs x1000 updates =160,000 pair presentations, with the
+normal cascade ramp. `NCCL_NVLS_ENABLE=0` is fixed throughout; DDP and other NCCL communication remain enabled.
+A readiness failure blocks this control; a failed optional profile or an independent A/Mamba task does not.
+
+After code review and commit/push, replace `<reviewed-commit-sha>` below with the actual reviewed commit.
+The launcher checks imports of nibabel/scipy/pytest in the existing environment; it does not install or upgrade
+packages. Linux `flock` must be available. P10's checkpoint path is checked immediately, before backgrounding
+or starting any training; supply `PARENT_CHECKPOINT` for a different location. The worker prints `df` and requires 200 GiB free at startup (`MIN_FREE_GIB` explicitly overrides this
+rough initial allowance, including on resume). This is not a guarantee against other jobs filling the disk.
+Existing processed OASIS
+All and the LUMIR 2024/2025 layout documented in `lumir.sh` must already be present.
+
+```bash
+cd /data/mooncake/P/CTCF &&
+git pull --ff-only &&
+EXPECTED_GIT_HEAD="<reviewed-commit-sha>" \
+A_GPUS="1 2" MAMBA_GPU=3 LUMIR_GPUS="4 5 6 7" \
+PYBIN=/data/mooncake/P/envs/ctcf/bin/python PRETESTS=1 \
+bash tools/runners/train/calibration.sh start
+```
+
+The script backgrounds the worker and prints PID/RUN_ID/LOG. Use `tail -f <printed-LOG>` to follow it.
+That assignment-only PID/RUN_ID/LOG line can be pasted back into the shell to set the variables for monitoring.
+The SHA above is a placeholder, not a launchable value. Follow task logs under
+`results/calibration/$RUN_ID/logs/`, the common `status.txt`, and long-training logs
+`logs/${RUN_ID}_mamba294/logfile.log` and `logs/$(cat results/calibration/$RUN_ID/lumir_exp.txt)/logfile.log`.
+`Ctrl+C` exits `tail` only. `kill -TERM <printed-PID>` stops
+the wrapper and its owned workers and creates a PARTIAL package. Resume with the same RUN_ID and HEAD:
+
+```bash
+cd /data/mooncake/P/CTCF &&
+EXPECTED_GIT_HEAD="<same-reviewed-commit-sha>" \
+A_GPUS="1 2" MAMBA_GPU=3 LUMIR_GPUS="4 5 6 7" \
+PYBIN=/data/mooncake/P/envs/ctcf/bin/python PRETESTS=1 \
+bash tools/runners/train/calibration.sh resume "<original-RUN_ID>"
+```
+
+Completed tasks are skipped, interrupted training restarts from its last completed epoch, and incomplete
+subject fits are recomputed. If LUMIR was interrupted before its first checkpoint, a fresh EXP is bound in
+`lumir_exp.txt`; the old directory remains intact. Prior attempts are retained. A new RUN_ID starts a new experiment.
+To change GPU assignments, first stop the wrapper and wait for its PARTIAL package and workers to exit, then
+resume the same RUN_ID/HEAD with new disjoint physical IDs. A_GPUS may contain one or more space-separated IDs;
+MAMBA_GPU is one ID and LUMIR_GPUS must contain exactly four. Thus the full package needs at least six cards.
+For six, use A_GPUS="2", MAMBA_GPU=3, LUMIR_GPUS="4 5 6 7"; for eight fully free cards use A_GPUS="0 1 2"
+with the other two pools unchanged. LUMIR's GPU count/global batch are part of the fixed recipe, not a live toggle.
+
+As soon as A and LUMIR finish, return `results/exports/${RUN_ID}__<attempt>__A_LUMIR__COMPLETE.zip`, its
+`.sha256` and the outer log. This archive's required-step list explicitly excludes Mamba294; it may still run.
+After Mamba finishes, return the final `${RUN_ID}__<attempt>__COMPLETE.zip` and `.sha256`. Failure/interruption
+packages use FAILED/PARTIAL. The compact archive includes A diagnostics and external LUMIR/Mamba logs and
+manifests. Checkpoints, subject velocities, pair fields and official submission ZIPs remain on the node.
+Official long-control displacements are under
+`results/lumir/<EXP from lumir_exp.txt>/attempts/<attempt>/export_lumir25/`; they are not automatically submitted.
+A technically COMPLETE archive is not a verdict
+that A improves Dice or that its fields all passed certification.

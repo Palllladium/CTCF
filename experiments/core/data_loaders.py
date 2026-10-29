@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import glob
+import json
 import os
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import torch.distributed as dist
@@ -63,7 +65,12 @@ def oasis_loaders(
 ) -> tuple[DataLoader, DataLoader]:
     """Build OASIS train/val loaders for a pair of dataset classes."""
     train_dir, val_dir, _ = resolve_dataset_dirs(args)
-    tr_files, va_files = _find_split_files(train_dir, val_dir, tag="OASIS")
+    if getattr(args, "oasis_split", ""):
+        tr_files, dev = oasis_subject_paths(train_dir, args.oasis_split)
+        va_files = oasis_validation_pairs(dev, Path(args.oasis_split).with_name("pair_manifest.json"))
+        print(f"OASIS subject split: Train={len(tr_files)}, Dev={len(dev)}, Dev pairs={len(va_files)}")
+    else:
+        tr_files, va_files = _find_split_files(train_dir, val_dir, tag="OASIS")
 
     tfm = transforms.Compose([NumpyType((np.float32, np.int16))])
     if getattr(args, "distill_teacher", "none") != "none":
@@ -80,6 +87,32 @@ def oasis_loaders(
         drop_last_train=drop_last_train,
         drop_last_val=drop_last_val,
     )
+
+
+def oasis_subject_paths(root: str | Path, manifest: str | Path) -> tuple[list[str], list[str]]:
+    split = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    groups = [[item["subject_id"] for item in split[key]] for key in ("training", "development")]
+    if any(len(ids) < 2 or len(ids) != len(set(ids)) for ids in groups) or set(groups[0]) & set(groups[1]):
+        raise ValueError("OASIS Train/Dev must contain distinct, disjoint subjects")
+    paths = [[str(Path(root) / f"p_{name.rsplit('_P', 1)[1]}.pkl") for name in ids] for ids in groups]
+    if any(not Path(path).is_file() for group in paths for path in group):
+        raise FileNotFoundError("OASIS split references missing subject files")
+    return paths[0], paths[1]
+
+
+def oasis_validation_pairs(development: list[str], manifest: str | Path) -> list[tuple[str, str]]:
+    records = json.loads(Path(manifest).read_text(encoding="utf-8"))["cases"]
+    subjects = {f"OASIS_ALL_P{Path(path).stem[2:]}": path for path in development}
+    pairs = [(row["moving_subject_id"], row["fixed_subject_id"]) for row in records]
+    if (
+        len(pairs) != len(subjects)
+        or len(set(pairs)) != len(pairs)
+        or {a for a, _ in pairs} != subjects.keys()
+        or {b for _, b in pairs} != subjects.keys()
+        or any(a == b or (b, a) not in pairs for a, b in pairs)
+    ):
+        raise ValueError("Dev manifest must pair its subjects once in both directions, without Train subjects")
+    return [(subjects[moving], subjects[fixed]) for moving, fixed in pairs]
 
 
 def ixi_loaders(
