@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from argparse import Namespace
+from types import SimpleNamespace
 
 import nibabel as nib
 import numpy as np
@@ -20,6 +22,7 @@ from datasets.LUMIR import (
 from experiments.core import data_loaders
 from experiments.core.path_profiles import resolve_lumir_paths
 from experiments.export_lumir import evaluator_displacement, save_displacement
+from tools.analysis.run_artifacts import sha256_file
 from utils.spatial import SpatialTransformer
 
 SHAPE = (12, 16, 14)
@@ -191,6 +194,107 @@ def test_saved_displacement_reads_back_in_the_evaluator_layout(tmp_path):
     np.testing.assert_array_equal(loaded.affine, np.eye(4))
     with pytest.raises(ValueError):
         save_displacement(tmp_path / "bad.nii.gz", displacement.transpose(3, 0, 1, 2))
+
+
+def test_certified_export_repairs_to_an_identity_boundary_and_certifies_the_written_bytes(tmp_path):
+    from experiments.export_lumir import certified_entry
+
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        shape = (24, 24, 24)
+        displacement = np.zeros((*shape, 3), dtype=np.float32)
+        displacement[10:14, 10:14, 10:14, 0] = 1.5
+        displacement[0, :, :, 1] = 0.25
+        labels = torch.from_numpy((np.indices(shape).sum(0) % 3).astype(np.int64))[None, None]
+        target = tmp_path / "disp_0001_0000.nii.gz"
+        entry = certified_entry(target, displacement, "fixed", "moving", (labels, labels), torch.device("cpu"))
+        assert entry["global"]["global_homeomorphism"] is True
+        assert entry["boundary"]["status"] == "PASSED" and entry["cell"]["status"] == "CERTIFIED"
+        assert entry["changed_voxel_fraction"] > 0 and entry["max_component_change_voxels"] > 0
+        assert (
+            set(entry["labelled"]) == {"raw", "certified"} and 0 <= entry["labelled"]["certified"]["coarse_dice"] <= 1
+        )
+        stored = nib.load(target).get_fdata(dtype=np.float32)
+        assert stored.dtype == np.float32 and not np.any(stored[0]) and not np.any(stored[:, -1])
+    finally:
+        torch.set_num_threads(previous)
+
+
+@pytest.fixture
+def certified_export(tmp_path, monkeypatch):
+    """export_lumir.main on a stub network and two official pairs, of which only the second is labelled."""
+    from experiments import export_lumir as export
+
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    pairs = [(VAL.format("3455_0000"), VAL.format("3454_0000")), (VAL.format("3485_0000"), VAL.format("3484_0000"))]
+    _write_json(tmp_path / "val.json", [], pairs)
+    (tmp_path / "labels").mkdir()
+    for name in pairs[1]:
+        (tmp_path / "labels" / name.split("/")[-1]).touch()
+    shape = (16, 16, 16)
+    state = SimpleNamespace(calls=0, kill_at=None)
+
+    class Cascade(torch.nn.Module):
+        def forward(self, x, _y, **_kwargs):
+            state.calls += 1
+            if state.calls == state.kill_at:
+                raise RuntimeError("killed")
+            return x, torch.zeros(1, 3, *shape)
+
+    paths = dict(val_root=tmp_path, val_json=tmp_path / "val.json", label_dir=tmp_path / "labels")
+    labels = (torch.arange(16**3).reshape(1, 1, *shape) % 3).long()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(export, "resolve_lumir_paths", lambda *_a, **_k: paths)
+    monkeypatch.setattr(export, "get_model_adapter", lambda _: SimpleNamespace(build=lambda **_: Cascade()))
+    monkeypatch.setattr(export, "load_checkpoint_state", lambda *_a, **_k: {"precision": "fp32"})
+    monkeypatch.setattr(export, "_load_pair", lambda *_: (torch.zeros(1, 1, *shape), torch.zeros(1, 1, *shape)))
+    monkeypatch.setattr(export, "_label_map", lambda *_: labels)
+
+    def main(checkpoint, out, *flags):
+        arguments = ["export", "--ckpt", str(checkpoint), "--pairs", "lumir25", "--out", str(out), "--name", "fields"]
+        monkeypatch.setattr(sys, "argv", [*arguments, "--config", "CTCF-CascadeA-Mamba", "--precision", "fp32", *flags])
+        export.main()
+
+    yield main, state, pairs
+    torch.set_num_threads(previous)
+
+
+def test_certified_export_resumes_per_pair_only_under_its_own_checkpoint_and_settings(certified_export, tmp_path):
+    main, state, pairs = certified_export
+    first, second, out = tmp_path / "first.pth", tmp_path / "second.pth", tmp_path / "out"
+    first.write_bytes(b"weights")
+    second.write_bytes(b"other weights")
+    state.kill_at = 2
+    with pytest.raises(RuntimeError, match="killed"):
+        main(first, out, "--certified", "1")
+    assert len(list((out / "certificates").iterdir())) == 1
+    state.kill_at, state.calls = None, 0
+    with pytest.raises(ValueError, match="another checkpoint"):
+        main(second, out, "--certified", "1")
+    with pytest.raises(ValueError, match="another checkpoint"):
+        main(first, out, "--certified", "1", "--time_steps", "4")
+    assert state.calls == 0
+    main(first, out, "--certified", "1")
+    assert state.calls == 1
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["checkpoint_sha256"] == sha256_file(first) and manifest["identity_boundary"]["collar"] == 4
+    assert [(row["fixed"], row["moving"]) for row in manifest["files"]] == pairs
+    assert manifest["certified"]["global_homeomorphism_pairs"] == 2
+
+
+def test_certified_check_takes_a_labelled_pair_first(certified_export, tmp_path):
+    main, state, pairs = certified_export
+    checkpoint = tmp_path / "ready.pth"
+    checkpoint.write_bytes(b"weights")
+    main(checkpoint, tmp_path / "check", "--certified", "1", "--limit_pairs", "1")
+    manifest = json.loads((tmp_path / "check/manifest.json").read_text())
+    assert state.calls == 1 and [(row["fixed"], row["moving"]) for row in manifest["files"]] == pairs[1:]
+    entry = json.loads((tmp_path / "check/certificates" / f"{manifest['files'][0]['file']}.json").read_text())
+    assert set(entry["labelled"]) == {"raw", "certified"} and entry["global"]["global_homeomorphism"] is True
+    with pytest.raises(SystemExit):
+        main(checkpoint, tmp_path / "plain", "--limit_pairs", "1")
 
 
 def test_readiness_checks_complete_coarse_pairs_and_grids(tmp_path, monkeypatch):

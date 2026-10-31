@@ -340,27 +340,30 @@ def package_run(
     status = "COMPLETE" if complete else "PARTIAL" if exit_code in (130, 143) else "FAILED"
     archive = Path(f"{prefix}__{status}.zip")
     archive.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(
-        run_root / "package_manifest.json",
-        {
-            "status": status,
-            "label": label,
-            "required_steps": required_steps,
-            "head": git_head,
-            "exit_codes": codes,
-            "runner_exit_code": exit_code,
-            "payload": "arrays, displacements and checkpoints retained on the server",
-            "included_compact_roots": [str(p) for p in include_roots or []],
-        },
-    )
+    manifest = {
+        "status": status,
+        "label": label,
+        "required_steps": required_steps,
+        "head": git_head,
+        "exit_codes": codes,
+        "runner_exit_code": exit_code,
+        "payload": "arrays, displacements and checkpoints retained on the server",
+        "included_compact_roots": [str(p) for p in include_roots or []],
+    }
+    atomic_write_json(run_root / "package_manifest.json", manifest)
     temporary = archive.with_suffix(".zip.tmp")
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as handle:
-            sums = []
+            # Packages of one run may overlap in time: each carries its own manifest, not the latest file on disk.
+            text = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            handle.writestr(f"{archive.stem}/package_manifest.json", text)
+            sums = [f"{hashlib.sha256(text.encode()).hexdigest()}  package_manifest.json"]
             roots = [(run_root, ""), *[(p, f"external/{i}_{p.name}/") for i, p in enumerate(include_roots or [])]]
             for root, folder in roots:
                 for path in sorted(root.rglob("*")):
-                    if not path.is_file() or path.suffix not in (".json", ".csv", ".txt", ".log", ".py", ".md"):
+                    if not path.is_file() or path.suffix not in (".json", ".csv", ".txt", ".log", ".py", ".md", ".png"):
+                        continue
+                    if path == run_root / "package_manifest.json":
                         continue
                     name = folder + path.relative_to(root).as_posix()
                     digest = hashlib.sha256()

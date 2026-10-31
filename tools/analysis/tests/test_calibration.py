@@ -12,9 +12,14 @@ import torch
 
 from datasets.OASIS import OASISBrainDataset, OASISBrainInferDataset
 from experiments.core.data_loaders import oasis_subject_paths, oasis_validation_pairs
-from experiments.population import calibrate
-from experiments.population.evaluate import spatial_holdout
-from tools.analysis.check_lumir_training import checkpoint_comparison, resume_agreement
+from experiments.population import calibrate, evaluate
+from experiments.population.evaluate import BOUNDARY_ROUNDING_LIMIT, score_pair_field, spatial_holdout
+from tools.analysis.check_lumir_training import (
+    checkpoint_comparison,
+    export_reproduction,
+    restored_state_check,
+    trajectory_spread,
+)
 from tools.analysis.run_artifacts import package_run
 from tools.analysis.tests.test_lumir_runner import dispatch as dispatch
 from utils import NumpyType
@@ -117,11 +122,37 @@ def test_real_dev_pairs_match_frozen_manifest_including_direction():
         oasis_validation_pairs(paths[2:], root / "pair_manifest.json")
 
 
-def test_noise_baseline_does_not_silently_widen_resume_limits():
+def test_trajectory_spread_is_descriptive_and_restoration_is_checked_exactly():
     zero = np.zeros((2, 3, 4, 3), dtype=np.float32)
-    assert resume_agreement(zero, zero + 0.001, zero + 0.002)["status"] == "PASS"
-    assert resume_agreement(zero, zero, zero + 0.06)["status"] == "RESUME_MISMATCH"
-    assert resume_agreement(zero, zero + 0.1, zero + 0.1)["status"] == "CONTINUOUS_BASELINE_UNSTABLE"
+    spread = trajectory_spread(zero, zero + 0.1, zero + 2.0)
+    assert spread["status"] == "DESCRIPTIVE" and spread["errors_voxels"]["resumed"]["maximum"] == 2
+    digest = {"model": "a", "optimizer": "b", "rng": ["c", "d"]}
+    log = f"noise\n>>> restored_state {json.dumps(digest)}\nmore\n"
+    assert restored_state_check(log, digest) == digest
+    with pytest.raises(ValueError, match="differs"):
+        restored_state_check(log, digest | {"optimizer": "other"})
+    with pytest.raises(ValueError, match="did not report"):
+        restored_state_check("noise", digest)
+
+
+def test_export_reproduction_compares_a_fresh_forward_pass_with_the_written_field(tmp_path, monkeypatch):
+    import types
+
+    import tools.analysis.check_lumir_training as check
+
+    class Model(torch.nn.Module):
+        def forward(self, x, _y, **_kwargs):
+            return x, torch.full((1, 3, 2, 3, 4), 0.25)
+
+    monkeypatch.setattr(check, "volume_window_size", lambda shape: shape)
+    monkeypatch.setattr(check, "get_model_adapter", lambda _: types.SimpleNamespace(build=lambda **_: Model()))
+    monkeypatch.setattr(check, "load_checkpoint_state", lambda *a, **k: {"strict": True})
+    monkeypatch.setattr(check, "_load_pair", lambda *_: (torch.zeros(1, 1, 2, 3, 4), torch.zeros(1, 1, 2, 3, 4)))
+    manifest = {"pairs_json": "pairs.json", "files": [{"fixed": "f", "moving": "m"}]}
+    field = check.evaluator_displacement(torch.full((1, 3, 2, 3, 4), 0.25))
+    device = torch.device("cpu")
+    assert export_reproduction(tmp_path / "last.pth", manifest, field, device) == 0
+    assert export_reproduction(tmp_path / "last.pth", manifest, field + 0.5, device) == pytest.approx(0.5)
 
 
 def test_parent_reference_scores_the_same_pairs_in_sampler_map_coordinates(tmp_path, monkeypatch):
@@ -183,19 +214,126 @@ def test_a_calibration_runs_training_map_milestones_repair_and_saved_byte_certif
             map_readouts=[0, 1],
         )
         monkeypatch.setattr(calibrate, "ARMS", {"unit": ("A_lin", 64, 2, 0, 1)})
-        calibrate.fit_arm(tmp_path / "run", config, "unit", "cpu")
-        case = next((tmp_path / "run/arms/unit/last/pairs").iterdir())
+        monkeypatch.setattr(calibrate, "EXTENDED_EPOCHS", 2)
+        monkeypatch.setattr(calibrate, "EXTENDED_SNAPSHOT_EPOCHS", [2])
+        run = tmp_path / "run"
+        calibrate.fit_arm(run, config, "unit", "cpu")
+        for path in heldout:
+            fitted = run / "labels" / Path(path).stem
+            fitted.mkdir(parents=True)
+            np.save(fitted / "velocity.npy", np.zeros((1, 3, 9, 9, 9), dtype=np.float32))
+            (fitted / "report.json").write_text(json.dumps({"directory": str(fitted)}))
+        options = dict(cohort="heldout")
+        check = run / "arms/unit/last/pair_check.json"
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("exploded")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(evaluate, "repair", broken)
+            with pytest.raises(RuntimeError, match="raw scores are written"):
+                calibrate.assess_arm(run, config, "unit", "last", "cpu", limit_pairs=1, **options)
+            assert json.loads(check.read_text())["status"] == "RAW_ONLY"
+        with monkeypatch.context() as patched:
+            patched.setattr(calibrate, "score_pair_field", broken)
+            with pytest.raises(RuntimeError, match="exploded"):
+                calibrate.assess_arm(run, config, "unit", "last", "cpu", limit_pairs=1, **options)
+            assert not check.exists()
+        calibrate.assess_arm(run, config, "unit", "last", "cpu", limit_pairs=1, **options)
+        assert json.loads(check.read_text())["status"] == "PASS"
+        assert not (run / "arms/unit/last/report.json").exists()
+        calibrate.assess_arm(run, config, "unit", "last", "cpu", **options)
+        case = next((run / "arms/unit/last/pairs").iterdir())
         report = json.loads((case / "report.json").read_text())
         assert report["certificate_REP"]["status"] == "CERTIFIED"
         assert report["global_REP"]["global_homeomorphism"] is True
         assert set(json.loads((case / "map_readouts.json").read_text())["steps"]) == {"0", "1"}
         assert set(report["rows"]) == {"FF", "REP"}
-        calibrate.fit_arm(tmp_path / "run", config, "unit", "cpu")
+        assert not list((run / "arms/unit/last/subjects").glob("*/step_*.npy"))
+        assert list((run / "arms/unit/last/subjects").glob("*/velocity.npy"))
+        assert (run / "arms/unit/last/atlas_preview.png").stat().st_size > 0
+        terms = json.loads((run / "arms/unit/last/diagnostics.json").read_text())
+        assert terms["subjects"][Path(heldout[0]).stem]["encoder"][0]["linear_rms"] >= 0
+        distance = terms["label_map_distance_voxels"][case.name]
+        assert distance["foreground_label_map_norm"] == 0 and distance["foreground_distance"] >= 0
+        checkpoint = calibrate.arm_point(run, "unit", "last")[0]
+        evaluated = checkpoint.read_bytes()
+        calibrate.extend_arm(run, config, "unit", "cpu")
+        assert checkpoint.read_bytes() == evaluated
+        assert torch.load(run / "arms/unit/ext/last.pth", weights_only=False)["completed_epochs"] == 2
+        assert (run / "arms/unit/ext/epoch_2.pth").is_file()
+        calibrate.assess_arm(run, config, "unit", "ext/last", "cpu", certify_output=False, **options)
+        assert set(
+            json.loads(next((run / "arms/unit/ext_last/pairs").iterdir()).joinpath("report.json").read_text())["rows"]
+        ) == {"FF", "REP"}
+        calibrate.assess_arm(run, config, "unit", "last", "cpu", **options)
         (case / "FF.npz").write_bytes(b"changed cached field")
         with pytest.raises(ValueError, match="pair-field"):
-            calibrate.fit_arm(tmp_path / "run", config, "unit", "cpu")
+            calibrate.assess_arm(run, config, "unit", "last", "cpu", **options)
     finally:
         torch.set_num_threads(previous_threads)
+
+
+def _pair_inputs():
+    velocity = torch.zeros(1, 3, 12, 12, 12)
+    velocity[:, :, 4:8, 4:8, 4:8] = 0.2
+    labels = (torch.arange(12**3).reshape(1, 1, 12, 12, 12) % 3).long()
+    return velocity, labels
+
+
+def test_boundary_rounding_is_removed_and_reported_before_the_bytes_are_written(tmp_path):
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        flow, labels = _pair_inputs()
+        flow[:, 0, -1, 5, 5] = 5e-9
+        rows, report = score_pair_field(
+            flow, labels, labels, "case", tmp_path, 1.0, repair_output=True, certify_output=True
+        )
+        assert set(rows) == {"FF", "REP"} and report["boundary_rounding_removed_voxels"] == pytest.approx(5e-9)
+        assert report["global_FF"]["boundary_status"] == "PASSED"
+        assert report["global_REP"]["global_homeomorphism"] is True
+    finally:
+        torch.set_num_threads(previous)
+
+
+def test_raw_dice_survives_a_failed_repair_and_real_boundary_motion_refuses_the_claim(tmp_path, monkeypatch):
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        flow, labels = _pair_inputs()
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("repair exploded")
+
+        monkeypatch.setattr(evaluate, "repair", broken)
+        rows, report = score_pair_field(
+            flow, labels, labels, "case", tmp_path / "broken", 1.0, repair_output=True, certify_output=True
+        )
+        assert set(rows) == {"FF"} and "exploded" in report["repair_error"]
+        assert evaluate.pair_errors(report) == ["repair_error"]
+        assert json.loads((tmp_path / "broken/metrics.json").read_text())["FF"]["dice_mean"] == rows["FF"]["dice_mean"]
+        moved = flow.clone()
+        moved[:, 0, -1, 5, 5] = 10 * BOUNDARY_ROUNDING_LIMIT
+        rows, report = score_pair_field(
+            moved, labels, labels, "case", tmp_path / "moved", 1.0, repair_output=True, certify_output=False
+        )
+        assert set(rows) == {"FF"} and "not rounding" in report["repair_error"]
+    finally:
+        torch.set_num_threads(previous)
+
+
+def test_two_packages_of_one_run_keep_their_own_manifests(tmp_path):
+    run = tmp_path / "run"
+    (run / "exit_codes").mkdir(parents=True)
+    (run / "exit_codes/first.txt").write_text("0")
+    (run / "preview.png").write_bytes(b"png")
+    package_run(run, tmp_path / "early", 0, ["first"], "head", "EARLY")
+    package_run(run, tmp_path / "late", 0, ["first", "other"], "head", "LATE")
+    with zipfile.ZipFile(tmp_path / "early__COMPLETE.zip") as handle:
+        assert json.loads(handle.read("early__COMPLETE/package_manifest.json"))["label"] == "EARLY"
+        assert "early__COMPLETE/preview.png" in handle.namelist()
+    assert json.loads((run / "package_manifest.json").read_text())["label"] == "LATE"
 
 
 def test_combined_package_includes_external_logs_and_excludes_heavy_payload(tmp_path):
@@ -283,18 +421,41 @@ def calibration_dispatch(dispatch):
     (population / "__init__.py").touch()
     (population / "calibrate.py").write_text(
         "import sys,json,os\nfrom pathlib import Path\na=sys.argv; task=a[a.index('--task')+1]; root=Path(a[a.index('--run')+1]); root.mkdir(parents=True,exist_ok=True)\n"
+        "value=lambda flag,default=None: a[a.index(flag)+1] if flag in a else default\n"
+        "name=value('--arm'); gpu=os.environ.get('CUDA_VISIBLE_DEVICES')\n"
+        "journal=Path(os.environ['TEST_ROOT'])/'jobs.txt'\n"
+        "with journal.open('a') as handle: handle.write(' '.join([str(gpu),task,str(name),value('--point','-'),value('--cohort','-'),value('--stage','-')])+'\\n')\n"
+        "pair_check='--limit-pairs' in a and os.environ.get('PAIR_CHECK')\n"
+        "if pair_check=='raw': raise SystemExit(1)\n"
+        "marker=Path(os.environ['TEST_ROOT'])/'killed_once'\n"
+        "if name and os.environ.get('KILL_ONCE')==name and not marker.exists(): marker.touch(); raise SystemExit(137)\n"
+        "if name and os.environ.get('FAIL_ARM')==name: raise SystemExit(7)\n"
         "if task=='prepare': target=root/'config.json'; (root/'split.json').write_text('{}')\n"
         "elif task=='labels':\n"
         "    if os.environ.get('FAIL_LABEL') and a[a.index('--shard')+1]=='0': raise SystemExit(8)\n"
         "    target=root/('labels_'+a[a.index('--shards')+1]+'_'+a[a.index('--shard')+1]+'.done')\n"
-        "elif task in ('fit','local'):\n"
-        "    name=a[a.index('--arm')+1]\n"
-        "    if os.environ.get('FAIL_ARM')==name: raise SystemExit(7)\n"
-        "    target=root/('arms' if task=='fit' else 'local')/name/'report.json'\n"
+        "elif task in ('fit','local'): target=root/('arms' if task=='fit' else 'local')/name/'report.json'\n"
+        "elif task=='extend': target=root/'arms'/name/'ext/report.json'\n"
+        "elif task=='assess':\n"
+        "    label=value('--point','last').replace('/','_'); cohort=value('--cohort','heldout'); stage=value('--stage','all')\n"
+        "    folder=root/'arms'/name/(label if cohort=='heldout' else label+'_'+cohort)\n"
+        "    target=folder/'pair_check.json' if '--limit-pairs' in a else folder/(stage+'_'+value('--shard','0')+'_'+value('--shards','1')+'.done') if stage in ('fit','score') else folder/'report.json'\n"
+        "elif task=='oasis19': target=root/'arms'/name/(value('--point')+'_oasis19')/'REP/summary.json'\n"
+        "elif task=='reference': target=root/'references'/value('--label')/value('--cohort')/'report.json'\n"
         "elif task=='ridge': target=root/'ridge/n_277.json'\n"
         "elif task=='parent': target=root/'parent/report.json'\n"
         "else: target=root/'summary.json'\n"
         "target.parent.mkdir(parents=True,exist_ok=True); target.write_text('{}')\n"
+        "raise SystemExit(1 if pair_check=='repair' else 0)\n"
+    )
+    exporter = root / "experiments/export_lumir.py"
+    exporter.write_text(
+        exporter.read_text().replace(
+            "out.mkdir(parents=True)",
+            "out.mkdir(parents=True,exist_ok=True)\n"
+            "if os.environ.get('FAIL_CERT_CHECK') and '--limit_pairs' in a: raise SystemExit(9)\n"
+            "(out/'manifest.json').write_text('{}')",
+        )
     )
     trainer = root / "experiments/train_CTCF.py"
     source = trainer.read_text().replace(
@@ -310,7 +471,7 @@ def calibration_dispatch(dispatch):
     (root / "tools/analysis/check_lumir_training.py").write_text(
         "import sys,os\nfrom pathlib import Path\n"
         "if os.environ.get('FAIL_READY'): raise SystemExit(8)\n"
-        "target=Path(sys.argv[sys.argv.index('--run')+1])/'report.json'; target.parent.mkdir(parents=True,exist_ok=True); target.write_text('{}')\n"
+        "target=Path(sys.argv[sys.argv.index('--run')+1])/'report.json'; target.parent.mkdir(parents=True,exist_ok=True); target.write_text('{\"experiments\":[\"unit_ready\"]}')\n"
     )
 
     def launch(**options):
@@ -324,9 +485,13 @@ def calibration_dispatch(dispatch):
                     LUMIR_GPUS="4 5 6 7",
                     MIN_FREE_GIB="0",
                     PARENT_CHECKPOINT=parent.as_posix(),
+                    A_SLOTS="8",
+                    QUEUE_POLL_SECONDS="0.1",
+                    KILL_RETRY_SECONDS="0",
                 )
                 | options
-            )
+            ),
+            timeout=120,
         )
 
     return root, launch
@@ -341,7 +506,91 @@ def test_calibration_automatically_starts_authorized_control_and_can_resume(cali
     again = run()
     assert again.returncode == 0, again.stderr + again.stdout
     assert "SKIP lumir_control" in again.stdout and "SKIP mamba294" in again.stdout
-    assert "SKIP fit_a1_278" in again.stdout
+    assert "SKIP fit_a1_278" in again.stdout and "SKIP assess_a1_278_last" in again.stdout
+    args = json.loads((root / "logs/unit_cal_mamba294/args.json").read_text())
+    assert args[args.index("--max_epoch") + 1] == "250" and args[args.index("--schedule_max_epoch") + 1] == "500"
+    jobs = (root / "jobs.txt").read_text().splitlines()
+    position = {line.split(" ", 1)[1]: index for index, line in reversed(list(enumerate(jobs)))}
+    assert position["fit lin64_s0 - - -"] < position["assess lin64_s0 last - -"] < position["labels None - - -"]
+    assert position["assess lin64_s0 last - -"] < position["assess a1_64_s0 last - -"] < position["fit a1_278 - - -"]
+    assert position["fit a1_278 - - -"] < position["assess a1_278 last - -"]
+    assert (
+        position["assess a1_278 last dev fit"]
+        < position["assess a1_278 last dev score"]
+        < position["assess a1_278 last dev summary"]
+    )
+    assert (root / "results/lumir/unit_cal_lumir_control/certified_lumir25/manifest.json").is_file()
+    check = root / "results/calibration/unit_cal/readiness/certified_check"
+    arguments = json.loads((check / "args.json").read_text())
+    assert arguments[arguments.index("--ckpt") + 1] == "results/unit_ready/ckpt/last.pth"
+    assert arguments[arguments.index("--limit_pairs") + 1] == "1"
+    assert json.loads((check / "env.json").read_text())["gpus"] == "4"
+    assert any("__LUMIR__COMPLETE" in p.name for p in (root / "results/exports").glob("*.zip"))
+    assert any("__A64__COMPLETE" in p.name for p in (root / "results/exports").glob("*.zip"))
+
+
+def test_sigkilled_job_restarts_a_bounded_number_of_times(calibration_dispatch):
+    root, run = calibration_dispatch
+    result = run(KILL_ONCE="lin64_s0")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "RETRY after SIGKILL (1/2)" in result.stdout
+    assert (root / "results/calibration/unit_cal/exit_codes/fit_lin64_s0.txt").read_text().strip() == "0"
+
+
+def test_freed_gpus_join_the_a_queue(calibration_dispatch):
+    root, run = calibration_dispatch
+    result = run(A_GPUS="1", A_SLOTS="4")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "GPUs joining the A queue: 5 6 7" in result.stdout and "GPUs joining the A queue: 3" in result.stdout
+    late = [line.split()[0] for line in (root / "jobs.txt").read_text().splitlines() if " assess " in f" {line}"]
+    assert "1" in late and set(late) & {"3", "4", "5", "6", "7"}
+
+
+def test_new_commit_continues_only_when_explicitly_allowed(calibration_dispatch):
+    root, run = calibration_dispatch
+    first = run(FAIL_ARM="a1_64_s0")
+    assert first.returncode != 0
+    (root / "results/calibration/unit_cal/head.txt").write_text("older\n")
+    refused = run()
+    assert refused.returncode != 0 and "another HEAD" in refused.stdout
+    resumed = run(ALLOW_NEW_HEAD="1")
+    assert resumed.returncode == 0, resumed.stderr + resumed.stdout
+    assert (root / "results/calibration/unit_cal/head.txt").read_text().strip() == "older"
+    assert "reviewed" in (root / "results/calibration/unit_cal/heads.txt").read_text().splitlines()[-1]
+
+
+def test_broken_raw_chain_holds_evaluation_but_not_training(calibration_dispatch):
+    root, run = calibration_dispatch
+    result = run(PAIR_CHECK="raw")
+    assert result.returncode != 0, result.stderr + result.stdout
+    directory = root / "results/calibration/unit_cal"
+    jobs = [line.split()[1] for line in (root / "jobs.txt").read_text().splitlines()]
+    assert jobs.count("assess") == 1 and "oasis19" not in jobs
+    assert (directory / "a/arms/a1_278/report.json").is_file() and (
+        directory / "a/arms/a1_64_s0/ext/report.json"
+    ).is_file()
+    assert (directory / "exit_codes/assess_a1_64_s0_last.txt").read_text().strip() == "125"
+    assert (root / "results/unit_cal_lumir_control/ckpt/last.pth").is_file()
+
+
+def test_failed_repair_in_the_pair_check_leaves_raw_evaluation_running(calibration_dispatch):
+    root, run = calibration_dispatch
+    result = run(PAIR_CHECK="repair")
+    assert result.returncode != 0, result.stderr + result.stdout
+    directory = root / "results/calibration/unit_cal"
+    assert (directory / "exit_codes/pair_check.txt").read_text().strip() == "1"
+    assert (directory / "a/arms/a1_64_s0/last/report.json").is_file()
+    assert (directory / "a/arms/a1_278/last_dev/report.json").is_file()
+
+
+def test_failed_certified_check_holds_only_the_certified_export(calibration_dispatch):
+    root, run = calibration_dispatch
+    result = run(FAIL_CERT_CHECK="1")
+    assert result.returncode != 0, result.stderr + result.stdout
+    assert "HELD lumir_certified" in result.stdout
+    assert (root / "results/unit_cal_lumir_control/ckpt/last.pth").is_file()
+    assert not (root / "results/lumir/unit_cal_lumir_control/certified_lumir25").exists()
+    assert (root / "results/calibration/unit_cal/exit_codes/lumir_certified.txt").read_text().strip() == "125"
 
 
 def test_failed_labels_do_not_cancel_image_training(calibration_dispatch):
@@ -416,7 +665,7 @@ def test_start_command_backgrounds_the_same_worker(calibration_dispatch):
     script = Path(__file__).resolve().parents[3] / "tools/runners/train/calibration.sh"
     result = run(TEST_SCRIPT=wrapper.as_posix(), CALIBRATION_SCRIPT=script.as_posix())
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "PID=" in result.stdout and "RUN_ID=unit_cal LOG=/tmp/" in result.stdout
+    assert "PID=" in result.stdout and "RUN_ID=unit_cal LOG=results/calibration/unit_cal_" in result.stdout
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         archives = list((root / "results/exports").glob("unit_cal*__COMPLETE.zip"))
@@ -435,13 +684,12 @@ def test_early_archive_does_not_wait_for_mamba(calibration_dispatch):
     with zipfile.ZipFile(early) as handle:
         manifest = json.loads(handle.read(f"{early.stem}/package_manifest.json"))
     assert "mamba294" not in manifest["required_steps"]
-    assert "mamba294" not in manifest["exit_codes"]
     assert any("__A_LUMIR" not in p.name for p in (root / "results/exports").glob("*__COMPLETE.zip"))
 
 
 def test_lumir_retry_before_first_checkpoint_preserves_old_attempt(calibration_dispatch):
     root, run = calibration_dispatch
-    failed = run(FAIL_BEFORE_FIRST="1")
+    failed = run(FAIL_BEFORE_FIRST="1", KILL_RETRIES="0")
     assert failed.returncode != 0
     original = root / "results/lumir/unit_cal_lumir_control"
     assert original.is_dir()

@@ -84,7 +84,7 @@ def dispatch(tmp_path):
         EXP="test",
     )
 
-    def run(**updates):
+    def run(timeout=35, **updates):
         prefix = '$(cygpath -u "$TEST_BIN")' if os.name == "nt" else "$TEST_BIN"
         return subprocess.run(
             [BASH, "-c", f'export PATH="{prefix}:$PATH"; echo $$ > "$TEST_ROOT/runner.pid"; exec bash "$TEST_SCRIPT"'],
@@ -92,7 +92,7 @@ def dispatch(tmp_path):
             env=env | updates,
             capture_output=True,
             text=True,
-            timeout=35,
+            timeout=timeout,
         )
 
     return tmp_path, run

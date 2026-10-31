@@ -215,26 +215,29 @@ class PopulationAtlas(nn.Module):
         # Zero detail bands remain in the reconstruction until their stage is sampled.
         return F.adaptive_avg_pool3d(haar_inverse(self.with_bands(bands)), shape)
 
+    def _prior_terms(self, stage: int, bands: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Spatial prior-mean terms of one detail stage, in the order they add up."""
+        shape = self.stage_shapes[stage]
+        template = F.adaptive_avg_pool3d(self._crop(self.atlas()), shape).expand(bands[0].shape[0], -1, -1, -1, -1)
+        terms = {"atlas": self.prior_heads[stage - 1](template)}
+        if self.arm != "A0":
+            context = self._context(bands, shape)
+            terms["linear"] = self.linear_heads[stage - 1](context)
+            if self.arm == "A1":
+                head = self.residual_heads[stage - 1]
+                terms["nonlinear"] = head(torch.cat((template, context), dim=1)) - head(
+                    torch.cat((template, torch.zeros_like(context)), dim=1)
+                )
+        return terms
+
     def _prior_step(
         self, stage: int, bands: list[torch.Tensor]
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-        batch = bands[0].shape[0]
         if stage == 0:
             means = (torch.zeros_like(bands[0]),)
             scales = (self._scale(self.prior_scale_logits[0])[None, :, None, None, None],)
             return means, scales
-        shape = self.stage_shapes[stage]
-        template = F.adaptive_avg_pool3d(self._crop(self.atlas()), shape).expand(batch, -1, -1, -1, -1)
-        prediction = self.prior_heads[stage - 1](template)
-        if self.arm != "A0":
-            context = self._context(bands, shape)
-            prediction = prediction + self.linear_heads[stage - 1](context)
-            if self.arm == "A1":
-                head = self.residual_heads[stage - 1]
-                residual = head(torch.cat((template, context), dim=1)) - head(
-                    torch.cat((template, torch.zeros_like(context)), dim=1)
-                )
-                prediction = prediction + residual
+        prediction = sum(self._prior_terms(stage, bands).values())
         means = haar_forward(prediction, 1).levels[0].details
         offset = 1 + 7 * (stage - 1)
         scales = tuple(self._scale(self.prior_scale_logits[offset + i])[None, :, None, None, None] for i in range(7))
@@ -296,6 +299,35 @@ class PopulationAtlas(nn.Module):
                 prefix[offset : offset + len(means)] = selected
                 offset += len(means)
         return result
+
+    @torch.no_grad()
+    def prior_terms(self, coefficients: HaarPyramid) -> list[dict[str, float]]:
+        """Per-stage RMS of the details and of each prior-mean term, with the detail energy each sum explains."""
+
+        def energy(bands):
+            return sum(float(band.double().square().sum()) for band in bands)
+
+        values = coefficient_bands(self.with_bands(coefficient_bands(coefficients)))
+        prefix = self._empty_bands(values[0].shape[0])
+        prefix[0] = values[0]
+        rows = []
+        for stage in range(1, self.levels + 1):
+            offset = 1 + 7 * (stage - 1)
+            details = values[offset : offset + 7]
+            count = sum(band.numel() for band in details)
+            total = energy(details)
+            row = {"stage": stage, "detail_rms": (total / count) ** 0.5}
+            cumulative = None
+            for name, term in self._prior_terms(stage, prefix).items():
+                cumulative = term if cumulative is None else cumulative + term
+                projected = haar_forward(term, 1).levels[0].details
+                row[f"{name}_rms"] = (energy(projected) / count) ** 0.5
+                mean = haar_forward(cumulative, 1).levels[0].details
+                remaining = energy([band - part for band, part in zip(details, mean, strict=True)])
+                row[f"explained_through_{name}"] = 1 - remaining / total if total > 0 else None
+            rows.append(row)
+            prefix[offset : offset + 7] = details
+        return rows
 
     def weight_penalty(self) -> torch.Tensor:
         """Squared norm for a Gaussian hyperprior on generative network weights and scale logits."""

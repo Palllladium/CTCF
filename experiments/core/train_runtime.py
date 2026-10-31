@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from contextlib import nullcontext
@@ -22,6 +23,7 @@ from experiments.core.distributed import (
     finite_on_all,
     reduce_epoch,
     restore_training_state,
+    restored_state_digest,
     training_objective,
     training_state,
     world_info,
@@ -172,6 +174,9 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
     )
     objective = training_objective(runner)
     restore_training_state(resumed_training, args, device, epoch_start, train_loader.sampler)
+    if resumed_training.get("world_size") == world:
+        digest = restored_state_digest(runner.model, runner.optimizer, device)
+        print(f">>> restored_state {json.dumps(digest, sort_keys=True)}", flush=True)
     metrics_journal = (
         prepare_metrics_csv(
             os.path.join(paths.log_dir, "metrics.csv"),

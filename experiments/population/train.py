@@ -101,7 +101,7 @@ def train_model(args) -> dict:
         model, payload = load_population_checkpoint(checkpoint_path, device)
         if payload.get("evaluation_only", False):
             raise ValueError("an intra-epoch snapshot is for evaluation, not exact continuation")
-        ignored = {"epochs", "output", "device", "resume"}
+        ignored = {"epochs", "output", "device", "resume", "snapshot_epochs", "snapshot_updates"}
         if {k: v for k, v in arguments.items() if k not in ignored} != {
             k: v for k, v in payload["arguments"].items() if k not in ignored
         }:

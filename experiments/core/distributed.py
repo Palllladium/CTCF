@@ -1,5 +1,6 @@
 """DDP support for the existing training loop, including its bidirectional loss and epoch checkpoints."""
 
+import hashlib
 import math
 import random
 from dataclasses import replace
@@ -95,15 +96,56 @@ def reduce_epoch(meters, perf, device, measured_wall):
     )
 
 
-def training_state(args, device, sampler=None) -> dict:
-    rank, world = world_info()
+def _local_rng_state(device) -> dict:
     np_state = np.random.get_state()
-    local = {
+    return {
         "python": random.getstate(),
         "numpy": (np_state[0], np_state[1].tolist(), *np_state[2:]),
         "torch": torch.get_rng_state(),
         "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
     }
+
+
+def _rng_digest(local: dict) -> str:
+    digest = hashlib.sha256(repr((local["python"], local["numpy"])).encode())
+    for state in (local["torch"], local["cuda"]):
+        if state is not None:
+            digest.update(state.cpu().numpy().tobytes())
+    return digest.hexdigest()
+
+
+def state_digest(model_state: dict, optimizer_state: dict, rng_states: list) -> dict:
+    """SHA-256 of what a resume must restore exactly, comparable between a checkpoint file and a live process."""
+    weights, optimizer = hashlib.sha256(), hashlib.sha256()
+    for key in sorted(model_state):
+        weights.update(key.encode())
+        weights.update(model_state[key].detach().cpu().numpy().tobytes())
+    for group in optimizer_state["param_groups"]:
+        optimizer.update(repr(sorted(group.items())).encode())
+    for index in sorted(optimizer_state["state"]):
+        for name in sorted(optimizer_state["state"][index]):
+            optimizer.update(f"{index}.{name}".encode())
+            optimizer.update(torch.as_tensor(optimizer_state["state"][index][name]).detach().cpu().numpy().tobytes())
+    return {
+        "model": weights.hexdigest(),
+        "optimizer": optimizer.hexdigest(),
+        "rng": [_rng_digest(local) for local in rng_states],
+    }
+
+
+def restored_state_digest(model, optimizer, device) -> dict:
+    """The digest of a resumed process, after restoration and before any update or random draw."""
+    states = [None] * world_info()[1]
+    if world_info()[1] > 1:
+        dist.all_gather_object(states, _local_rng_state(device))
+    else:
+        states[0] = _local_rng_state(device)
+    return state_digest(model.state_dict(), optimizer.state_dict(), states)
+
+
+def training_state(args, device, sampler=None) -> dict:
+    rank, world = world_info()
+    local = _local_rng_state(device)
     states = [None] * world
     if world > 1:
         dist.all_gather_object(states, local)

@@ -30,7 +30,7 @@ SETTINGS = {"PROFILE_WIDTH": 8, "PROFILE_LEVELS": 3, "PROFILE_EPOCHS": 2, "PROBE
 
 def write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(path)
 

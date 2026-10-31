@@ -32,6 +32,32 @@ def _model(arm="A1"):
     )
 
 
+def test_prior_terms_separate_each_arm_and_agree_with_the_prior_mean():
+    velocity = torch.linspace(-1, 1, 3 * 5 * 7 * 9).reshape(1, 3, 5, 7, 9)
+    coefficients = haar_forward(velocity, 2)
+    for arm, names in (("A0", {"atlas"}), ("A_lin", {"atlas", "linear"}), ("A1", {"atlas", "linear", "nonlinear"})):
+        model = _model(arm)
+        for heads in (model.prior_heads, model.residual_heads):
+            for head in heads:
+                torch.nn.init.constant_(head.output.weight, 0.02)
+        for head in model.linear_heads:
+            torch.nn.init.constant_(head.weight, 0.01)
+        rows = model.prior_terms(coefficients)
+        assert len(rows) == 2
+        assert {key for key in rows[0] if key.endswith("_rms")} == {f"{name}_rms" for name in names} | {"detail_rms"}
+        assert all(rows[0][f"{name}_rms"] > 0 for name in names)
+        values = coefficient_bands(coefficients)
+        prefix = model._empty_bands(1)
+        prefix[0] = values[0]
+        means, _ = model._prior_step(1, prefix)
+        residual = sum(
+            float((value - mean).double().square().sum()) for value, mean in zip(values[1:8], means, strict=True)
+        )
+        total = sum(float(value.double().square().sum()) for value in values[1:8])
+        last = {"A0": "atlas", "A_lin": "linear", "A1": "nonlinear"}[arm]
+        assert rows[0][f"explained_through_{last}"] == pytest.approx(1 - residual / total)
+
+
 def test_gaussian_normalizers_and_kl_match_distributions():
     value = torch.linspace(-1, 1, 18).reshape(2, 3, 1, 1, 3)
     q_mean, p_mean = value * 0.2, value * -0.1

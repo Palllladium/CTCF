@@ -28,8 +28,12 @@ from experiments.population.train import load_population_checkpoint, observation
 from utils import pkload
 from utils.cert_boundary import boundary_report, global_verdict
 from utils.cert_exact import certify_flow_exact
-from utils.field import _warp, compose_flows
+from utils.field import _warp, boundary_max_disp, boundary_vertex_mask, compose_flows, enforce_identity_boundary
 from utils.field_io import load_flow_npz, save_flow_npz_atomic
+
+# Far above the nanovoxels of float rounding, far below any boundary motion a collar-zero map could really make.
+BOUNDARY_ROUNDING_LIMIT = 1e-4
+RECOVERABLE = (RuntimeError, ValueError, FloatingPointError)
 
 
 def velocity_energy(model, observed, interior, variance, mean, covariance, gain_min, observation_mask=None):
@@ -209,34 +213,53 @@ def importance_diagnostic(model, observed, variance, mean, covariance, gain_min,
     }
 
 
+def pair_errors(report: dict) -> list[str]:
+    """Names of the steps that raised for one pair; a negative certificate verdict is an outcome, not an error."""
+    return [key for key in report if key.endswith("_error") or key.startswith("error_")]
+
+
 def score_pair_field(raw, x_seg, y_seg, case_id, case_dir, seconds, *, repair_output, certify_output):
-    """Score and serialize one composed field; certification reloads those final bytes."""
+    """Store and score the raw field before anything else can fail; certification rereads the final bytes.
+
+    A collar-zero SVF pair map fixes the box boundary, yet on CUDA (N-1)/(N-1) can round below one and leak
+    nanovoxels onto a face. That rounding is removed, and reported, before any bytes are written.
+    """
     case_dir.mkdir(parents=True, exist_ok=True)
-    report, rows = {}, {}
-    outputs = {"FF": (raw, seconds)}
-    if repair_output:
-        mask = torch.ones_like(raw[:, :1], dtype=torch.bool)
-        mask[:, :, 1:-1, 1:-1, 1:-1] = False
-        if torch.count_nonzero(raw.masked_select(mask.expand_as(raw))):
-            raise ValueError("canonical pair has nonzero boundary; refusing a zero-boundary repair claim")
-        started = time.perf_counter()
-        repaired, report["repair"] = repair(raw, fixed_mask=mask, fixed_values=torch.zeros_like(raw))
-        outputs["REP"] = (repaired, seconds + time.perf_counter() - started)
-    for mode, (flow, elapsed) in outputs.items():
-        path = case_dir / f"{mode}.npz"
-        save_flow_npz_atomic(path, flow)
-        rows[mode] = score(
-            flow, case_id, elapsed, x_seg, y_seg, REPAIR["tri_eps"] if mode == "REP" else 0.0, "canonical"
-        )
-        if certify_output:
-            stored = load_flow_npz(path)
-            cell = certify_flow_exact(stored, eps=str(REPAIR["tri_eps"]))
-            boundary = boundary_report(stored)
-            verdict = global_verdict(cell, boundary)
-            cell["global_homeomorphism_hypotheses_met"] = verdict["global_homeomorphism"]
-            report[f"certificate_{mode}"] = cell
-            report[f"boundary_{mode}"] = boundary
-            report[f"global_{mode}"] = verdict
+    removed = boundary_max_disp(raw)
+    zero_boundary = removed <= BOUNDARY_ROUNDING_LIMIT
+    if zero_boundary:
+        raw = enforce_identity_boundary(raw)
+    report, rows = {"boundary_rounding_removed_voxels": removed}, {}
+
+    def store(mode, flow, elapsed, eps):
+        save_flow_npz_atomic(case_dir / f"{mode}.npz", flow)
+        rows[mode] = score(flow, case_id, elapsed, x_seg, y_seg, eps, "canonical")
+        (case_dir / "metrics.json").write_text(json.dumps(rows, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
+    store("FF", raw, seconds, 0.0)
+    if repair_output and not zero_boundary:
+        report["repair_error"] = f"boundary displacement {removed} is not rounding; no zero-boundary repair claim"
+    elif repair_output:
+        try:
+            started = time.perf_counter()
+            mask = boundary_vertex_mask(raw)
+            repaired, report["repair"] = repair(raw, fixed_mask=mask, fixed_values=torch.zeros_like(raw))
+            store("REP", repaired, seconds + time.perf_counter() - started, REPAIR["tri_eps"])
+        except RECOVERABLE as error:
+            report["repair_error"] = repr(error)
+    if certify_output:
+        for mode in rows:
+            try:
+                stored = load_flow_npz(case_dir / f"{mode}.npz")
+                cell = certify_flow_exact(stored, eps=str(REPAIR["tri_eps"]))
+                boundary = boundary_report(stored)
+                verdict = global_verdict(cell, boundary)
+                cell["global_homeomorphism_hypotheses_met"] = verdict["global_homeomorphism"]
+                report[f"certificate_{mode}"] = cell
+                report[f"boundary_{mode}"] = boundary
+                report[f"global_{mode}"] = verdict
+            except RECOVERABLE as error:
+                report[f"error_certificate_{mode}"] = repr(error)
     report["certification"] = "SEE_PER_FIELD_REPORTS" if certify_output else "NOT_RUN"
     return rows, report
 
@@ -285,6 +308,7 @@ def evaluate_model(args) -> None:
         return
     all_rows = {"FF": [], "REP": []}
     fitted = {}
+    failures = {}
     for path in args.pairs:
         payload_pair = pkload(path)
         if not isinstance(payload_pair, (tuple, list)) or len(payload_pair) != 4:
@@ -348,6 +372,8 @@ def evaluate_model(args) -> None:
             raw, x_seg, y_seg, path.stem, case_dir, seconds, repair_output=args.repair, certify_output=args.certify
         )
         report.update(details)
+        if pair_errors(details):
+            failures[path.stem] = pair_errors(details)
         for mode, row in rows.items():
             all_rows[mode].append(row)
         (case_dir / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -363,6 +389,8 @@ def evaluate_model(args) -> None:
                 str(args.checkpoint),
                 "explicit paired OASIS files",
             )
+    if failures:
+        raise RuntimeError(f"pair steps raised; every completed score is written: {failures}")
 
 
 def main() -> None:

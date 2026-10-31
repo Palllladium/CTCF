@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import random
@@ -18,7 +20,14 @@ from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset
 
 from datasets.LUMIR import LUMIRPairSampler
-from experiments.core.distributed import accumulation_steps, finite_on_all, restore_training_state, training_state
+from experiments.core.distributed import (
+    accumulation_steps,
+    finite_on_all,
+    restore_training_state,
+    state_digest,
+    training_state,
+)
+from tools.analysis.check_lumir_training import restored_state_check
 from utils.runtime import PerfInfo
 
 
@@ -155,7 +164,10 @@ def _worker(rank, world, rendezvous, root, mode, stochastic):
             ),
         ):
             try:
-                run_train(args, runner, loaders)
+                captured = io.StringIO()
+                with contextlib.redirect_stdout(captured):
+                    run_train(args, runner, loaders)
+                Path(f"stdout_{rank}.txt").write_text(captured.getvalue())
             except InterruptedError:
                 if mode != "pause":
                     raise
@@ -266,7 +278,11 @@ def test_epoch_resume_restores_optimizer_and_each_ranks_random_streams(tmp_path)
     full = _run(tmp_path / "full", stochastic=True)
     _run(tmp_path / "resumed", mode="pause", stochastic=True)
     shutil.copytree(tmp_path / "resumed", tmp_path / "resized")
+    saved = torch.load(tmp_path / "resumed/results/test/ckpt/last.pth", weights_only=False)
+    interrupted = state_digest(saved["state_dict"], saved["optimizer"], saved["training"]["rng"])
+    assert len(interrupted["rng"]) == 2
     resumed = _run(tmp_path / "resumed", mode="resume", stochastic=True)
+    restored_state_check((tmp_path / "resumed/stdout_0.txt").read_text(), interrupted)
     for key in full:
         torch.testing.assert_close(full[key], resumed[key], rtol=0, atol=0)
     import csv
@@ -309,3 +325,25 @@ def test_failed_checkpoint_write_keeps_the_previous_last(tmp_path):
         save_ckpt({"epoch": 1}, str(tmp_path), False)
     assert torch.load(tmp_path / "last.pth", weights_only=True)["epoch"] == 0
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_state_digest_sees_optimizer_settings_and_group_membership(tmp_path):
+    first, second = torch.nn.Parameter(torch.ones(2)), torch.nn.Parameter(torch.zeros(2))
+    optimizer = torch.optim.Adam(
+        [{"params": [first]}, {"params": [second], "weight_decay": 0.1}], lr=0.01, betas=(0.9, 0.99)
+    )
+    (first.sum() + second.sum()).backward()
+    optimizer.step()
+    weights = {"first": first, "second": second}
+    original = state_digest(weights, optimizer.state_dict(), [])["optimizer"]
+    torch.save(optimizer.state_dict(), tmp_path / "optimizer.pth")
+    restored = torch.optim.Adam([{"params": [first]}, {"params": [second]}], lr=1.0)
+    restored.load_state_dict(torch.load(tmp_path / "optimizer.pth", weights_only=True))
+    assert state_digest(weights, restored.state_dict(), [])["optimizer"] == original
+    for index, key, value in ((0, "lr", 0.02), (0, "betas", (0.5, 0.99)), (1, "weight_decay", 0.2)):
+        changed = optimizer.state_dict()
+        changed["param_groups"][index][key] = value
+        assert state_digest(weights, changed, [])["optimizer"] != original
+    swapped = optimizer.state_dict()
+    swapped["param_groups"][0]["params"], swapped["param_groups"][1]["params"] = [1], [0]
+    assert state_digest(weights, swapped, [])["optimizer"] != original

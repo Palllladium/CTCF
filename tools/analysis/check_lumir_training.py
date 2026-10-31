@@ -1,4 +1,9 @@
-"""Exercise ramp/checkpoint/TERM/resume/export on the actual node before the LUMIR control."""
+"""Exercise ramp/checkpoint/TERM/resume/export on the actual node before the LUMIR control.
+
+Mandatory: a real TERM and continuation, exact restoration of model, optimizer and per-rank RNG, the cascade stages,
+the official export and its reproduction from one checkpoint. Spread between independent trainings is reported only:
+it measures nondeterminism, and one repeat cannot turn it into a resume criterion.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ import numpy as np
 import torch
 
 from datasets.LUMIR import LUMIR_SHAPE, lumir_disp_name, read_lumir_json
+from experiments.core.distributed import state_digest
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter, volume_window_size
 from experiments.core.precision import configure_precision, precision_autocast
@@ -82,27 +88,51 @@ def checkpoint_comparison(left, right):
     return {"model_relative_l2_difference": (numerator / max(denominator, 1e-30)) ** 0.5, "optimizer_steps": steps[0]}
 
 
-def resume_agreement(continuous, repeated, resumed):
+def trajectory_spread(continuous, repeated, resumed):
+    """Field distances of the first exported pair; a description of nondeterminism, never a gate."""
     errors = {}
     for name, other in (("continuous_repeat", repeated), ("resumed", resumed)):
         difference = continuous.astype(np.float64) - other
         errors[name] = {"rms": float(np.sqrt(np.mean(difference**2))), "maximum": float(np.max(np.abs(difference)))}
-    limits = {"rms": 0.05, "maximum": 0.5}
-    passes = {
-        name: all(np.isfinite(values[key]) and values[key] <= limit for key, limit in limits.items())
-        for name, values in errors.items()
-    }
-    status = "PASS"
-    if not passes["continuous_repeat"]:
-        status = "CONTINUOUS_BASELINE_UNSTABLE"
-    elif not passes["resumed"]:
-        status = "RESUME_MISMATCH"
     return {
-        "status": status,
+        "status": "DESCRIPTIVE",
         "errors_voxels": errors,
-        "limits_voxels": limits,
-        "scope": "one continuous repeat measures descriptive numerical noise; limits are fixed, never enlarged from two runs",
+        "scope": "independent nondeterministic trainings; restoration is checked exactly by checkpoint digests",
     }
+
+
+def restored_state_check(log_text, interrupted):
+    """The resumed trainer must report exactly the state stored in the interrupted checkpoint."""
+    lines = [line for line in log_text.splitlines() if ">>> restored_state " in line]
+    if not lines:
+        raise ValueError("the resumed trainer did not report its restored state")
+    restored = json.loads(lines[-1].split(">>> restored_state ", 1)[1])
+    if restored != interrupted:
+        raise ValueError(f"restored state differs from the interrupted checkpoint: {restored} != {interrupted}")
+    return restored
+
+
+def export_reproduction(checkpoint, manifest, field, device):
+    """Largest voxel difference between one exported field and a fresh forward pass of the same checkpoint."""
+    model = get_model_adapter("ctcf").build(
+        time_steps=6,
+        config_key="CTCF-CascadeA-Mamba",
+        img_size=LUMIR_SHAPE,
+        dwin_size=volume_window_size(LUMIR_SHAPE),
+        l3_svf=False,
+    )
+    load_checkpoint_state(model, str(checkpoint), strict=True)
+    model = model.to(device).eval()
+    configure_precision("bf16", device)
+    entry = manifest["files"][0]
+    x, y = _load_pair(Path(manifest["pairs_json"]).parent, entry["fixed"], entry["moving"], device)
+    with torch.no_grad(), precision_autocast("bf16", device):
+        _, flow = model(x, y, alpha_l1=1.0, alpha_l3=1.0)
+    error = float(np.max(np.abs(evaluator_displacement(flow) - field)))
+    del model, flow, x, y
+    if torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
+    return error
 
 
 def exercise(run, gpus):
@@ -168,7 +198,8 @@ def exercise(run, gpus):
                         code = proc.wait(timeout=120)
                         if code not in (143, -signal.SIGTERM):
                             raise RuntimeError(f"intentional TERM did not interrupt training: {code}")
-                        interrupted_epoch = torch.load(final, map_location="cpu", weights_only=False)["epoch"]
+                        saved = torch.load(final, map_location="cpu", weights_only=False)
+                        interrupted_epoch = saved["epoch"]
                         if not 0 <= interrupted_epoch < 3:
                             raise RuntimeError(
                                 "TERM arrived after the full readiness training, not at a resumable intermediate epoch"
@@ -178,6 +209,9 @@ def exercise(run, gpus):
                             {
                                 "epoch": interrupted_epoch,
                                 "returncode": code,
+                                "state_digest": state_digest(
+                                    saved["state_dict"], saved["optimizer"], saved["training"]["rng"]
+                                ),
                             },
                         )
                     elif proc.wait(timeout=1800) != 0:
@@ -205,6 +239,10 @@ def exercise(run, gpus):
                     if proc.poll() is None:
                         os.killpg(proc.pid, signal.SIGTERM)
                         proc.wait(timeout=120)
+            restored_state_check(
+                (Path("logs") / experiment / "logfile.log").read_text(errors="replace"),
+                json.loads((run / "interrupted.json").read_text())["state_digest"],
+            )
         with (Path("logs") / experiment / "metrics.csv").open(newline="") as handle:
             epochs = list(csv.DictReader(handle))
         if [int(row["epoch"]) for row in epochs] != list(range(4)):
@@ -225,33 +263,15 @@ def exercise(run, gpus):
         nib.load(path / manifest["archive"].removesuffix(".zip") / name).get_fdata(dtype=np.float32)
         for path, manifest in exports
     ]
-    agreement = resume_agreement(*fields)
+    agreement = trajectory_spread(*fields)
     atomic_write_json(run / "agreement.json", agreement)
-    if agreement["status"] != "PASS":
-        raise ValueError(f"LUMIR readiness: {agreement['status']}; see agreement.json")
     export, manifest = exports[-1]
     device = torch.device("cuda:0")
-    model = get_model_adapter("ctcf").build(
-        time_steps=6,
-        config_key="CTCF-CascadeA-Mamba",
-        img_size=LUMIR_SHAPE,
-        dwin_size=volume_window_size(LUMIR_SHAPE),
-        l3_svf=False,
+    reproduction_error = export_reproduction(
+        Path("results") / experiments[-1] / "ckpt/last.pth", manifest, fields[-1], device
     )
-    load_checkpoint_state(model, str(Path("results") / experiments[-1] / "ckpt/last.pth"), strict=True)
-    model = model.to(device).eval()
-    configure_precision("bf16", device)
-    entry = manifest["files"][0]
-    val_root = Path(manifest["pairs_json"]).parent
-    x, y = _load_pair(val_root, entry["fixed"], entry["moving"], device)
-    with torch.no_grad(), precision_autocast("bf16", device):
-        _, flow = model(x, y, alpha_l1=1.0, alpha_l3=1.0)
-    reproduced = evaluator_displacement(flow)
-    reproduction_error = float(np.max(np.abs(reproduced - fields[-1])))
     if reproduction_error > 1e-4:
         raise ValueError(f"same-checkpoint export reproduction differs by {reproduction_error} voxels")
-    del model, flow, x, y
-    torch.cuda.empty_cache()
     # Same 160 pair presentations and per-epoch stage progress, with fewer batch-8 optimizer updates.
     contrast = {"status": "ERROR", "scope": "short descriptive batch-size contrast, not long-run quality equivalence"}
     experiment = f"{base}_{token}_batch8"
@@ -297,7 +317,8 @@ def exercise(run, gpus):
     report = {
         "status": "PASS",
         "experiments": experiments,
-        "agreement": agreement,
+        "trajectory_spread": agreement,
+        "restored_state": "IDENTICAL_TO_INTERRUPTED_CHECKPOINT",
         "continuous_repeat_checkpoint": baseline_comparison,
         "reproduction_max": reproduction_error,
         "export_pairs": len(manifest["files"]),

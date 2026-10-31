@@ -18,11 +18,21 @@ from experiments.core.inference_metrics import (
     trilinear_projection_columns,
 )
 from utils.dice import dice_per_label
-from utils.field import _warp, digital_project, trilinear_cert_bound, trilinear_project
+from utils.field import (
+    _warp,
+    boundary_vertex_mask,
+    digital_project,
+    enforce_identity_boundary,
+    identity_collar,
+    trilinear_cert_bound,
+    trilinear_project,
+)
 from utils.spatial import SpatialTransformer
 
 CONVENTIONS = ("legacy", "canonical")
 REPAIR = {"project_eps": 0.0, "tri_eps": 0.001, "damp": 0.6, "iters": 80}
+# The repair works above the exact claim, as in tools/runners/topology/collar.sh.
+IDENTITY_BOUNDARY = {"collar": 4, "work_eps": 0.0011, "claim_eps": "0.001"}
 PROFILE = metric_profile_for("OASIS")
 _SAMPLERS: dict[tuple, SpatialTransformer] = {}
 
@@ -83,6 +93,33 @@ def repair(flow, fixed_mask=None, fixed_values=None) -> tuple[torch.Tensor, dict
         fixed_values=fixed_values,
     )
     return repaired, {**digital_projection_columns(folds, iters), **trilinear_projection_columns(report)}
+
+
+def repair_to_identity_boundary(flow) -> tuple[torch.Tensor, dict]:
+    """Taper a free-boundary canonical field to an exact identity boundary and repair with that boundary fixed."""
+    collared = identity_collar(flow.float(), width=IDENTITY_BOUNDARY["collar"])
+    mask, zeros = boundary_vertex_mask(collared), torch.zeros_like(collared)
+    repaired, folds, iters = digital_project(
+        collared,
+        eps=REPAIR["project_eps"],
+        damp=REPAIR["damp"],
+        max_iters=REPAIR["iters"],
+        fixed_mask=mask,
+        fixed_values=zeros,
+    )
+    repaired, report = trilinear_project(
+        repaired,
+        eps=IDENTITY_BOUNDARY["work_eps"],
+        damp=REPAIR["damp"],
+        max_iters=REPAIR["iters"],
+        subdiv_depth=0,
+        fixed_mask=mask,
+        fixed_values=zeros,
+    )
+    return enforce_identity_boundary(repaired), {
+        **digital_projection_columns(folds, iters),
+        **trilinear_projection_columns(report),
+    }
 
 
 def score_ff_rep(flow, case_id, seconds, x_seg, y_seg, convention) -> tuple[dict, dict]:
