@@ -485,6 +485,7 @@ def calibration_dispatch(dispatch):
                     LUMIR_GPUS="4 5 6 7",
                     MIN_FREE_GIB="0",
                     PARENT_CHECKPOINT=parent.as_posix(),
+                    ALLOW_NEW_HEAD="0",
                     A_SLOTS="8",
                     QUEUE_POLL_SECONDS="0.1",
                     KILL_RETRY_SECONDS="0",
