@@ -27,8 +27,10 @@ GEOMETRY="$OUT/geometry_0.json"
 "$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$OUT" --geometry "$GEOMETRY" --limit 8
 ```
 
-Calibration shortlists both handedness classes, then ranks affine-fitted correlations among candidates passing
-Train laterality QC. Inspect `orientation_scores.json`, Train `alignment.png` and `qc.json` before Val preparation.
+Calibration fits all 48 signed axis permutations on the first fixed Train subject, then checks up to two finalists
+per handedness on the fixed Train panel. Coarse fitting uses one pyramid level, dense sampling and conservative affine
+steps; candidates are ranked by fitted correlation after Train laterality QC. Inspect `orientation_scores.json`,
+Train `alignment.png` and `qc.json` before Val preparation. Per-candidate progress is printed during calibration.
 Geometry files start with provisional QC limits of 0.99 brain coverage, 0.8 T1 correlation, 20 mm rigid centre
 motion and 20 degrees rotation. Review/freeze limits on these Train cases; these are QC defaults, not validated
 population limits. Changing geometry/limits requires a new output directory. Left/right QC uses relative

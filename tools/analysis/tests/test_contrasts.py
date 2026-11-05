@@ -567,9 +567,7 @@ def test_preparation_checks_all_train_laterality_and_refreshes_old_cache(tmp_pat
     assert len(calls) == 4 and json.loads(report.read_text())["qc"]["laterality"]["passed"]
 
 
-def test_calibration_resolves_mirrors_when_initial_mi_is_ambiguous(tmp_path, monkeypatch):
-    from unittest.mock import MagicMock
-
+def test_calibration_fits_all_orientations_before_shortlisting(tmp_path, monkeypatch):
     processed, raw, out = [tmp_path / name for name in ("processed", "raw", "out")]
     (processed / "Train").mkdir(parents=True)
     raw.mkdir()
@@ -591,12 +589,12 @@ def test_calibration_resolves_mirrors_when_initial_mi_is_ambiguous(tmp_path, mon
             pickle.dump((image, labels), stream)
         sitk.WriteImage(sitk.GetImageFromArray(image), str(raw / row["t1_file"]))
         rows.append(row)
-    method = MagicMock()
-    method.MetricEvaluate.return_value = 0.0
-    monkeypatch.setattr("tools.analysis.prepare_ixi.sitk.ImageRegistrationMethod", lambda: method)
+    fitted_directions = []
 
-    def fit(fixed, moving, *, affine):
+    def fit(fixed, moving, *, affine, coarse):
+        assert coarse and fixed.GetSize() == moving.GetSize() == (4, 4, 4)
         direction = np.asarray(fixed.GetDirection()).reshape(3, 3)
+        fitted_directions.append(tuple(direction.ravel()))
         matrix = direction.T
         transform = sitk.AffineTransform(3)
         if np.linalg.det(direction) < 0:
@@ -608,7 +606,26 @@ def test_calibration_resolves_mirrors_when_initial_mi_is_ambiguous(tmp_path, mon
 
     monkeypatch.setattr("tools.analysis.prepare_ixi.register", fit)
     calibrate(SimpleNamespace(processed=processed, raw=raw, out=out), rows)
-    candidates = json.loads((out / "orientation_scores.json").read_text())["affine_candidates"]
-    assert any(not row["orientation_qc_passed"] for row in candidates)
+    report = json.loads((out / "orientation_scores.json").read_text())
+    assert len(set(fitted_directions)) == len(report["screening_candidates"]) == 48
+    assert any(not row["train_check"]["passed"] for row in report["screening_candidates"])
     selected = json.loads((out / "geometry_0.json").read_text())
     assert selected["orientation_qc_passed"] and selected["fitted_correlation"] == pytest.approx(1)
+
+
+def test_coarse_affine_preserves_overlap_with_distant_physical_origins():
+    z, y, x = np.mgrid[:32, :36, :40]
+    values = np.exp(-((x - 18) ** 2 / 45 + (y - 17) ** 2 / 35 + (z - 15) ** 2 / 30))
+    values += 0.8 * np.exp(-((x - 25) ** 2 / 20 + (y - 12) ** 2 / 25 + (z - 21) ** 2 / 16))
+    values[values < 0.01] = 0
+    fixed = sitk.GetImageFromArray(values.astype(np.float32))
+    moving = sitk.GetImageFromArray((3 * values).astype(np.float32))
+    fixed.SetOrigin((-200, 300, 50))
+    moving.SetOrigin((120, -80, -200))
+    transform, report = register(fixed, moving, affine=True, coarse=True)
+    center = fixed.TransformContinuousIndexToPhysicalPoint((19.5, 17.5, 15.5))
+    expected = moving.TransformContinuousIndexToPhysicalPoint((19.5, 17.5, 15.5))
+    np.testing.assert_allclose(transform.TransformPoint(center), expected, atol=0.25)
+    aligned = sitk.GetArrayFromImage(sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0))
+    assert np.corrcoef(values.ravel(), aligned.ravel())[0, 1] > 0.99
+    assert report["coarse"] and report["initialisation"] == "geometry"

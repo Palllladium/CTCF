@@ -65,7 +65,7 @@ def processed_image(values, geometry):
     return image
 
 
-def register(fixed, moving, *, affine: bool, initial=None):
+def register(fixed, moving, *, affine: bool, initial=None, coarse=False):
     """SimpleITK returns a pull transform: fixed physical coordinates -> moving physical coordinates."""
     if initial is None:
         if affine:
@@ -79,15 +79,17 @@ def register(fixed, moving, *, affine: bool, initial=None):
             )
     method = sitk.ImageRegistrationMethod()
     method.SetMetricAsMattesMutualInformation(50)
-    method.SetMetricSamplingStrategy(method.RANDOM)
+    method.SetMetricSamplingStrategy(method.NONE if coarse else method.RANDOM)
     method.SetMetricSamplingPercentage(0.2, seed=2026)
     method.SetInterpolator(sitk.sitkLinear)
     if affine:
         method.SetMetricFixedMask(sitk.Cast(fixed > 0, sitk.sitkUInt8))
-    method.SetOptimizerAsGradientDescentLineSearch(1.0, 150, convergenceMinimumValue=1e-6, convergenceWindowSize=10)
+        method.SetOptimizerAsRegularStepGradientDescent(1.0, 0.001, 150, gradientMagnitudeTolerance=1e-6)
+    else:
+        method.SetOptimizerAsGradientDescentLineSearch(1.0, 150, convergenceMinimumValue=1e-6, convergenceWindowSize=10)
     method.SetOptimizerScalesFromPhysicalShift()
-    method.SetShrinkFactorsPerLevel([4, 2, 1])
-    method.SetSmoothingSigmasPerLevel([2, 1, 0])
+    method.SetShrinkFactorsPerLevel([1] if coarse else [4, 2, 1])
+    method.SetSmoothingSigmasPerLevel([0] if coarse else [2, 1, 0])
     method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     method.SetInitialTransform(initial, inPlace=False)
     result = method.Execute(fixed, moving)
@@ -96,6 +98,7 @@ def register(fixed, moving, *, affine: bool, initial=None):
         "metric": method.GetMetricValue(),
         "stop": method.GetOptimizerStopConditionDescription(),
         "initialisation": "geometry" if affine else "header_identity",
+        "coarse": coarse,
     }
 
 
@@ -192,7 +195,7 @@ def calibration_subjects(rows):
 
 
 def calibrate(args, rows):
-    """Shortlist both handedness classes, fit affine maps, and verify Train laterality before ranking."""
+    """Fit all signed axis permutations on one Train case, then check finalists on the fixed Train panel."""
     samples = calibration_subjects(rows)
     directions = []
     for order in itertools.permutations(range(3)):
@@ -201,51 +204,57 @@ def calibrate(args, rows):
             directions.append(tuple(matrix.ravel()))
     raw = {row["ixi_id"]: sitk.ReadImage(str(args.raw / row["t1_file"]), sitk.sitkFloat32) for row in samples}
     processed = {row["ixi_id"]: pkload(args.processed / "Train" / row["processed_file"]) for row in samples}
+
+    def check(geometry, row):
+        t1, labels = processed[row["ixi_id"]]
+        reference = processed_image(t1, geometry)
+        fixed, moving = sitk.Shrink(reference, [4] * 3), sitk.Shrink(raw[row["ixi_id"]], [4] * 3)
+        try:
+            transform, fit = register(fixed, moving, affine=True, coarse=True)
+            aligned = sitk.GetArrayFromImage(sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0))
+            values = sitk.GetArrayFromImage(fixed)
+            mask = values > 0
+            correlation = float(np.corrcoef(values[mask], aligned[mask])[0, 1])
+            side = laterality_report(labels, reference, transform)
+            return {"id": row["ixi_id"], "correlation": correlation, "fit": fit, **side}
+        except (RuntimeError, ValueError) as error:
+            return {"id": row["ixi_id"], "passed": False, "error": str(error)}
+
     ranked = []
-    for direction in directions:
+    for index, direction in enumerate(directions):
         geometry = {"direction": direction, "spacing": [1, 1, 1], "origin": [0, 0, 0]}
-        scores = []
-        for row in samples:
-            values = processed[row["ixi_id"]][0]
-            fixed = sitk.Shrink(processed_image(values, geometry), [4] * 3)
-            moving = sitk.Shrink(raw[row["ixi_id"]], [4] * 3)
-            transform = sitk.CenteredTransformInitializer(fixed, moving, sitk.AffineTransform(3))
-            method = sitk.ImageRegistrationMethod()
-            method.SetMetricAsMattesMutualInformation(32)
-            method.SetInterpolator(sitk.sitkLinear)
-            method.SetInitialTransform(transform)
-            scores.append(method.MetricEvaluate(fixed, moving))
-        ranked.append({"mean_metric": float(np.mean(scores)), **geometry})
-    ranked.sort(key=lambda row: row["mean_metric"])
+        first = check(geometry, samples[0])
+        score = first.get("correlation", float("nan"))
+        ranked.append({"fitted_correlation": score if np.isfinite(score) else None, "train_check": first, **geometry})
+        print(
+            f"[IXI CALIBRATE] fitted {index + 1}/{len(directions)} correlation={score:.4f} laterality={first['passed']}",
+            flush=True,
+        )
+    ranked.sort(key=lambda g: g["fitted_correlation"] if g["fitted_correlation"] is not None else -np.inf, reverse=True)
     shortlist = [
         candidate
         for sign in (-1, 1)
-        for candidate in [g for g in ranked if np.linalg.det(np.asarray(g["direction"]).reshape(3, 3)) * sign > 0][:2]
+        for candidate in [
+            g
+            for g in ranked
+            if g["fitted_correlation"] is not None
+            and g["train_check"]["passed"]
+            and np.linalg.det(np.asarray(g["direction"]).reshape(3, 3)) * sign > 0
+        ][:2]
     ]
     fitted = []
     for geometry in shortlist:
-        checks = []
-        for row in samples:
-            t1, labels = processed[row["ixi_id"]]
-            fixed, moving = processed_image(t1, geometry), raw[row["ixi_id"]]
-            try:
-                transform, _ = register(sitk.Shrink(fixed, [4] * 3), sitk.Shrink(moving, [4] * 3), affine=True)
-                aligned = sitk.GetArrayFromImage(sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0))
-                mask = t1 > 0
-                correlation = float(np.corrcoef(t1[mask], aligned[mask])[0, 1])
-                check = laterality_report(labels, fixed, transform)
-                checks.append({"id": row["ixi_id"], "correlation": correlation, **check})
-            except (RuntimeError, ValueError) as error:
-                checks.append({"id": row["ixi_id"], "passed": False, "error": str(error)})
+        checks = [geometry["train_check"], *[check(geometry, row) for row in samples[1:]]]
         passed = all(check["passed"] and np.isfinite(check.get("correlation", np.nan)) for check in checks)
         fitted.append(
-            geometry
+            {key: geometry[key] for key in ("direction", "spacing", "origin")}
             | {
                 "orientation_qc_passed": passed,
                 "train_checks": checks,
                 "fitted_correlation": float(np.mean([check["correlation"] for check in checks])) if passed else None,
             }
         )
+        print(f"[IXI CALIBRATE] panel {len(fitted)}/{len(shortlist)} laterality={passed}", flush=True)
     fitted.sort(key=lambda g: g["fitted_correlation"] if g["orientation_qc_passed"] else -np.inf, reverse=True)
     eligible = [g for g in fitted if g["orientation_qc_passed"]]
     for index, geometry in enumerate(eligible):
@@ -260,14 +269,14 @@ def calibrate(args, rows):
     atomic_write_json(
         args.out / "orientation_scores.json",
         {
-            "initial_candidates": ranked,
+            "screening_candidates": ranked,
             "affine_candidates": fitted,
-            "scope": "Train label laterality integrity QC; fits and ranking use intensity, never Val/Test labels",
+            "scope": "All 48 orientations fitted on the first fixed Train subject; finalists checked on the Train panel. Train labels only laterality QC; no Val/Test labels.",
         },
     )
     if not eligible:
         raise ValueError(
-            "No candidate passed Train laterality after affine fitting; recover/check preprocessing geometry"
+            "No candidate passed Train laterality after affine fitting; inspect registration errors in orientation_scores.json"
         )
     print(
         "Inspect eligible Train alignments and freeze QC limits before preparing Val; labels were used for Train laterality QC only."
