@@ -10,6 +10,18 @@ def pkload(fname: str):
         return pickle.load(f)
 
 
+def validate_subject_pairs(pairs, subjects, name="Validation") -> None:
+    subjects = set(subjects)
+    if (
+        len(pairs) != len(subjects)
+        or len(set(pairs)) != len(pairs)
+        or {a for a, _ in pairs} != subjects
+        or {b for _, b in pairs} != subjects
+        or any(a == b or (b, a) not in pairs for a, b in pairs)
+    ):
+        raise ValueError(f"{name} must pair each subject once in both directions without foreign subjects")
+
+
 class AverageMeter:
     def __init__(self):
         self.reset()

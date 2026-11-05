@@ -6,12 +6,13 @@ from experiments.core.cli_common import optional_bool
 from experiments.core.precision import add_precision_arg
 from models.CTCF.configs import CONFIGS
 
-_INT_OVERRIDES = ("l1_base_ch", "l3_base_ch", "l3_iters", "l3_num_heads")
+_INT_OVERRIDES = ("l1_base_ch", "l3_base_ch", "l3_iters", "l3_num_heads", "image_channels")
 _BOOL_OVERRIDES = ("l3_unshared", "l1_half_res", "l2_full_res", "l3_full_res", "l3_svf")
 _ERROR_MODE_CHOICES = ("absdiff", "gradmag", "ncc")
 _CORR_MODE_CHOICES = ("none", "hadamard", "corr", "corr_feat")
 
 _OVERRIDE_HELP = {
+    "image_channels": "Image channels per subject (default: 1; paired-contrast Mamba: 2).",
     "l1_base_ch": "L1 coarse-net base channels (default: config value).",
     "l3_base_ch": "L3 refiner base channels (default: config value).",
     "l3_iters": "Number of L3 refinement iterations (default: config value, typically 1).",
@@ -44,6 +45,8 @@ def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--oasis_split", default="", help="Train/Dev manifest; validation uses the adjacent pair_manifest.json"
     )
+    p.add_argument("--ixi_pairs", default="", help="Prepared, reviewed IXI T1/T2 subject-pair manifest.")
+    p.add_argument("--ixi_arm", choices=("b0", "b1", "b2"), default="b0", help="Paired IXI input/loss contrast arm.")
     p.add_argument(
         "--global_batch_size",
         type=int,
@@ -514,7 +517,7 @@ def add_ctcf_auxiliary_args(p: argparse.ArgumentParser) -> None:
 
 
 def ctcf_overrides_from_args(args: argparse.Namespace, prefix: str = "") -> dict:
-    overrides = {name: getattr(args, f"{prefix}{name}") for name in _INT_OVERRIDES}
+    overrides = {name: getattr(args, f"{prefix}{name}", None) for name in _INT_OVERRIDES}
     overrides["l3_error_mode"] = getattr(args, f"{prefix}l3_error_mode")
     overrides["l3_corr_mode"] = getattr(args, f"{prefix}l3_corr_mode")
     overrides["l3_ls_space"] = getattr(args, f"{prefix}l3_ls_space")

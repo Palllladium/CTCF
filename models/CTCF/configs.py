@@ -10,6 +10,7 @@ def get_ctcf_config() -> ml_collections.ConfigDict:
     c.if_transskip = True
     c.if_convskip = True
     c.in_chans = 1
+    c.image_channels = 1
     c.img_size = (160, 192, 224)
     c.patch_size = 4
 
@@ -65,6 +66,7 @@ def _unified_cascade_base(
     c = ml_collections.ConfigDict()
 
     c.backbone = backbone
+    c.image_channels = 1
     c.img_size = (160, 192, 224)
     c.time_steps = 0
 

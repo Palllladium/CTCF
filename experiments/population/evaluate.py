@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from experiments.core.field_scoring import REPAIR, repair, score
+from experiments.core.field_scoring import REPAIR, repair, score_saved_field
 from experiments.core.inference_metrics import write_results
 from experiments.population.appearance import appearance_marginal
 from experiments.population.geometry import (
@@ -26,10 +26,7 @@ from experiments.population.geometry import (
 from experiments.population.observation import appearance_prior, load_image
 from experiments.population.train import load_population_checkpoint, observation_nll
 from utils import pkload
-from utils.cert_boundary import boundary_report, global_verdict
-from utils.cert_exact import certify_flow_exact
 from utils.field import _warp, boundary_max_disp, boundary_vertex_mask, compose_flows, enforce_identity_boundary
-from utils.field_io import load_flow_npz, save_flow_npz_atomic
 
 # Far above the nanovoxels of float rounding, far below any boundary motion a collar-zero map could really make.
 BOUNDARY_ROUNDING_LIMIT = 1e-4
@@ -224,43 +221,30 @@ def score_pair_field(raw, x_seg, y_seg, case_id, case_dir, seconds, *, repair_ou
     A collar-zero SVF pair map fixes the box boundary, yet on CUDA (N-1)/(N-1) can round below one and leak
     nanovoxels onto a face. That rounding is removed, and reported, before any bytes are written.
     """
-    case_dir.mkdir(parents=True, exist_ok=True)
     removed = boundary_max_disp(raw)
-    zero_boundary = removed <= BOUNDARY_ROUNDING_LIMIT
-    if zero_boundary:
+    if removed <= BOUNDARY_ROUNDING_LIMIT:
         raw = enforce_identity_boundary(raw)
-    report, rows = {"boundary_rounding_removed_voxels": removed}, {}
 
-    def store(mode, flow, elapsed, eps):
-        save_flow_npz_atomic(case_dir / f"{mode}.npz", flow)
-        rows[mode] = score(flow, case_id, elapsed, x_seg, y_seg, eps, "canonical")
-        (case_dir / "metrics.json").write_text(json.dumps(rows, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    def repair_pair(field):
+        if removed > BOUNDARY_ROUNDING_LIMIT:
+            raise ValueError(f"boundary displacement {removed} is not rounding; no zero-boundary repair claim")
+        return repair(field, fixed_mask=boundary_vertex_mask(field), fixed_values=torch.zeros_like(field))
 
-    store("FF", raw, seconds, 0.0)
-    if repair_output and not zero_boundary:
-        report["repair_error"] = f"boundary displacement {removed} is not rounding; no zero-boundary repair claim"
-    elif repair_output:
-        try:
-            started = time.perf_counter()
-            mask = boundary_vertex_mask(raw)
-            repaired, report["repair"] = repair(raw, fixed_mask=mask, fixed_values=torch.zeros_like(raw))
-            store("REP", repaired, seconds + time.perf_counter() - started, REPAIR["tri_eps"])
-        except RECOVERABLE as error:
-            report["repair_error"] = repr(error)
-    if certify_output:
-        for mode in rows:
-            try:
-                stored = load_flow_npz(case_dir / f"{mode}.npz")
-                cell = certify_flow_exact(stored, eps=str(REPAIR["tri_eps"]))
-                boundary = boundary_report(stored)
-                verdict = global_verdict(cell, boundary)
-                cell["global_homeomorphism_hypotheses_met"] = verdict["global_homeomorphism"]
-                report[f"certificate_{mode}"] = cell
-                report[f"boundary_{mode}"] = boundary
-                report[f"global_{mode}"] = verdict
-            except RECOVERABLE as error:
-                report[f"error_certificate_{mode}"] = repr(error)
-    report["certification"] = "SEE_PER_FIELD_REPORTS" if certify_output else "NOT_RUN"
+    rows, report = score_saved_field(
+        raw,
+        case_id,
+        seconds,
+        x_seg,
+        y_seg,
+        case_dir,
+        repair_fn=repair_pair,
+        repair_output=repair_output,
+        repair_eps=REPAIR["tri_eps"],
+        certify_modes=("FF", "REP") if certify_output else (),
+        cache=False,
+        repair_columns=False,
+    )
+    report["boundary_rounding_removed_voxels"] = removed
     return rows, report
 
 

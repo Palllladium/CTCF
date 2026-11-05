@@ -340,8 +340,8 @@ class MambaMorph(nn.Module):
             skip_channels=config.reg_head_chan if self.if_convskip else 0,
             use_batchnorm=False,
         )
-        self.c1 = Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False)
-        self.c2 = Conv3dReLU(2, config.reg_head_chan, 3, 1, use_batchnorm=False)
+        self.c1 = Conv3dReLU(config.in_chans, embed_dim // 2, 3, 1, use_batchnorm=False)
+        self.c2 = Conv3dReLU(config.in_chans, config.reg_head_chan, 3, 1, use_batchnorm=False)
         self.reg_head = RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3)
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)
@@ -410,8 +410,8 @@ class MambaMorphOri(nn.Module):
             skip_channels=config.reg_head_chan if self.if_convskip else 0,
             use_batchnorm=False,
         )
-        self.c1 = Conv3dReLU(2, embed_dim // 2, 3, 1, use_batchnorm=False)
-        self.c2 = Conv3dReLU(2, config.reg_head_chan, 3, 1, use_batchnorm=False)
+        self.c1 = Conv3dReLU(config.in_chans, embed_dim // 2, 3, 1, use_batchnorm=False)
+        self.c2 = Conv3dReLU(config.in_chans, config.reg_head_chan, 3, 1, use_batchnorm=False)
         self.reg_head = RegistrationHead(in_channels=config.reg_head_chan, out_channels=3, kernel_size=3)
         self.spatial_trans = SpatialTransformer(config.img_size)
         self.avg_pool = nn.AvgPool3d(3, stride=2, padding=1)

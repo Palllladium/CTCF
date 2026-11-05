@@ -455,6 +455,8 @@ tools/
 
 ## Notes
 
+- The paired T1/T2 pilot and frozen bridge consensus use [this preparation and dispatch protocol](experiments/contrasts.md).
+
 - `logs/` and `results/` are not version-controlled.
 - Baselines use original authors' codebases with minimal modifications (data loaders and logging only).
 - CTCF uses bidirectional training (forward + backward per iteration).

@@ -19,7 +19,7 @@ from datasets.LUMIR import LUMIR_SHAPE
 from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
 from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
-from experiments.core.data_loaders import baseline_loader_builder
+from experiments.core.data_loaders import baseline_loader_builder, ixi_paired_loaders
 from experiments.core.distributed import accumulation_steps
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter, volume_window_size
@@ -131,7 +131,9 @@ class Runner:
         if args.init_ckpt:
             if args.resume:
                 raise ValueError("--init_ckpt starts a new run from given weights; do not combine it with --resume.")
-            report = load_checkpoint_state(self.model, args.init_ckpt, strict=True)
+            report = load_checkpoint_state(
+                self.model, args.init_ckpt, strict=True, expand_image_channels=self.model.image_channels > 1
+            )
             print(f">>> Initialised weights from {args.init_ckpt}: {report}")
         self._init_auxiliary_objectives(args, device)
 
@@ -348,8 +350,13 @@ class Runner:
             logs = {f"syn_{k}": v for k, v in logs.items()} | aux_logs
             logs.update(base=float(loss.detach()), kw_weighted=float(weighted.detach()), all=float(total.detach()))
             return total, logs
-        x, y, x_seg, y_seg, ids = self._unpack(batch)
-        loss, logs, flow_xy, flow_yx = self._pair_loss(x, y, x_seg, y_seg, epoch)
+        if getattr(args, "ixi_pairs", ""):
+            x, y, t2_x, t2_y = [value.to(self.device).float() for value in batch]
+            loss, logs, flow_xy, flow_yx = self._pair_loss(x, y, None, None, epoch, t2=(t2_x, t2_y))
+            ids = None
+        else:
+            x, y, x_seg, y_seg, ids = self._unpack(batch)
+            loss, logs, flow_xy, flow_yx = self._pair_loss(x, y, x_seg, y_seg, epoch)
         if self.distill is not None:
             aux, aux_logs = self._distill_loss(x, y, ids, flow_xy, flow_yx)
             weighted = args.distill_beta * aux
@@ -370,7 +377,20 @@ class Runner:
             x_seg = y_seg = None
         return batch[0].to(self.device).float(), batch[1].to(self.device).float(), x_seg, y_seg, ids
 
-    def _pair_loss(self, x, y, x_seg, y_seg, epoch):
+    def contrast_terms(self, x, y, def_xy, def_yx, flow_xy, flow_yx, t2):
+        """Separate scalar NCC terms; auxiliary T2 observations never enter the model's inputs."""
+        ctx = self.ctx
+        d1 = 0.5 * (ctx.ncc(def_xy[:, :1].float(), y[:, :1].float()) + ctx.ncc(def_yx[:, :1].float(), x[:, :1].float()))
+        d2 = d1.new_zeros(())
+        if self.args.ixi_arm != "b0":
+            t2_x, t2_y = t2
+            d2 = 0.5 * (
+                ctx.ncc(ctx.reg_model((t2_x, flow_xy.float())), t2_y)
+                + ctx.ncc(ctx.reg_model((t2_y, flow_yx.float())), t2_x)
+            )
+        return d1, d2
+
+    def _pair_loss(self, x, y, x_seg, y_seg, epoch, t2=None):
         args, ctx = self.args, self.ctx
 
         schedule_max_epoch = args.schedule_max_epoch if args.schedule_max_epoch > 0 else args.max_epoch
@@ -400,7 +420,10 @@ class Runner:
             def_yx, flow_yx = self.model(y, x, alpha_l1=alpha_l1, alpha_l3=alpha_l3)
 
         with torch.autocast(device_type="cuda", enabled=False):
-            if args.sim == "mse":
+            if t2 is not None:
+                d1, d2 = self.contrast_terms(x, y, def_xy, def_yx, flow_xy, flow_yx, t2)
+                L_ncc = (d1 if args.ixi_arm == "b0" else 0.5 * (d1 + d2)) * args.w_ncc
+            elif args.sim == "mse":
                 L_ncc = (
                     0.5 * (F.mse_loss(def_xy.float(), y.float()) + F.mse_loss(def_yx.float(), x.float())) * args.w_mse
                 )
@@ -503,6 +526,8 @@ class Runner:
             "alpha_l3": alpha_l3,
             "warm": warm,
         }
+        if t2 is not None:
+            logs.update(ncc_t1=float(d1.detach()), ncc_t2=float(d2.detach()))
         if tri_stats is not None:
             logs.update(tri_stats)
             if args.log_tri_gradnorm:
@@ -656,19 +681,35 @@ class Runner:
         return result
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     add_common_args(p, include_synth=True, include_lumir=True)
     p.set_defaults(exp="CTCF")
     add_ctcf_train_args(p)
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
-def main():
-    args = parse_args()
+def main(args=None):
+    args = parse_args() if args is None else args
     if args.w_reg is None:
         args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
+    if args.ixi_pairs:
+        if (
+            args.ds != "IXI"
+            or args.image_channels != 2
+            or args.batch_size != 1
+            or args.w_dice
+            or args.anatomy_loss != "none"
+            or args.ncc_regions != "none"
+            or args.sim != "ncc"
+            or args.known_warp_every
+            or args.distill_teacher != "none"
+            or args.certified_steps
+            or args.ema_lambda
+        ):
+            raise ValueError("Paired IXI uses two image channels, batch1 and only the core label-free NCC losses")
+        build_loaders = ixi_paired_loaders
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if (world > 1 or args.global_batch_size) and args.ds != "LUMIR":
         raise ValueError("global batch/DDP is currently supported for the LUMIR training protocol")

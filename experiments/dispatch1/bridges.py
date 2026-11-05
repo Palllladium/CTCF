@@ -16,6 +16,7 @@ from scipy import ndimage
 
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter
+from experiments.core.precision import precision_autocast
 from utils.field import compose_flows, legacy_sampling_displacement
 from utils.spatial import SpatialTransformer
 
@@ -115,21 +116,22 @@ class EnergyTable:
 class Parent:
     """A frozen CTCF model with the inference forward (every level, AMP) and the legacy bilinear warp."""
 
-    def __init__(self, model: torch.nn.Module, device, load_report=None):
+    def __init__(self, model: torch.nn.Module, device, load_report=None, precision="fp16"):
         self.model, self.device, self.load_report = model.eval(), device, load_report
+        self.precision = precision
         for p in self.model.parameters():
             p.requires_grad_(False)
         self._warp = None
 
     @classmethod
-    def load(cls, ckpt: str, config: str, l3_svf: bool, time_steps: int, device) -> Parent:
+    def load(cls, ckpt: str, config: str, l3_svf: bool, time_steps: int, device, precision="fp16") -> Parent:
         """Strict load; only the known deterministic buffer may be regenerated."""
         model = get_model_adapter("ctcf").build(time_steps=time_steps, config_key=config, l3_svf=l3_svf).to(device)
-        return cls(model, device, load_checkpoint_state(model, ckpt, strict=True))
+        return cls(model, device, load_checkpoint_state(model, ckpt, strict=True), precision)
 
     @torch.no_grad()
     def flow(self, moving: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=moving.is_cuda):
+        with precision_autocast(self.precision, moving.device):
             _, flow = self.model(moving.float(), fixed.float(), alpha_l1=1.0, alpha_l3=1.0)
         return flow.float()
 

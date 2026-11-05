@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,44 @@ from tools.analysis.run_artifacts import (
 
 
 class RunArtifactsTest(unittest.TestCase):
+    def test_failed_run_can_be_packaged_without_site_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run"
+            (root / "exit_codes").mkdir(parents=True)
+            (root / "exit_codes/train.txt").write_text("1")
+            (root / "train.log").write_bytes(b"training environment failed\n")
+            prefix = Path(tmp) / "exports/run"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-S",
+                    "-m",
+                    "tools.analysis.run_artifacts",
+                    "package",
+                    "--run-root",
+                    str(root),
+                    "--prefix",
+                    str(prefix),
+                    "--exit-code",
+                    "1",
+                    "--required-steps",
+                    "train",
+                    "--git-head",
+                    "reviewed",
+                ],
+                cwd=Path(__file__).resolve().parents[3],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            archive = Path(str(prefix) + "__FAILED.zip")
+            self.assertTrue(archive.is_file(), result.stdout + result.stderr)
+            self.assertTrue(Path(str(archive) + ".sha256").is_file())
+            with zipfile.ZipFile(archive) as package:
+                self.assertEqual(package.read(f"{archive.stem}/train.log"), b"training environment failed\n")
+
     def test_zero_exit_does_not_complete_a_package_with_missing_steps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "run"

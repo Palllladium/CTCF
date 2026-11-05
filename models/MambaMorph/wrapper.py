@@ -56,6 +56,7 @@ class MambaMorphCascadeL2(nn.Module):
 
         cfg = deepcopy(_CFG_REGISTRY[config_key])
         cfg.img_size = tuple(getattr(config, "img_size", cfg.img_size))
+        cfg.in_chans = 2 * getattr(config, "image_channels", 1)
         self.config_key = config_key
         self.model = MambaMorph(cfg)
         self.spatial_transform = self.model.spatial_trans

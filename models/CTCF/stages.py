@@ -48,10 +48,10 @@ class ConvBlock(nn.Module):
 class CoarseFlowNetQuarter(nn.Module):
     """L1: zero-initialised U-Net producing a coarse flow at 1/4 resolution."""
 
-    def __init__(self, base_ch: int = 16):
+    def __init__(self, base_ch: int = 16, image_channels: int = 1):
         super().__init__()
         c = base_ch
-        in_ch = 2  # mov + fix concat
+        in_ch = 2 * image_channels
         out_ch = 3  # x, y, z displacement components
 
         self.enc1 = ConvBlock(in_ch=in_ch, out_ch=c)
@@ -314,11 +314,14 @@ class FlowRefiner3D(nn.Module):
         error_mode: str = "absdiff",
         num_heads: int = 1,
         corr_mode: str = "none",
+        image_channels: int = 1,
     ):
         super().__init__()
 
         self.error_mode = error_mode
         self.num_heads = max(1, num_heads)
+        if image_channels > 1 and corr_mode != "none":
+            raise ValueError("Multi-contrast L3 currently requires corr_mode='none'")
         c = base_ch
         flow_ch = 3  # x, y, z displacement components
 
@@ -328,7 +331,7 @@ class FlowRefiner3D(nn.Module):
             self.cost_volume = CostVolume3D(corr_mode)
             corr_ch = self.cost_volume.extra_channels
 
-        in_ch = 6 + corr_ch  # mov_warp(1) + fix(1) + err(1) + flow(3) + cost-volume(corr_ch)
+        in_ch = 3 * image_channels + 3 + corr_ch
 
         self.enc1 = ConvBlock(in_ch=in_ch, out_ch=c)
         self.pool1 = nn.AvgPool3d(kernel_size=2)
@@ -418,12 +421,13 @@ class FlowRefiner3D(nn.Module):
     ) -> torch.Tensor:
         """Per-voxel local NCC error map (1 - NCC^2). Forced to float32 for numerical stability."""
         pad = win // 2
+        channels = a.shape[1]
         filt = torch.ones(
-            (1, 1, win, win, win),
+            (channels, 1, win, win, win),
             device=a.device,
             dtype=torch.float32,
         )
-        conv_kwargs = {"stride": (1, 1, 1), "padding": (pad, pad, pad)}
+        conv_kwargs = {"stride": (1, 1, 1), "padding": (pad, pad, pad), "groups": channels}
 
         a_sum = F.conv3d(a, filt, **conv_kwargs)
         b_sum = F.conv3d(b, filt, **conv_kwargs)

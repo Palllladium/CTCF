@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 from functools import partial
@@ -14,6 +15,7 @@ from torchvision import transforms
 from datasets import IXI, LUMIR, OASIS
 from experiments.core.path_profiles import resolve_dataset_dirs, resolve_lumir_paths
 from utils import NumpyType, RandomFlip, SegNorm
+from utils.common import validate_subject_pairs
 
 
 def _find_split_files(train_dir: str, val_dir: str, tag: str) -> tuple[list[str], list[str]]:
@@ -104,14 +106,7 @@ def oasis_validation_pairs(development: list[str], manifest: str | Path) -> list
     records = json.loads(Path(manifest).read_text(encoding="utf-8"))["cases"]
     subjects = {f"OASIS_ALL_P{Path(path).stem[2:]}": path for path in development}
     pairs = [(row["moving_subject_id"], row["fixed_subject_id"]) for row in records]
-    if (
-        len(pairs) != len(subjects)
-        or len(set(pairs)) != len(pairs)
-        or {a for a, _ in pairs} != subjects.keys()
-        or {b for _, b in pairs} != subjects.keys()
-        or any(a == b or (b, a) not in pairs for a, b in pairs)
-    ):
-        raise ValueError("Dev manifest must pair its subjects once in both directions, without Train subjects")
+    validate_subject_pairs(pairs, subjects, "Dev manifest")
     return [(subjects[moving], subjects[fixed]) for moving, fixed in pairs]
 
 
@@ -140,6 +135,24 @@ def ixi_loaders(
         val_bs=val_bs,
         drop_last_train=drop_last_train,
         drop_last_val=drop_last_val,
+    )
+
+
+def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
+    manifest = IXI.read_paired_manifest(args.ixi_pairs, require_t2=args.ixi_arm != "b0")
+    args.ixi_manifest_sha256 = manifest["fingerprint"]
+    runtime_keys = {"exp", "resume", "init_ckpt", "gpu", "paths", "quiet", "use_tb", "num_workers", "save_ckpt"}
+    recipe = {
+        "manifest": manifest["fingerprint"],
+        "settings": {key: value for key, value in vars(args).items() if key not in runtime_keys},
+    }
+    fingerprint = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
+    train = IXI.IXIPairedDataset(manifest, args.ixi_arm)
+    sampler = IXI.IXIPairSampler(len(train), args.seed, fingerprint)
+    print(f"IXI pairs: Train={len(train)}, Val directions={len(manifest['validation_pairs'])}, arm={args.ixi_arm}")
+    return (
+        DataLoader(train, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True),
+        DataLoader(IXI.IXIPairedDataset(manifest, args.ixi_arm, validation=True), batch_size=1, pin_memory=True),
     )
 
 

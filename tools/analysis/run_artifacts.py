@@ -69,9 +69,9 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def atomic_write_json(path: Path, payload: dict[str, Any], *, allow_nan: bool = True) -> None:
     buffer = io.StringIO()
-    json.dump(payload, buffer, ensure_ascii=False, indent=2, sort_keys=True)
+    json.dump(payload, buffer, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=allow_nan)
     buffer.write("\n")
     atomic_write_text(path, buffer.getvalue())
 

@@ -57,6 +57,7 @@ class CTCFCascadeA(nn.Module):
         self.use_level2 = config.use_level2
         self.use_level3 = config.use_level3
         self.backbone = config.backbone
+        self.image_channels = getattr(config, "image_channels", 1)
 
         self.l3_iters = config.l3_iters
         self.l3_svf = config.l3_svf
@@ -75,11 +76,12 @@ class CTCFCascadeA(nn.Module):
             "error_mode": config.level3_error_mode,
             "num_heads": config.level3_num_heads,
             "corr_mode": config.level3_corr_mode,
+            "image_channels": self.image_channels,
         }
 
         self.level1 = None
         if self.use_level1:
-            self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch)
+            self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch, image_channels=self.image_channels)
 
         self.level2 = None
         if self.use_level2:
@@ -100,6 +102,8 @@ class CTCFCascadeA(nn.Module):
 
     def _validate_flags(self) -> None:
         """Reject configuration combinations the cascade cannot honour."""
+        if self.image_channels < 1 or (self.image_channels != 1 and self.backbone != "mamba"):
+            raise ValueError("Multiple image channels are currently implemented for the Mamba cascade only")
         if self.backbone == "swin-dca" and self.l2_full_res:
             raise ValueError(
                 "Swin-DCA L2 (CTCFDCACoreHalf) operates on a half-resolution grid by construction; "
@@ -109,6 +113,47 @@ class CTCFCascadeA(nn.Module):
             raise ValueError(f"l3_iters must be >= 1, got {self.l3_iters}.")
         if not self.use_level2:
             raise ValueError("CTCFCascadeA requires use_level2=True; L1/L3 alone are not enough.")
+
+    def expand_scalar_inputs(self, state: dict) -> tuple[dict, list[str]]:
+        """Copy scalar-image kernels into the T1 slots; initialise the added contrast slots to zero."""
+        if self.image_channels == 1:
+            return state, []
+        channels = self.image_channels
+        image_slots = (0, channels)
+        slots = {
+            "level1.enc1.net.0.weight": image_slots,
+            "level2.model.transformer.patch_embed.proj.weight": image_slots,
+            "level2.model.c1.0.weight": image_slots,
+            "level2.model.c2.0.weight": image_slots,
+        }
+        target = self.state_dict()
+        flow_slots = (*image_slots, 2 * channels, 3 * channels, 3 * channels + 1, 3 * channels + 2)
+        slots.update(
+            {
+                key: flow_slots
+                for key in target
+                if (key.startswith("level3.") or key.startswith("level3_extra.")) and key.endswith("enc1.net.0.weight")
+            }
+        )
+        expanded, changed, already = dict(state), [], []
+        for key, indices in slots.items():
+            if key not in target:
+                continue
+            if key not in state:
+                raise ValueError(f"Scalar checkpoint is missing input kernel {key}")
+            value = state[key]
+            if value.shape == target[key].shape:
+                already.append(key)
+                continue
+            shape = (target[key].shape[0], len(indices), *target[key].shape[2:])
+            if tuple(value.shape) != shape:
+                raise ValueError(f"Cannot expand {key}: expected scalar shape {shape}, got {tuple(value.shape)}")
+            expanded[key] = value.new_zeros(target[key].shape)
+            expanded[key][:, list(indices)] = value
+            changed.append(key)
+        if changed and already:
+            raise ValueError("Checkpoint mixes scalar and expanded input kernels")
+        return expanded, changed
 
     def _get_l3(self, it: int) -> FlowRefiner3D:
         """Return the L3 module to use at iteration `it`."""
@@ -316,6 +361,8 @@ class CTCFCascadeA(nn.Module):
         return_breakdown: bool = False,
     ):
         """Run the cascade. Returns `(def_full, flow_full)`, or `(..., breakdown)` when requested."""
+        if mov_full.shape != fix_full.shape or mov_full.shape[1] != self.image_channels:
+            raise ValueError(f"Expected matching moving/fixed tensors with {self.image_channels} image channels")
         breakdown: dict[str, torch.Tensor | None] | None = {} if return_breakdown else None
 
         mov_half = resize_3d(mov_full, scale_factor=0.5)

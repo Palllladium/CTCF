@@ -47,7 +47,9 @@ from utils.field import (
 from utils.tto import TTOConfig, refine_flow
 
 
-def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) -> dict[str, object]:
+def load_checkpoint_state(
+    model: torch.nn.Module, ckpt_path: str, strict: bool, *, expand_image_channels: bool = False
+) -> dict[str, object]:
     """Load checkpoint weights and return an explicit, machine-readable load report."""
     ckpt = torch.load(ckpt_path, map_location="cpu")
     numerical = {
@@ -55,6 +57,9 @@ def load_checkpoint_state(model: torch.nn.Module, ckpt_path: str, strict: bool) 
         "precision_recorded": isinstance(ckpt, dict) and "precision" in ckpt,
     }
     sd = ckpt.get("state_dict", ckpt.get("model", ckpt)) if isinstance(ckpt, dict) else ckpt
+    if expand_image_channels:
+        sd, expanded = model.expand_scalar_inputs(sd)
+        numerical["expanded_input_keys"] = expanded
 
     if strict:
         try:

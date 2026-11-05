@@ -101,6 +101,9 @@ def resolve_lumir_paths(args, required: tuple[str, ...] | None = None) -> dict[s
 
 def print_experiment_header(args, ds_key: str) -> None:
     print(f">>> Experiment: {args.exp} | ds={args.ds} | paths={args.paths}")
+    if getattr(args, "ixi_pairs", ""):
+        print(f"    Paired IXI = {args.ixi_pairs} arm={args.ixi_arm}")
+        return
     if ds_key == "LUMIR":
         for name, path in resolve_lumir_paths(args).items():
             print(f"    {name:<10} = {path}")

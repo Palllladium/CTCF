@@ -406,6 +406,8 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
             "precision": precision,
             "training": saved_training,
         }
+        if getattr(args, "ixi_pairs", ""):
+            state["arguments"] = vars(args)
         if save_ckpt_enabled:
             save_ckpt(state, ckpt_dir, is_best)
 
