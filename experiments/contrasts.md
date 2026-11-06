@@ -20,33 +20,45 @@ Copy the processed Train/Val directories, crosswalk CSV and extracted official r
 ```bash
 PY=/data/mooncake/P/envs/ctcf/bin/python
 "$PY" -m pip install SimpleITK matplotlib
-OUT=/data/mooncake/P/IXI_paired_qc
+OUT=/data/mooncake/P/IXI_paired_v2
 COMMON=(--mapping /data/mooncake/P/ixi_processed_to_original.csv --processed /data/mooncake/P/IXI_data --raw /data/mooncake/P/IXI_raw)
-"$PY" -m tools.analysis.prepare_ixi calibrate "${COMMON[@]}" --out "$OUT"
+# Revalidate the orientation already found on Train with the new fitting recipe:
+"$PY" -m tools.analysis.prepare_ixi calibrate "${COMMON[@]}" --out "$OUT" --geometry /data/mooncake/P/IXI_paired_qc_fixed/geometry_0.json
 GEOMETRY="$OUT/geometry_0.json"
 "$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$OUT" --geometry "$GEOMETRY" --limit 8
 ```
 
-Calibration fits all 48 signed axis permutations on the first fixed Train subject, then checks up to two finalists
-per handedness on the fixed Train panel. Coarse fitting uses one pyramid level, dense sampling and conservative affine
-steps; candidates are ranked by fitted correlation after Train laterality QC. Inspect `orientation_scores.json`,
-Train `alignment.png` and `qc.json` before Val preparation. Per-candidate progress is printed during calibration.
+Calibration with `--geometry` revalidates one supplied orientation. Without it, a cheap coarse search proposes
+48 signed axis permutations before checking finalists. Every final Train-panel subject must pass full-resolution
+correlation and laterality. Calibration, preparation and wrong-ID controls share one affine recipe: 24 coarse MI
+starts (scale 0.70..1.05 in steps of 0.05; LPS superior shifts -10/0/+10 mm), followed by fine fitting in physical
+coordinates. Affine start/refinement selection uses freshly evaluated MI on a common grid. Correlation is used
+for orientation approval and data QC. Nested composites are flattened before refinement/export.
+Correlation remains an intensity QC measure, not independent proof of identity.
+Inspect `orientation_scores.json`, Train `alignment.png` and `qc.json` before Val preparation.
 Geometry files start with provisional QC limits of 0.99 brain coverage, 0.8 T1 correlation, 20 mm rigid centre
 motion and 20 degrees rotation. Review/freeze limits on these Train cases; these are QC defaults, not validated
 population limits. Changing geometry/limits requires a new output directory. Left/right QC uses relative
 centroids after the full transform, not the sign of absolute coordinates. Image identity still needs review.
+Old recipe caches/geometries are rejected. QC flags make preparation exit nonzero after saving reports.
 `preparation_profile_0.json` extrapolates measured CPU preparation time to 457 subjects; it is only an estimate.
+
+After the fixed eight pass, `prepare --limit 30` adds Train cases until the panel has 10 per site, preserving
+the initial eight. Inspect that panel before full preparation; it does not prove every subject will pass.
 
 ```bash
 # After Train QC/limits are frozen; keep GEOMETRY pointing to the approved file:
-FINAL=/data/mooncake/P/IXI_paired
+FINAL="$OUT"
+"$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY" --limit 399
+# Continue to Val only after all Train cases pass, without changing geometry/limits:
 "$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY"
 "$PY" -m tools.analysis.prepare_ixi identity "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY"
 "$PY" -m tools.analysis.prepare_ixi finalise "${COMMON[@]}" --out "$FINAL"
 ```
 
-The last command intentionally writes `review_required.json` and stops. Inspect the requested IDs, suspicious
-alignments and wrong-ID previews, then put reviewed processed IDs (one per line) in `$FINAL/reviewed_ids.txt`.
+The last command intentionally writes `review_required.json` and stops. Return it with the requested alignment
+and wrong-ID previews for review. After review, the project team supplies `$FINAL/reviewed_ids.txt` and the final command;
+the node operator does not manually assign IDs or approve unchecked cases.
 The 11 manually resolved crosswalk cases and order-only cases are automatically required. Correct failures;
 subjects cannot be silently dropped. The final manifest freezes Train399/Val58, pairings and source hashes.
 
@@ -66,7 +78,7 @@ cd /data/mooncake/P/CTCF
 git pull --ff-only
 export EXPECTED_GIT_HEAD=<reviewed-code-SHA>
 export PYBIN=/data/mooncake/P/envs/ctcf/bin/python
-export IXI_MANIFEST=/data/mooncake/P/IXI_paired/manifest.json
+export IXI_MANIFEST=/data/mooncake/P/IXI_paired_v2/manifest.json
 export GPUS="0 1 2 3"
 bash tools/runners/train/contrasts.sh start
 ```

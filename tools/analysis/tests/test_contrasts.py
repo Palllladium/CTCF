@@ -26,8 +26,12 @@ from models.CTCF.configs import CONFIGS
 from models.CTCF.stages import FlowRefiner3D
 from models.TransMorph_DCA.model import SpatialTransformer as ModelWarp
 from tools.analysis.prepare_ixi import (
+    AFFINE_STARTS,
+    PREPARATION_RECIPE,
     calibrate,
+    calibration_subjects,
     finalise,
+    fit_affine,
     laterality_report,
     prepare,
     prepare_arrays,
@@ -219,7 +223,7 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
     manifest = json.loads(manifest_file.read_text())
     out = tmp_path / "prepared"
     rows, reviewed = [], []
-    geometry = {"direction": list(np.eye(3).ravel()), "orientation_qc_passed": True}
+    geometry = {"direction": list(np.eye(3).ravel()), "orientation_qc_passed": True, "recipe": PREPARATION_RECIPE}
     mapping = tmp_path / "mapping.csv"
     mapping.write_text("synthetic crosswalk")
     for group in ("training", "validation"):
@@ -231,7 +235,11 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
                 "flags": [],
                 "qc": {"laterality": {"passed": True}} if row["split"] == "Train" else {},
                 "match": "demographics",
-                "binding": {"geometry": geometry, "sources": {str(tmp_path / row["t1"]): row["t1_sha256"]}},
+                "binding": {
+                    "recipe": PREPARATION_RECIPE,
+                    "geometry": geometry,
+                    "sources": {str(tmp_path / row["t1"]): row["t1_sha256"]},
+                },
             }
             folder = out / row["split"] / row["id"]
             folder.mkdir(parents=True)
@@ -239,7 +247,9 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
             rows.append({"split": row["split"], "processed_file": row["id"] + ".pkl", "t1_file": "IXI-Guys-T1.nii.gz"})
             reviewed.append(row["id"])
     (out / "identity_controls.json").write_text(
-        json.dumps({"geometry": geometry, "mapping_sha256": sha256_file(mapping), "controls": []})
+        json.dumps(
+            {"recipe": PREPARATION_RECIPE, "geometry": geometry, "mapping_sha256": sha256_file(mapping), "controls": []}
+        )
     )
     args = SimpleNamespace(out=out, mapping=mapping, expected_train=4, expected_val=2, reviewed=None, review_extra=None)
     with pytest.raises(ValueError, match="reviewed"):
@@ -458,6 +468,7 @@ def test_rigid_registration_starts_from_headers_and_reports_center_motion(monkey
     result, report = register(fixed, moving, affine=False)
     assert report["initialisation"] == "header_identity"
     assert result.TransformPoint((1, 2, 3)) == (1, 2, 3)
+    result = sitk.Euler3DTransform(result.GetNthTransform(0))
     result.SetTranslation((3, 4, 0))
     result.SetRotation(0, 0, np.pi / 6)
     motion = rigid_motion(result, fixed)
@@ -507,6 +518,7 @@ def test_preparation_checks_all_train_laterality_and_refreshes_old_cache(tmp_pat
     raw.mkdir()
     out.mkdir()
     geometry = {
+        "recipe": PREPARATION_RECIPE,
         "direction": list(np.eye(3).ravel()),
         "spacing": [1, 1, 1],
         "origin": [0, 0, 0],
@@ -565,9 +577,20 @@ def test_preparation_checks_all_train_laterality_and_refreshes_old_cache(tmp_pat
     report.write_text(json.dumps(record))
     prepare(args, rows)
     assert len(calls) == 4 and json.loads(report.read_text())["qc"]["laterality"]["passed"]
+    record = json.loads(report.read_text())
+    record["binding"].pop("recipe")
+    report.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="recipe changed"):
+        prepare(args, rows)
+    record["binding"]["recipe"] = PREPARATION_RECIPE
+    record["flags"] = ["t1_correlation"]
+    report.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="Preparation QC failed"):
+        prepare(args, rows)
 
 
-def test_calibration_fits_all_orientations_before_shortlisting(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bad_panel", (False, True))
+def test_calibration_fits_all_orientations_before_shortlisting(tmp_path, monkeypatch, bad_panel):
     processed, raw, out = [tmp_path / name for name in ("processed", "raw", "out")]
     (processed / "Train").mkdir(parents=True)
     raw.mkdir()
@@ -587,12 +610,17 @@ def test_calibration_fits_all_orientations_before_shortlisting(tmp_path, monkeyp
         }
         with (processed / "Train" / row["processed_file"]).open("wb") as stream:
             pickle.dump((image, labels), stream)
-        sitk.WriteImage(sitk.GetImageFromArray(image), str(raw / row["t1_file"]))
+        raw_values = (
+            np.random.default_rng(0).uniform(0, 300, image.shape).astype(np.float32)
+            if bad_panel and index == 1
+            else image
+        )
+        sitk.WriteImage(sitk.GetImageFromArray(raw_values), str(raw / row["t1_file"]))
         rows.append(row)
     fitted_directions = []
 
-    def fit(fixed, moving, *, affine, coarse):
-        assert coarse and fixed.GetSize() == moving.GetSize() == (4, 4, 4)
+    def fit(fixed, moving, *, affine=True, coarse=False):
+        assert fixed.GetSize() == moving.GetSize() == ((4, 4, 4) if coarse else (16, 16, 16))
         direction = np.asarray(fixed.GetDirection()).reshape(3, 3)
         fitted_directions.append(tuple(direction.ravel()))
         matrix = direction.T
@@ -605,12 +633,22 @@ def test_calibration_fits_all_orientations_before_shortlisting(tmp_path, monkeyp
         return transform, {}
 
     monkeypatch.setattr("tools.analysis.prepare_ixi.register", fit)
-    calibrate(SimpleNamespace(processed=processed, raw=raw, out=out), rows)
+    monkeypatch.setattr("tools.analysis.prepare_ixi.fit_affine", fit)
+    args = SimpleNamespace(processed=processed, raw=raw, out=out)
+    if bad_panel:
+        with pytest.raises(ValueError, match="full Train correlation/laterality panel"):
+            calibrate(args, rows)
+    else:
+        calibrate(args, rows)
     report = json.loads((out / "orientation_scores.json").read_text())
     assert len(set(fitted_directions)) == len(report["screening_candidates"]) == 48
     assert any(not row["train_check"]["passed"] for row in report["screening_candidates"])
-    selected = json.loads((out / "geometry_0.json").read_text())
-    assert selected["orientation_qc_passed"] and selected["fitted_correlation"] == pytest.approx(1)
+    if bad_panel:
+        assert all(not row["orientation_qc_passed"] for row in report["affine_candidates"])
+        assert not (out / "geometry_0.json").exists()
+    else:
+        selected = json.loads((out / "geometry_0.json").read_text())
+        assert selected["orientation_qc_passed"] and selected["fitted_correlation"] == pytest.approx(1)
 
 
 def test_coarse_affine_preserves_overlap_with_distant_physical_origins():
@@ -629,3 +667,51 @@ def test_coarse_affine_preserves_overlap_with_distant_physical_origins():
     aligned = sitk.GetArrayFromImage(sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0))
     assert np.corrcoef(values.ravel(), aligned.ravel())[0, 1] > 0.99
     assert report["coarse"] and report["initialisation"] == "geometry"
+
+
+def test_multistart_uses_common_mi_and_keeps_better_coarse_fit(monkeypatch):
+    fixed = sitk.Image([32] * 3, sitk.sitkFloat32) + 1
+    calls = []
+
+    def fit(fixed, moving, *, affine, initial, coarse=False):
+        calls.append((coarse, initial))
+        transform = sitk.AffineTransform(3)
+        transform.SetTranslation((float(len(calls)), 0, 0))
+        return transform, {"metric": -9999 if len(calls) == 1 else 0}
+
+    def score(fixed, moving, transform):
+        index = transform.GetTranslation()[0]
+        return -index if index <= 24 else 100
+
+    monkeypatch.setattr("tools.analysis.prepare_ixi.register", fit)
+    monkeypatch.setattr("tools.analysis.prepare_ixi.affine_metric", score)
+    result, report = fit_affine(fixed, fixed)
+    assert len(calls) == 25 and len(report["starts"]) == len(AFFINE_STARTS) == 24
+    assert report["selected_start"] == 23 and result.GetTranslation()[0] == 24
+    assert report["selected_stage"] == "coarse" and not calls[-1][0]
+    assert {row["superior_shift_mm"] for row in report["starts"]} == {-10, 0, 10}
+
+
+def test_refinement_flattens_nested_transforms_and_roundtrips(tmp_path):
+    z, y, x = np.mgrid[:24, :26, :28]
+    values = np.exp(-((x - 12) ** 2 + 2 * (y - 11) ** 2 + (z - 13) ** 2) / 35).astype(np.float32)
+    fixed = sitk.GetImageFromArray(values)
+    initial = sitk.CompositeTransform([sitk.CompositeTransform([sitk.AffineTransform(3)])])
+    result, _ = register(fixed, fixed, affine=True, initial=initial, coarse=True)
+    assert result.GetNumberOfTransforms() == 1
+    target = tmp_path / "result.tfm"
+    sitk.WriteTransform(result, str(target))
+    read = sitk.ReadTransform(str(target))
+    np.testing.assert_allclose(read.TransformPoint((7, 9, 11)), result.TransformPoint((7, 9, 11)), atol=1e-12)
+
+
+def test_extended_train_panel_balances_sites_without_changing_the_first_eight():
+    rows = [
+        dict(split="Train", ixi_id=f"{site}{i}", t1_file=f"IXI{i:03}-{site}-T1.nii.gz")
+        for site in ("Guys", "HH", "IOP")
+        for i in range(15)
+    ]
+    first = calibration_subjects(rows)
+    panel = calibration_subjects(rows, 30)
+    assert panel[:8] == first and len(panel) == 30
+    assert all(sum(f"-{site}-" in row["t1_file"] for row in panel) == 10 for site in ("Guys", "HH", "IOP"))
