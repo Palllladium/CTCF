@@ -14,6 +14,11 @@ from tools.analysis.run_artifacts import sha256_file
 from utils import SegNorm, pkload
 from utils.common import validate_subject_pairs
 
+PAIRED_TRAIN_EXCLUSIONS = (
+    {"id": "subject_481", "ixi_id": "IXI539", "reason": "Raw T2 field of view truncates the posterior brain."},
+    {"id": "subject_494", "ixi_id": "IXI556", "reason": "Raw T2 field of view truncates the cerebellum and brainstem."},
+)
+
 
 class IXIBrainDataset(Dataset):
     """IXI atlas-to-subject training pairs (intensity only)."""
@@ -99,24 +104,29 @@ def read_paired_manifest(
 
 
 class IXIPairSampler(Sampler):
-    """One moving occurrence per subject/epoch; independent deterministic fixed-partner sampling."""
+    """Deterministic moving permutations and fixed partners, optionally with a fixed epoch budget."""
 
-    def __init__(self, size: int, seed: int, fingerprint: str):
+    def __init__(self, size: int, seed: int, fingerprint: str, *, samples: int | None = None):
         self.size, self.seed, self.fingerprint, self.epoch = size, seed, fingerprint, 0
-        if size < 2:
-            raise ValueError("Subject-pair sampling needs at least two subjects")
+        self.samples = size if samples is None else samples
+        if size < 2 or self.samples < 1:
+            raise ValueError("Subject-pair sampling needs at least two subjects and a positive epoch budget")
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
     def __iter__(self):
         generator = torch.Generator().manual_seed(self.seed + self.epoch)
-        for moving in torch.randperm(self.size, generator=generator).tolist():
-            fixed = int(torch.randint(self.size - 1, (), generator=generator))
-            yield moving, fixed + int(fixed >= moving)
+        remaining = self.samples
+        while remaining:
+            moving_order = torch.randperm(self.size, generator=generator).tolist()[:remaining]
+            for moving in moving_order:
+                fixed = int(torch.randint(self.size - 1, (), generator=generator))
+                yield moving, fixed + int(fixed >= moving)
+            remaining -= len(moving_order)
 
     def __len__(self):
-        return self.size
+        return self.samples
 
 
 class IXIPairedDataset(Dataset):

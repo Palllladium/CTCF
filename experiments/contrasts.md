@@ -11,8 +11,14 @@ within pairs. IXI-pretrained weights must not enter challenge tracks that prohib
 Look for original preprocessing transforms/aligned NIfTI files first. Otherwise the tool estimates affine
 processed-T1 -> raw-T1 and rigid raw-T1 -> raw-T2 pull transforms in physical LPS. T2 starts from header alignment
 and is resampled once after composition. T1 is unchanged; T2 uses a T1-derived mask, P1/P99 scaling and no N4.
-All 399 Train subjects use FreeSurfer labels only to check laterality after the fitted map, never in registration losses or
+The 397 included Train subjects use FreeSurfer labels only to check laterality after the fitted map, never in registration losses or
 normalisation. Val/Test labels do not select orientation. This use of Train labels for integrity QC must be disclosed.
+
+Two Train subjects are explicitly excluded from all B arms because their original T2 scans truncate brain tissue:
+IXI539 (`subject_481`, posterior brain) and IXI556 (`subject_494`, cerebellum/brainstem). The source crosswalk and
+their QC reports remain intact; `manifest.json` records both reasons in `training_exclusions`. The matched cohort
+is Train397/Val58; the training budget remains 100x399 updates. Each epoch covers all 397 moving subjects once,
+then draws two more from a new permutation. The pair stream remains identical across B0/B1/B2.
 
 Copy the processed Train/Val directories, crosswalk CSV and extracted official raw T1/T2 files to the node.
 `RAW` must contain the filenames from the CSV directly. No downloads run automatically.
@@ -49,7 +55,7 @@ the initial eight. Inspect that panel before full preparation; it does not prove
 ```bash
 # After Train QC/limits are frozen; keep GEOMETRY pointing to the approved file:
 FINAL="$OUT"
-"$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY" --limit 399
+"$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY" --limit 397
 # Continue to Val only after all Train cases pass, without changing geometry/limits:
 "$PY" -m tools.analysis.prepare_ixi prepare "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY"
 "$PY" -m tools.analysis.prepare_ixi identity "${COMMON[@]}" --out "$FINAL" --geometry "$GEOMETRY"
@@ -60,7 +66,7 @@ The last command intentionally writes `review_required.json` and stops. Return i
 and wrong-ID previews for review. After review, the project team supplies `$FINAL/reviewed_ids.txt` and the final command;
 the node operator does not manually assign IDs or approve unchecked cases.
 The 11 manually resolved crosswalk cases and order-only cases are automatically required. Correct failures;
-subjects cannot be silently dropped. The final manifest freezes Train399/Val58, pairings and source hashes.
+additional subjects cannot be silently dropped. The final manifest freezes Train397/Val58, exclusions, pairings and source hashes.
 
 ```bash
 "$PY" -m tools.analysis.prepare_ixi finalise "${COMMON[@]}" --out "$FINAL" --reviewed "$FINAL/reviewed_ids.txt"

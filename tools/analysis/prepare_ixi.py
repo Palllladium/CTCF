@@ -15,6 +15,7 @@ import numpy as np
 import SimpleITK as sitk  # noqa: N813
 from scipy import ndimage
 
+from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from utils import pkload
 
@@ -228,13 +229,21 @@ def preview(path, t1, aligned_t1, t2):
     plt.close(fig)
 
 
-def cohort(mapping):
+def cohort(mapping, *, include_excluded=False):
     with Path(mapping).open(encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
     rows = [row for row in rows if row["split"] in {"Train", "Val"} and row["t2_file"]]
     ids = [row["ixi_id"] for row in rows]
     if len(ids) != len(set(ids)):
         raise ValueError("Mapping repeats original IXI IDs")
+    excluded = {row["ixi_id"]: row["id"] for row in PAIRED_TRAIN_EXCLUSIONS}
+    for row in rows:
+        if row["ixi_id"] in excluded and (
+            row["split"] != "Train" or Path(row["processed_file"]).stem != excluded[row["ixi_id"]]
+        ):
+            raise ValueError("The documented T2 exclusion does not match this crosswalk's Train subject")
+    if not include_excluded:
+        rows = [row for row in rows if row["ixi_id"] not in excluded]
     return sorted(rows, key=lambda row: (row["split"], row["processed_file"]))
 
 
@@ -575,6 +584,7 @@ def finalise(args, rows):
     order = np.random.default_rng(0).permutation(len(ids))
     pairs = [(ids[a], ids[b]) for a, b in zip(order[::2], order[1::2], strict=True)]
     pairs = [direction for a, b in pairs for direction in ((a, b), (b, a))]
+    original_ids = {row["ixi_id"] for row in cohort(args.mapping, include_excluded=True)}
     atomic_write_json(
         args.out / "manifest.json",
         {
@@ -585,6 +595,7 @@ def finalise(args, rows):
             "validation": groups[1],
             "validation_pairs": pairs,
             "expected_counts": {"training": args.expected_train, "validation": args.expected_val},
+            "training_exclusions": [row for row in PAIRED_TRAIN_EXCLUSIONS if row["ixi_id"] in original_ids],
             "mapping_sha256": sha256_file(args.mapping),
             "scope": "Train labels used only for laterality integrity QC; intensity-only registration/normalisation; Val labels for evaluation",
         },
@@ -601,7 +612,7 @@ def main():
     parser.add_argument("--transforms", type=Path, help="Optional supplied pull transforms in SimpleITK .tfm format.")
     parser.add_argument("--reviewed", type=Path, help="Text file containing image-reviewed processed subject IDs.")
     parser.add_argument("--limit", type=int, default=0, help="Prepare only this many Train cases for initial QC.")
-    parser.add_argument("--expected_train", type=int, default=399)
+    parser.add_argument("--expected_train", type=int, default=397)
     parser.add_argument("--expected_val", type=int, default=58)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--shards", type=int, default=1)

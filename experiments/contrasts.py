@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 
-from datasets.IXI import IXIPairedDataset, IXIPairSampler, read_paired_manifest
+from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS, IXIPairedDataset, IXIPairSampler, read_paired_manifest
 from experiments.core.field_scoring import paired_dice_delta, score_saved_field
 from experiments.core.helpers import build_val_dice_fn
 from experiments.core.inference_metrics import metric_profile_for, write_results
@@ -38,6 +38,7 @@ RECIPE = dict(
     w_jac=0.005,
     jac_mode="central",
     max_epoch=100,
+    max_train_iters=399,
     batch_size=1,
     seed=0,
 )
@@ -123,8 +124,12 @@ def gradient_dose(runner, dataset, count=8):
 
 
 def check(args, manifest):
-    if manifest["expected_counts"] != {"training": 399, "validation": 58} or manifest["shape"] != [160, 192, 224]:
-        raise ValueError("The approved readiness profile requires all 399 Train / 58 Val subjects at full resolution")
+    if (
+        manifest["expected_counts"] != {"training": 397, "validation": 58}
+        or manifest["shape"] != [160, 192, 224]
+        or manifest.get("training_exclusions") != list(PAIRED_TRAIN_EXCLUSIONS)
+    ):
+        raise ValueError("Readiness requires 397 Train / 58 Val subjects and the two documented raw-T2 exclusions")
     source = torch.load(args.checkpoint, map_location="cpu")
     if int(source["epoch"]) + 1 != 250 or source.get("precision") != "bf16":
         raise ValueError("The pilot parent must be Mamba294 last after 250 epochs, recorded BF16")

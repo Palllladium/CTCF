@@ -148,7 +148,9 @@ def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
     }
     fingerprint = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     train = IXI.IXIPairedDataset(manifest, args.ixi_arm)
-    sampler = IXI.IXIPairSampler(len(train), args.seed, fingerprint)
+    sampler = IXI.IXIPairSampler(
+        len(train), args.seed, fingerprint, samples=args.max_train_iters if args.max_train_iters > 0 else None
+    )
     print(f"IXI pairs: Train={len(train)}, Val directions={len(manifest['validation_pairs'])}, arm={args.ixi_arm}")
     return (
         DataLoader(train, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True),

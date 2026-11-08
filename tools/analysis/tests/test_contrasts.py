@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import pickle
 from pathlib import Path
@@ -13,8 +14,8 @@ import torch
 from scipy import ndimage
 from torch import nn
 
-from datasets.IXI import IXIPairedDataset, IXIPairSampler, read_paired_manifest
-from experiments.contrasts import RECIPE, evaluate, training_args
+from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS, IXIPairedDataset, IXIPairSampler, read_paired_manifest
+from experiments.contrasts import RECIPE, check as readiness_check, evaluate, training_args
 from experiments.core import field_scoring
 from experiments.core.data_loaders import ixi_paired_loaders
 from experiments.core.inference_metrics import metric_profile_for
@@ -30,6 +31,7 @@ from tools.analysis.prepare_ixi import (
     PREPARATION_RECIPE,
     calibrate,
     calibration_subjects,
+    cohort,
     finalise,
     fit_affine,
     laterality_report,
@@ -206,7 +208,9 @@ def test_readiness_rechecks_the_prepared_image_bytes(manifest_file):
 
 def test_paired_loader_resume_binding_and_common_pair_stream(manifest_file):
     args = parse_args(["--ds", "IXI", "--ixi_pairs", str(manifest_file), "--image_channels", "2", "--num_workers", "0"])
+    args.max_train_iters = 6
     first, _ = ixi_paired_loaders(args)
+    assert len(first) == 6 and len(list(first.sampler)) == 6
     args.exp, args.resume = "other_runtime_name", "last.pth"
     resumed, _ = ixi_paired_loaders(args)
     assert first.sampler.fingerprint == resumed.sampler.fingerprint
@@ -225,7 +229,6 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
     rows, reviewed = [], []
     geometry = {"direction": list(np.eye(3).ravel()), "orientation_qc_passed": True, "recipe": PREPARATION_RECIPE}
     mapping = tmp_path / "mapping.csv"
-    mapping.write_text("synthetic crosswalk")
     for group in ("training", "validation"):
         for row in manifest[group]:
             record = row | {
@@ -246,6 +249,20 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
             (folder / "qc.json").write_text(json.dumps(record))
             rows.append({"split": row["split"], "processed_file": row["id"] + ".pkl", "t1_file": "IXI-Guys-T1.nii.gz"})
             reviewed.append(row["id"])
+    with mapping.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("split", "processed_file", "ixi_id", "t1_file", "t2_file"))
+        writer.writeheader()
+        for group in (manifest["training"], manifest["validation"], PAIRED_TRAIN_EXCLUSIONS):
+            for row in group:
+                writer.writerow(
+                    dict(
+                        split=row.get("split", "Train"),
+                        processed_file=row["id"] + ".pkl",
+                        ixi_id=row["ixi_id"],
+                        t1_file="IXI-Guys-T1.nii.gz",
+                        t2_file="paired-T2.nii.gz",
+                    )
+                )
     (out / "identity_controls.json").write_text(
         json.dumps(
             {"recipe": PREPARATION_RECIPE, "geometry": geometry, "mapping_sha256": sha256_file(mapping), "controls": []}
@@ -259,6 +276,8 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
     finalise(args, rows)
     prepared = read_paired_manifest(out / "manifest.json", verify_bytes=True)
     assert prepared["validation_pairs"] == [["Val_0", "Val_1"], ["Val_1", "Val_0"]]
+    assert prepared["training_exclusions"] == list(PAIRED_TRAIN_EXCLUSIONS)
+    assert len(cohort(mapping)) == 6 and len(cohort(mapping, include_excluded=True)) == 8
     report = out / "Train" / manifest["training"][0]["id"] / "qc.json"
     record = json.loads(report.read_text())
     report.write_text(json.dumps(record | {"qc": {}}))
@@ -715,3 +734,26 @@ def test_extended_train_panel_balances_sites_without_changing_the_first_eight():
     panel = calibration_subjects(rows, 30)
     assert panel[:8] == first and len(panel) == 30
     assert all(sum(f"-{site}-" in row["t1_file"] for row in panel) == 10 for site in ("Guys", "HH", "IOP"))
+
+
+def test_pair_sampler_keeps_the_399_update_budget_on_397_subjects():
+    first = IXIPairSampler(397, 0, "b0", samples=399)
+    second = IXIPairSampler(397, 0, "b1", samples=399)
+    pairs = list(first)
+    assert len(first) == len(pairs) == 399 and pairs == list(second)
+    assert sorted(a for a, _ in pairs[:397]) == list(range(397))
+    assert len({a for a, _ in pairs[397:]}) == 2
+    assert all(0 <= a < 397 and 0 <= b < 397 and a != b for a, b in pairs)
+    first.set_epoch(1)
+    assert list(first) != pairs
+
+
+def test_readiness_rejects_the_old_cohort_or_missing_exclusion_records():
+    manifest = dict(expected_counts={"training": 397, "validation": 58}, shape=[160, 192, 224])
+    with pytest.raises(ValueError, match="documented raw-T2 exclusions"):
+        readiness_check(None, manifest)
+    manifest.update(
+        training_exclusions=list(PAIRED_TRAIN_EXCLUSIONS), expected_counts={"training": 399, "validation": 58}
+    )
+    with pytest.raises(ValueError, match="documented raw-T2 exclusions"):
+        readiness_check(None, manifest)
