@@ -63,6 +63,7 @@ def contrast_dispatch(dispatch):
                     GPUS="2 3 4 5",
                     MIN_FREE_GIB="0",
                     RUN_B="1",
+                    WORKFLOW="main",
                 )
                 | options
             )
@@ -106,6 +107,78 @@ def test_changed_parent_and_duplicate_gpu_are_rejected(contrast_dispatch):
     (root / "parent.pth").write_bytes(b"another parent")
     changed = run()
     assert changed.returncode != 0 and "Changed parent" in changed.stdout
+
+
+@pytest.fixture
+def followup_dispatch(contrast_dispatch):
+    root, run = contrast_dispatch
+    source = root / "source"
+    (source / "parent").mkdir(parents=True)
+    (source / "head.txt").write_text("source")
+    (source / "parent/recipe.json").write_text("{}")
+    (root / "experiments/contrast_diagnostics.py").write_text(
+        "import sys,os,json\nfrom pathlib import Path\n"
+        "a=sys.argv; stage=a[1]; out=Path(a[a.index('--out')+1]); out.mkdir(parents=True,exist_ok=True)\n"
+        "arm=a[a.index('--arm')+1] if '--arm' in a else ''; reg=a[a.index('--w_reg')+1] if '--w_reg' in a else ''\n"
+        "with (Path(os.environ['TEST_ROOT'])/'followup_calls.txt').open('a') as f: f.write(stage+' '+arm+' '+reg+' '+os.environ.get('CUDA_VISIBLE_DEVICES','')+'\\n')\n"
+        "if stage=='train':\n"
+        "    exp=a[a.index('--exp')+1]; folder=Path('logs')/exp;folder.mkdir(parents=True,exist_ok=True);(folder/'metrics.csv').write_text('data')\n"
+        "if stage=='anchor': (out/'anchor.json').write_text(json.dumps({'add_b1_w4':bool(os.environ.get('DRIFT_ANCHOR'))}))\n"
+        "if stage=='decide': (out/'decision.json').write_text(json.dumps({'repeat_arm':'b1' if os.environ.get('SIGNAL') else None}))\n"
+    )
+    (root / "experiments/repair_diagnostics.py").write_text(
+        "import sys,os\nfrom pathlib import Path\na=sys.argv;stage=a[1]\n"
+        "with (Path(os.environ['TEST_ROOT'])/'followup_calls.txt').open('a') as f:f.write('repair_'+stage+' '+os.environ.get('CUDA_VISIBLE_DEVICES','')+'\\n')\n"
+        "raise SystemExit(9 if stage=='saved' and os.environ.get('FAIL_REPAIR') else 0)\n"
+    )
+
+    def launch(**options):
+        return run(WORKFLOW="followup", SOURCE_RUN=source.as_posix(), **options)
+
+    return root, launch
+
+
+def test_followup_runs_four_controls_and_reuses_completed_jobs(followup_dispatch):
+    root, run = followup_dispatch
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (root / "followup_calls.txt").read_text().splitlines()
+    trains = [line for line in calls if line.startswith("train ")]
+    assert sorted(line.split()[1:3] for line in trains) == [["b0", "1"], ["b0", "4"], ["b1", "1"], ["b2", "1"]]
+    assert all(line.split()[-1] != "5" for line in trains)
+    assert "repair_saved 5" in calls
+    count = len(calls)
+    resumed = run(GPUS="6 7")
+    assert resumed.returncode == 0 and "SKIP b0_w4_s0" in resumed.stdout
+    after = (root / "followup_calls.txt").read_text().splitlines()
+    assert len(after) == count + 1 and after[-1].startswith("prepare ")
+
+
+@pytest.mark.parametrize("changed", ("manifest", "source"))
+def test_followup_rejects_changed_inputs_even_when_all_jobs_are_cached(followup_dispatch, changed):
+    root, run = followup_dispatch
+    assert run().returncode == 0
+    calls = (root / "followup_calls.txt").read_text()
+    path = root / ("manifest.json" if changed == "manifest" else "source/parent/recipe.json")
+    path.write_text("changed")
+    refused = run()
+    assert refused.returncode != 0 and f"Changed {changed}" in refused.stdout
+    assert (root / "followup_calls.txt").read_text() == calls
+
+
+@pytest.mark.parametrize("condition", ("DRIFT_ANCHOR", "SIGNAL", "FAIL_REPAIR"))
+def test_followup_conditions_are_independent_and_visible(followup_dispatch, condition):
+    root, run = followup_dispatch
+    result = run(**{condition: "1"})
+    calls = (root / "followup_calls.txt").read_text().splitlines()
+    trains = [line.split()[1:3] for line in calls if line.startswith("train ")]
+    if condition == "DRIFT_ANCHOR":
+        assert result.returncode == 0 and ["b1", "4"] in trains and len(trains) == 5
+    elif condition == "SIGNAL":
+        assert result.returncode == 0 and len(trains) == 6
+    else:
+        assert result.returncode != 0 and len(trains) == 4
+        assert list((root / "results/exports").glob("*FAILED.zip"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="real Linux flock, setsid and /proc process-group ownership")

@@ -453,9 +453,55 @@ tools/
   paper/             # Figure and table generation scripts
 ```
 
-## Notes
+## Paired IXI diagnostics
 
-- The paired T1/T2 pilot and frozen bridge consensus use [this preparation and dispatch protocol](experiments/contrasts.md).
+`tools.analysis.prepare_ixi` prepares a reviewed paired T1/T2 manifest on CPU. The existing trainer runs
+B0 (T1 input/loss), B1 (T1 input, T1+T2 loss) and B2 (T1+T2 input/loss); `experiments.contrasts` provides
+readiness and evaluation. `WORKFLOW=main` selects the original pilot with frozen OASIS consensus.
+
+`WORKFLOW=followup` runs four fresh three-epoch controls: B0/B1/B2 at `w_reg=1` and B0 at `w_reg=4`.
+It also diagnoses saved repair failures and queues the conditional controls. It needs the original source
+run (including FF/REP arrays), historical training CSV files, the parent checkpoint and reviewed data.
+
+After code review, commit and push, start from the node checkout:
+
+```bash
+cd /data/mooncake/P/CTCF
+git pull --ff-only
+export EXPECTED_GIT_HEAD="$(git rev-parse HEAD)"
+export PYBIN=/data/mooncake/P/envs/ctcf/bin/python
+export IXI_MANIFEST=/data/mooncake/P/IXI_paired_v2/manifest.json
+export SOURCE_RUN=results/contrasts/B_20261108T180120Z
+export WORKFLOW=followup GPUS="0 1 2 3"
+RUN_ID="B_CHECK_$(date -u +%Y%m%dT%H%M%SZ)"
+bash tools/runners/train/contrasts.sh start "$RUN_ID"
+
+R="results/contrasts/$RUN_ID"
+tail -n 30 -F "$R/status.txt"
+```
+
+The launcher backgrounds itself and prints PID/RUN_ID/log; no extra `nohup` is needed. Detailed task logs
+are named in each `START` line. Ctrl+C closes `tail`, leaving the run active. Stop and migrate the entire run:
+
+```bash
+bash tools/runners/train/contrasts.sh stop "$RUN_ID"
+while [ -f "$R/runner.pid" ]; do sleep 2; done
+GPUS="4 5 6 7" bash tools/runners/train/contrasts.sh resume "$RUN_ID"
+```
+
+Keep the exported environment (restore it in a new SSH session), RUN_ID and commit. Completed computation
+is reused; input validation repeats on resume. Do not modify/pull the checkout while the run is active.
+Check free disk space beforehand; the follow-up defaults to 80 GiB minimum, overridable with `MIN_FREE_GIB`.
+Allow more headroom when possible, for example `MIN_FREE_GIB=120`.
+
+Completion is the `[CONTRASTS PACKAGE]` line followed by its sidecar. Return the final
+`results/exports/<RUN_ID>__<attempt>__COMPLETE.zip`, `.zip.sha256` and latest `$R/runner_<attempt>.log`;
+return FAILED/PARTIAL variants after failure/interruption. Fields and checkpoints stay on the node.
+Partial repair summaries preserve unresolved fields. Padding is diagnostic on an extended box; fallback
+and its Dice cost are explicit. The normal-band heuristic can fold at coupled edges/corners; its failure
+does not exhaust boundary-repair approaches. All chosen endpoints require their saved-array certificate.
+
+## Notes
 
 - `logs/` and `results/` are not version-controlled.
 - Baselines use original authors' codebases with minimal modifications (data loaders and logging only).
