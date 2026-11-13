@@ -255,7 +255,7 @@ def test_followup_runs_four_controls_and_reuses_completed_jobs(followup_dispatch
     resumed = run(GPUS="6 7")
     assert resumed.returncode == 0 and "SKIP b0_w4_s0" in resumed.stdout
     after = (root / "followup_calls.txt").read_text().splitlines()
-    assert len(after) == count + 1 and after[-1].startswith("prepare ")
+    assert [line.split()[0] for line in after[count:]] == ["prepare", "summary"]
 
 
 @pytest.mark.parametrize("changed", ("manifest", "source"))
