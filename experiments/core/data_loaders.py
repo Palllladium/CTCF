@@ -142,9 +142,13 @@ def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
     manifest = IXI.read_paired_manifest(args.ixi_pairs, require_t2=args.ixi_arm != "b0")
     args.ixi_manifest_sha256 = manifest["fingerprint"]
     runtime_keys = {"exp", "resume", "init_ckpt", "gpu", "paths", "quiet", "use_tb", "num_workers", "save_ckpt"}
+    settings = {key: value for key, value in vars(args).items() if key not in runtime_keys}
+    for key in ("input_representation", "ixi_t1_weight", "ixi_t2_weight"):
+        if settings.get(key) is None:
+            settings.pop(key, None)
     recipe = {
         "manifest": manifest["fingerprint"],
-        "settings": {key: value for key, value in vars(args).items() if key not in runtime_keys},
+        "settings": settings,
     }
     fingerprint = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     train = IXI.IXIPairedDataset(manifest, args.ixi_arm)

@@ -66,7 +66,7 @@ def test_observation_restores_rng_and_model_mode_even_on_failure(tmp_path, monke
     runner = SimpleNamespace(
         model=model,
         device=torch.device("cpu"),
-        args=SimpleNamespace(ixi_arm="b0", init_ckpt="parent"),
+        args=SimpleNamespace(ixi_arm="b0", init_ckpt="parent", exp="unit"),
         _forward_flow=lambda *_: torch.rand(1, 3, 3, 3, 3),
     )
 
@@ -106,6 +106,31 @@ def test_optimizer_hook_observes_parameters_after_the_update(monkeypatch, tmp_pa
     optimizer.step()
     assert values == pytest.approx([0.8])
     assert runner.completed_updates == 20
+
+
+def test_readout_metadata_identifies_the_live_model_instead_of_the_initial_checkpoint(tmp_path, monkeypatch):
+    class Dataset:
+        def __init__(self, *_, **__):
+            self.pairs = [(0, 1), (1, 0)]
+            self.rows = [{"id": "a"}, {"id": "b"}]
+
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, _):
+            return [torch.zeros(2, 3, 3, 3)] * 2 + [torch.ones(1, 3, 3, 3)] * 2
+
+    runner = SimpleNamespace(
+        model=nn.Identity(),
+        device=torch.device("cpu"),
+        args=SimpleNamespace(ixi_arm="b0", init_ckpt="parent.pth", exp="new_run"),
+        _forward_flow=lambda *_: torch.zeros(1, 3, 3, 3, 3),
+    )
+    monkeypatch.setattr(checks, "IXIPairedDataset", Dataset)
+    monkeypatch.setattr(checks, "score", lambda *_a, **_k: {"case_id": _a[1], "dice_mean": 0.5})
+    checks.observe(runner, {}, tmp_path / "epoch3")
+    report = json.loads((tmp_path / "epoch3/summary.json").read_text())
+    assert report["ckpt_path"] == "live:new_run/epoch3"
 
 
 def test_anchor_does_not_authorize_history_when_training_diff_is_nonempty(tmp_path, monkeypatch):

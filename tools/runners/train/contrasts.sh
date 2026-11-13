@@ -7,7 +7,7 @@ RUN_ID="${2:-B_$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid RUN_ID"; exit 1; }
 RUN="results/contrasts/$RUN_ID"
 WORKFLOW="${WORKFLOW:-$(cat "$RUN/workflow.txt" 2>/dev/null || echo main)}"
-[[ "$WORKFLOW" = main || "$WORKFLOW" = followup ]] || { echo "Unknown WORKFLOW"; exit 1; }
+[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism ]] || { echo "Unknown WORKFLOW"; exit 1; }
 if [ "$MODE" = stop ]; then
     [ -f "$RUN/runner.pid" ] || { echo "No matching live runner; no process was stopped."; exit 0; }
     read -r pid < "$RUN/runner.pid"
@@ -72,13 +72,14 @@ bind parent "$PARENT"
 PIDS=()
 REQUIRED=(pretests check parent b0 b1 b2 summary consensus)
 if [ "$WORKFLOW" = followup ]; then REQUIRED=(pretests prepare profile controls anchor repair smooth summary repair_summary); fi
+if [ "$WORKFLOW" = mechanism ]; then REQUIRED=(pretests prepare controls weights t2 smooth summary lumir_check lumir_profile lumir_train lumir_cert lumir_contrasts); fi
 finish() {
     local code=$? includes=() arm
     trap - EXIT INT
     trap '' TERM
     if [ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ]; then kill -TERM -- "-$$" 2>/dev/null || true; fi
     wait 2>/dev/null || true
-    for arm in "logs/${RUN_ID}"_* "results/${RUN_ID}"_*; do [ ! -d "$arm" ] || includes+=(--include-root "$arm"); done
+    for arm in "logs/${RUN_ID}"_* "results/${RUN_ID}"_* "results/lumir/${RUN_ID}"_*/attempts/* "results/lumir/${RUN_ID}"_*/certified_lumir25; do [ ! -d "$arm" ] || includes+=(--include-root "$arm"); done
     "$PY" -m tools.analysis.run_artifacts package --run-root "$RUN" --prefix "results/exports/${RUN_ID}__$ATTEMPT" \
         --git-head "$HEAD" --exit-code "$code" --label "CONTRASTS" \
         --required-steps "${REQUIRED[@]}" "${includes[@]}" || { [ "$code" != 0 ] || code=1; }
@@ -91,10 +92,11 @@ trap 'exit 143' TERM
 log "RUN_ID=$RUN_ID HEAD=$HEAD GPUS=${GPU[*]} PID=$$ MANIFEST=$MANIFEST"
 FREE_DEFAULT=200
 if [ "$WORKFLOW" = followup ]; then FREE_DEFAULT=80; fi
+if [ "$WORKFLOW" = mechanism ]; then FREE_DEFAULT=100; fi
 "$PY" -c 'import shutil,sys; sys.exit(shutil.disk_usage("results").free < int(sys.argv[1])*1024**3)' "${MIN_FREE_GIB:-$FREE_DEFAULT}"
 job() {
     local task=$1 gpu=$2 code=0; shift 2
-    if [ "$task" != prepare ] && [ "$(cat "$RUN/exit_codes/$task.txt" 2>/dev/null || true)" = 0 ]; then log "SKIP $task (completed)"; return 0; fi
+    if [ "$task" != prepare ] && [ "$task" != summary ] && [ "$(cat "$RUN/exit_codes/$task.txt" 2>/dev/null || true)" = 0 ]; then log "SKIP $task (completed)"; return 0; fi
     log "START $task GPU=$gpu LOG=$LOGS/$task.log"
     CUDA_VISIBLE_DEVICES="$gpu" PYTHONUNBUFFERED=1 "$@" > "$LOGS/$task.log" 2>&1 || code=$?
     echo "$code" > "$RUN/exit_codes/$task.txt"
@@ -104,9 +106,79 @@ job() {
 if [ "${PRETESTS:-1}" = 1 ]; then
     TESTS=(tools/analysis/tests/test_contrasts.py tools/analysis/tests/test_contrasts_runner.py tools/analysis/tests/test_precision.py)
     if [ "$WORKFLOW" = followup ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_repair_checks.py); fi
+    if [ "$WORKFLOW" = mechanism ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_contrast_probes.py tools/analysis/tests/test_representation.py tools/analysis/tests/test_lumir_probes.py tools/analysis/tests/test_lumir.py tools/analysis/tests/test_distributed.py); fi
     job pretests "" "$PY" -m pytest -q "${TESTS[@]}" \
         tools/analysis/tests/test_run_artifacts.py::RunArtifactsTest::test_failed_run_can_be_packaged_without_site_packages
 else echo 0 > "$RUN/exit_codes/pretests.txt"; log "SKIPPED pretests: PRETESTS=0"; fi
+mechanism() {
+    local source="${SOURCE_RUN:-results/contrasts/B_CHECK_20261110T211549Z}" original="${ORIGINAL_RUN:-results/contrasts/B_20261108T180120Z}"
+    local -a common=(--source "$source" --original "$original" --manifest "$MANIFEST" --checkpoint "$PARENT" --out "$RUN")
+    local status=0 pid lumir_pid="" slot
+    [ "${#GPU[@]}" = 4 ] || [ "${#GPU[@]}" = 8 ] || { echo "Mechanism dispatch requires 4 or 8 GPUs"; return 1; }
+    bind manifest "$MANIFEST" || return 1
+    job prepare "" "$PY" -m experiments.contrast_probes prepare "${common[@]}" || return 1
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}" CTCF_DATA_DIR="${CTCF_DATA_DIR:-/data/mooncake/P}"
+    lumir_lane() {
+        local devices=$1 first=$2 code=0 resume=0 exp="${RUN_ID}_mind" raw
+        raw="${LUMIR_RAW_CHECKPOINT:-results/CALIBRATION_20261029T035516Z_78301dd6d80c_lumir_control/ckpt/last.pth}"
+        [ -f "$raw" ] || { log "HELD LUMIR: raw reference checkpoint missing"; return 1; }
+        local -a options=(PYBIN="$PY" GPUS="$devices" GLOBAL_BATCH=4 BATCH_SIZE=1 PRECISION=bf16 CONFIG=CTCF-CascadeA-Mamba
+            MODEL="--l3_svf 0 --input_representation mind6" TRAIN="--lr 0.0001 --seed 0" TIME_STEPS=6 PAIRS=lumir25 PRETESTS=0)
+        job lumir_check "$first" "$PY" -m experiments.lumir_probes check --out "$RUN/lumir_check_$ATTEMPT" || return 1
+        job lumir_profile "$first" env "${options[@]}" PROFILE=1 RESUME=0 PROFILE_UPDATES=20 PERF_WARMUP_UPDATES=5 \
+            PROFILE_EXP="${RUN_ID}_mind_profile_$ATTEMPT" bash tools/runners/train/lumir.sh || return 1
+        [ ! -f "$RUN/lumir_exp.txt" ] || exp="$(cat "$RUN/lumir_exp.txt")"
+        if [ -f "results/$exp/ckpt/last.pth" ]; then resume=1
+        elif [ -d "results/lumir/$exp" ]; then exp="${RUN_ID}_mind_$ATTEMPT"; fi
+        echo "$exp" > "$RUN/lumir_exp.txt"
+        job lumir_train "$first" env "${options[@]}" EXP="$exp" PROFILE=0 RESUME="$resume" STAGES=ramp EPOCHS=40 ITERS=1000 \
+            bash tools/runners/train/lumir.sh || return 1
+        job lumir_cert "$first" "$PY" -m experiments.export_lumir --ds LUMIR --paths 3 --config CTCF-CascadeA-Mamba \
+            --l3_svf 0 --input_representation mind6 --time_steps 6 --precision bf16 --pairs lumir25 --certified 1 \
+            --ckpt "results/$exp/ckpt/last.pth" --out "results/lumir/$exp/certified_lumir25" --name "${exp}_certified" || code=1
+        job lumir_contrasts "$first" "$PY" -m experiments.lumir_probes contrasts --checkpoint "results/$exp/ckpt/last.pth" \
+            --raw-checkpoint "$raw" --out "$RUN/lumir_contrasts" || code=1
+        return "$code"
+    }
+    if [ "${#GPU[@]}" = 8 ]; then lumir_lane "${GPU[*]:4:4}" "${GPU[4]}" & lumir_pid=$!; fi
+    PIDS=()
+    for slot in 0 1 2 3; do
+        (
+            names=(half_t1 full_t1_t2 b0_s1 b1_s1); arms=(b1 b1 b0 b1); seeds=(0 0 1 1); epochs=(3 3 10 10)
+            a=(0.5 1 1 0.5); b=(0 0.5 0 0.5); name=${names[$slot]}; code=0
+            if job "$name" "${GPU[$slot]}" "$PY" -m experiments.contrast_diagnostics train --source "$source" --manifest "$MANIFEST" \
+                --checkpoint "$PARENT" --out "$RUN/$name" --exp "${RUN_ID}_$name" --arm "${arms[$slot]}" --w_reg 1 \
+                --seed "${seeds[$slot]}" --epochs "${epochs[$slot]}" --t1_weight "${a[$slot]}" --t2_weight "${b[$slot]}"; then
+                readouts=(3); [ "${epochs[$slot]}" = 3 ] || readouts+=(10)
+                for epoch in "${readouts[@]}"; do
+                    job "cert_${name}_$epoch" "${GPU[$slot]}" "$PY" -m experiments.repair_diagnostics short \
+                        --source "$original" --out "$RUN" --manifest "$MANIFEST" --arm-dir "$RUN/$name" --epoch "$epoch" || code=1
+                done
+            else code=1; fi
+            exit "$code"
+        ) & PIDS+=($!)
+    done
+    for pid in "${PIDS[@]}"; do wait "$pid" || status=1; done
+    echo "$status" > "$RUN/exit_codes/controls.txt"
+    PIDS=()
+    for slot in 0 1 2; do
+        (
+            tasks=(weights t2 smooth)
+            job "${tasks[$slot]}" "${GPU[$slot]}" "$PY" -m experiments.contrast_probes "${tasks[$slot]}" "${common[@]}"
+        ) & PIDS+=($!)
+    done
+    for pid in "${PIDS[@]}"; do wait "$pid" || status=1; done
+    job summary "" "$PY" -m experiments.contrast_probes summary "${common[@]}" || status=1
+    if [ -n "$lumir_pid" ]; then wait "$lumir_pid" || status=1
+    else lumir_lane "${GPU[*]}" "${GPU[0]}" || status=1; fi
+    return "$status"
+}
+if [ "$WORKFLOW" = mechanism ]; then
+    failed=0
+    mechanism || failed=1
+    log "FINISHED exit=$failed"
+    exit "$failed"
+fi
 followup() {
     local source="${SOURCE_RUN:-results/contrasts/B_20261108T180120Z}" status=0 repair_pid slots slot name gpu repeat workers benchmark controls first pid
     local -a common=(--source "$source" --manifest "$MANIFEST" --checkpoint "$PARENT")

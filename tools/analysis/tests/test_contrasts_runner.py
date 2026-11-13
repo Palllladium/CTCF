@@ -110,6 +110,110 @@ def test_changed_parent_and_duplicate_gpu_are_rejected(contrast_dispatch):
 
 
 @pytest.fixture
+def mechanism_dispatch(contrast_dispatch):
+    root, run = contrast_dispatch
+    raw = root / "raw.pth"
+    raw.write_text("raw reference")
+    shutil.copyfile(SCRIPT.with_name("lumir.sh"), root / "tools/runners/train/lumir.sh")
+    (root / "experiments/contrast_probes.py").write_text(
+        "import sys,json,os\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--out')+1]);out.mkdir(parents=True,exist_ok=True)\n"
+        "with Path('probe_calls.txt').open('a') as f:f.write(a[1]+' '+os.environ.get('CUDA_VISIBLE_DEVICES','')+'\\n')\n"
+        "(out/(a[1]+'.json')).write_text('{}')\n"
+    )
+    (root / "experiments/contrast_diagnostics.py").write_text(
+        "import sys,json\nfrom pathlib import Path\na=sys.argv;exp=a[a.index('--exp')+1]\n"
+        "out=Path(a[a.index('--out')+1]);out.mkdir(parents=True,exist_ok=True);(out/'args.json').write_text(json.dumps(a))\n"
+        "folder=Path('results')/exp/'ckpt';folder.mkdir(parents=True,exist_ok=True);(folder/'last.pth').write_text('weights')\n"
+    )
+    (root / "experiments/repair_diagnostics.py").write_text(
+        "import sys,json\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--arm-dir')+1]);e=a[a.index('--epoch')+1]\n"
+        "(out/('repair_epoch'+e+'.json')).write_text('{}')\n"
+    )
+    (root / "experiments/lumir_probes.py").write_text(
+        "import sys,os\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--out')+1]);out.mkdir(parents=True,exist_ok=True)\n"
+        "(out/'report.json').write_text('{}')\n"
+        "raise SystemExit(1 if a[1]=='check' and os.environ.get('FAIL_MIND_CHECK') else 0)\n"
+    )
+
+    def launch(**kwargs):
+        return run(
+            **(
+                dict(
+                    WORKFLOW="mechanism",
+                    GPUS="0 1 2 3",
+                    SOURCE_RUN="source",
+                    ORIGINAL_RUN="original",
+                    LUMIR_RAW_CHECKPOINT=raw.as_posix(),
+                )
+                | kwargs
+            )
+        )
+
+    return root, launch
+
+
+def test_mechanism_dispatch_has_four_fixed_trainings_and_resumes_on_other_gpus(mechanism_dispatch):
+    root, run = mechanism_dispatch
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    run_root = root / "results/contrasts/unit"
+    for name, epochs, weights in (
+        ("half_t1", "3", ("0.5", "0")),
+        ("full_t1_t2", "3", ("1", "0.5")),
+        ("b0_s1", "10", ("1", "0")),
+        ("b1_s1", "10", ("0.5", "0.5")),
+    ):
+        args = json.loads((run_root / name / "args.json").read_text())
+        assert args[args.index("--epochs") + 1] == epochs
+        assert tuple(args[args.index(flag) + 1] for flag in ("--t1_weight", "--t2_weight")) == weights
+        assert (run_root / name / "repair_epoch3.json").is_file()
+        assert (run_root / name / "repair_epoch10.json").is_file() == (epochs == "10")
+    train = json.loads((root / "logs/unit_mind/args.json").read_text())
+    assert train[train.index("--max_epoch") + 1] == "40" and train[train.index("--global_batch_size") + 1] == "4"
+    assert train[train.index("--input_representation") + 1] == "mind6" and "--init_ckpt" not in train
+    assert (root / "results/lumir/unit_mind/certified_lumir25/args.json").is_file()
+    resumed = run(GPUS="4 5 6 7")
+    assert resumed.returncode == 0 and "SKIP b1_s1" in resumed.stdout and "SKIP lumir_train" in resumed.stdout
+
+
+def test_failed_mind_check_keeps_b_results_and_holds_only_lumir(mechanism_dispatch):
+    root, run = mechanism_dispatch
+    result = run(FAIL_MIND_CHECK="1")
+    assert result.returncode != 0
+    assert (root / "results/contrasts/unit/b1_s1/repair_epoch10.json").is_file()
+    assert (root / "results/contrasts/unit/summary.json").is_file()
+    assert not (root / "results/unit_mind").exists()
+    assert list((root / "results/exports").glob("*FAILED.zip"))
+
+
+def test_eight_gpu_dispatch_keeps_lumir_on_its_own_four_devices(mechanism_dispatch):
+    root, run = mechanism_dispatch
+    result = run(GPUS="0 1 2 3 4 5 6 7")
+    assert result.returncode == 0, result.stdout + result.stderr
+    export = next((root / "results/lumir/unit_mind/attempts").glob("*/export_lumir25/env.json"))
+    assert json.loads(export.read_text())["gpus"] == "4"
+    args = (root / "torchrun_args.txt").read_text()
+    assert "--nproc-per-node=4" in args
+
+
+def test_mechanism_resume_refreshes_summary_after_a_failed_dependency_recovers(mechanism_dispatch):
+    root, run = mechanism_dispatch
+    (root / "experiments/contrast_probes.py").write_text(
+        "import sys,json,os\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--out')+1]);out.mkdir(parents=True,exist_ok=True)\n"
+        "if a[1]=='smooth' and os.environ.get('FAIL_MECHANISM_SMOOTH'):raise SystemExit(9)\n"
+        "payload={'smooth_available':(out/'smooth.json').exists()} if a[1]=='summary' else {}\n"
+        "(out/(a[1]+'.json')).write_text(json.dumps(payload))\n"
+    )
+    first = run(FAIL_MECHANISM_SMOOTH="1")
+    report = root / "results/contrasts/unit/summary.json"
+    assert first.returncode != 0 and json.loads(report.read_text())["smooth_available"] is False
+    resumed = run()
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert json.loads(report.read_text())["smooth_available"] is True
+    assert "SKIP b0_s1" in resumed.stdout and "SKIP summary" not in resumed.stdout
+
+
+@pytest.fixture
 def followup_dispatch(contrast_dispatch):
     root, run = contrast_dispatch
     source = root / "source"

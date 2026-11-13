@@ -52,6 +52,12 @@ def load_checkpoint_state(
 ) -> dict[str, object]:
     """Load checkpoint weights and return an explicit, machine-readable load report."""
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    if hasattr(model, "input_representation"):
+        saved_representation = ckpt.get("input_representation", "raw")
+        if saved_representation != model.input_representation:
+            raise ValueError(
+                f"Checkpoint input representation is {saved_representation}, model expects {model.input_representation}"
+            )
     numerical = {
         "precision": ckpt.get("precision", "fp16") if isinstance(ckpt, dict) else "fp16",
         "precision_recorded": isinstance(ckpt, dict) and "precision" in ckpt,

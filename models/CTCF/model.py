@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 
@@ -7,6 +9,7 @@ from models.CTCF.blocks import resize_3d, upsample_flow
 from models.CTCF.stages import CoarseFlowNetQuarter, CTCFDCACoreHalf, FlowRefiner3D
 from models.TransMorph_DCA.model import SpatialTransformer
 from utils.field import certified_max_step, compose_flows, integrate_svf
+from utils.image_representation import Mind6
 
 
 def _build_level2(config, backbone: str) -> nn.Module:
@@ -58,6 +61,8 @@ class CTCFCascadeA(nn.Module):
         self.use_level3 = config.use_level3
         self.backbone = config.backbone
         self.image_channels = getattr(config, "image_channels", 1)
+        self.input_representation = getattr(config, "input_representation", "raw")
+        self.feature_channels = 6 if self.input_representation == "mind6" else self.image_channels
 
         self.l3_iters = config.l3_iters
         self.l3_svf = config.l3_svf
@@ -70,22 +75,25 @@ class CTCFCascadeA(nn.Module):
         self.l3_unshared = config.l3_unshared and self.l3_iters > 1
 
         self._validate_flags()
+        self.input_transform = Mind6() if self.input_representation == "mind6" else nn.Identity()
 
         l3_kwargs = {
             "base_ch": config.level3_base_ch,
             "error_mode": config.level3_error_mode,
             "num_heads": config.level3_num_heads,
             "corr_mode": config.level3_corr_mode,
-            "image_channels": self.image_channels,
+            "image_channels": self.feature_channels,
         }
 
         self.level1 = None
         if self.use_level1:
-            self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch, image_channels=self.image_channels)
+            self.level1 = CoarseFlowNetQuarter(base_ch=config.level1_base_ch, image_channels=self.feature_channels)
 
         self.level2 = None
         if self.use_level2:
-            self.level2 = _build_level2(config, self.backbone)
+            feature_config = deepcopy(config)
+            feature_config.image_channels = self.feature_channels
+            self.level2 = _build_level2(feature_config, self.backbone)
 
         self.level3 = None
         if self.use_level3:
@@ -102,6 +110,10 @@ class CTCFCascadeA(nn.Module):
 
     def _validate_flags(self) -> None:
         """Reject configuration combinations the cascade cannot honour."""
+        if self.input_representation not in ("raw", "mind6"):
+            raise ValueError("Unknown input representation")
+        if self.input_representation == "mind6" and (self.backbone != "mamba" or self.image_channels != 1):
+            raise ValueError("MIND input currently requires the scalar-image Mamba cascade")
         if self.image_channels < 1 or (self.image_channels != 1 and self.backbone != "mamba"):
             raise ValueError("Multiple image channels are currently implemented for the Mamba cascade only")
         if self.backbone == "swin-dca" and self.l2_full_res:
@@ -364,6 +376,8 @@ class CTCFCascadeA(nn.Module):
         if mov_full.shape != fix_full.shape or mov_full.shape[1] != self.image_channels:
             raise ValueError(f"Expected matching moving/fixed tensors with {self.image_channels} image channels")
         breakdown: dict[str, torch.Tensor | None] | None = {} if return_breakdown else None
+        moving_raw = mov_full
+        mov_full, fix_full = self.input_transform(mov_full), self.input_transform(fix_full)
 
         mov_half = resize_3d(mov_full, scale_factor=0.5)
         fix_half = resize_3d(fix_full, scale_factor=0.5)
@@ -416,7 +430,7 @@ class CTCFCascadeA(nn.Module):
         else:
             flow_full = self._to_full_flow(flow_l2, already_full_res=self.l2_full_res)
 
-        def_full = self.st_full(mov_full, flow_full)
+        def_full = self.st_full(moving_raw, flow_full)
 
         return self._finalize(
             def_full=def_full,

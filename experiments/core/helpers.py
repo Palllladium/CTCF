@@ -52,6 +52,11 @@ def resume_from_ckpt(
     )
     if ckpt is None:
         raise FileNotFoundError(f"resume checkpoint is missing: {args.resume}")
+    if (
+        hasattr(runner.model, "input_representation")
+        and ckpt.get("input_representation", "raw") != runner.model.input_representation
+    ):
+        raise ValueError("resume input representation differs from the checkpoint")
 
     if hasattr(args, "precision") and ckpt.get("precision", "fp16") != args.precision:
         raise ValueError("resume precision differs from the checkpoint; use --init_ckpt for a new experiment")

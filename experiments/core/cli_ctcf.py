@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 
 from experiments.core.cli_common import optional_bool
 from experiments.core.precision import add_precision_arg
@@ -12,6 +13,7 @@ _ERROR_MODE_CHOICES = ("absdiff", "gradmag", "ncc")
 _CORR_MODE_CHOICES = ("none", "hadamard", "corr", "corr_feat")
 
 _OVERRIDE_HELP = {
+    "input_representation": "Network input: raw intensities or Gaussian MIND-6; losses use the original images.",
     "image_channels": "Image channels per subject (default: 1; paired-contrast Mamba: 2).",
     "l1_base_ch": "L1 coarse-net base channels (default: config value).",
     "l3_base_ch": "L3 refiner base channels (default: config value).",
@@ -32,6 +34,7 @@ _OVERRIDE_HELP = {
 
 CTCF_OVERRIDE_KEYS = (
     *_INT_OVERRIDES,
+    "input_representation",
     "l3_error_mode",
     "l3_corr_mode",
     "l3_ls_space",
@@ -47,6 +50,8 @@ def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--ixi_pairs", default="", help="Prepared, reviewed IXI T1/T2 subject-pair manifest.")
     p.add_argument("--ixi_arm", choices=("b0", "b1", "b2"), default="b0", help="Paired IXI input/loss contrast arm.")
+    p.add_argument("--ixi_t1_weight", type=float, default=None, help="Override the paired IXI T1 NCC coefficient.")
+    p.add_argument("--ixi_t2_weight", type=float, default=None, help="Override the paired IXI T2 NCC coefficient.")
     p.add_argument(
         "--global_batch_size",
         type=int,
@@ -276,6 +281,12 @@ def add_ctcf_schedule_args(p: argparse.ArgumentParser) -> None:
 
 def add_ctcf_override_args(p: argparse.ArgumentParser, prefix: str = "") -> None:
     group = p.add_argument_group("CTCF architecture overrides")
+    group.add_argument(
+        f"--{prefix}input_representation",
+        choices=("raw", "mind6"),
+        default=None,
+        help=_OVERRIDE_HELP["input_representation"],
+    )
     for name in _INT_OVERRIDES:
         group.add_argument(
             f"--{prefix}{name}",
@@ -518,6 +529,7 @@ def add_ctcf_auxiliary_args(p: argparse.ArgumentParser) -> None:
 
 def ctcf_overrides_from_args(args: argparse.Namespace, prefix: str = "") -> dict:
     overrides = {name: getattr(args, f"{prefix}{name}", None) for name in _INT_OVERRIDES}
+    overrides["input_representation"] = getattr(args, f"{prefix}input_representation", None)
     overrides["l3_error_mode"] = getattr(args, f"{prefix}l3_error_mode")
     overrides["l3_corr_mode"] = getattr(args, f"{prefix}l3_corr_mode")
     overrides["l3_ls_space"] = getattr(args, f"{prefix}l3_ls_space")
@@ -525,3 +537,16 @@ def ctcf_overrides_from_args(args: argparse.Namespace, prefix: str = "") -> dict
     for name in _BOOL_OVERRIDES:
         overrides[name] = optional_bool(getattr(args, f"{prefix}{name}"))
     return overrides
+
+
+def ixi_similarity_weights(args) -> tuple[float, float]:
+    default = (1.0, 0.0) if args.ixi_arm == "b0" else (0.5, 0.5)
+    values = tuple(
+        default[i] if getattr(args, name, None) is None else getattr(args, name)
+        for i, name in enumerate(("ixi_t1_weight", "ixi_t2_weight"))
+    )
+    if not all(math.isfinite(v) and v >= 0 for v in values) or sum(values) == 0:
+        raise ValueError("Paired IXI similarity weights must be finite, nonnegative and not both zero")
+    if args.ixi_arm == "b0" and values[1] != 0:
+        raise ValueError("T2 similarity requires arm b1 or b2, whose training loader provides true T2")
+    return values

@@ -124,6 +124,7 @@ class CtcfAdapter(ModelAdapter):
         l3_ls_space: str | None = None,
         l3_ls_eps: float | None = None,
         image_channels: int | None = None,
+        input_representation: str | None = None,
     ) -> torch.nn.Module:
         from models.CTCF.configs import CONFIGS
         from models.CTCF.model import CTCFCascadeA
@@ -154,6 +155,7 @@ class CtcfAdapter(ModelAdapter):
             l3_ls_space=l3_ls_space,
             l3_ls_eps=l3_ls_eps,
             image_channels=image_channels,
+            input_representation=input_representation,
         )
 
         model = CTCFCascadeA(cfg)

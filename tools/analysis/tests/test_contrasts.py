@@ -223,6 +223,19 @@ def test_paired_loader_resume_binding_and_common_pair_stream(manifest_file):
     assert changed.sampler.fingerprint != auxiliary.sampler.fingerprint
 
 
+def test_optional_representation_and_dose_preserve_legacy_resume_binding(manifest_file):
+    args = parse_args(["--ds", "IXI", "--ixi_pairs", str(manifest_file), "--image_channels", "2", "--num_workers", "0"])
+    current, _ = ixi_paired_loaders(args)
+    old = copy.deepcopy(args)
+    for key in ("input_representation", "ixi_t1_weight", "ixi_t2_weight"):
+        delattr(old, key)
+    legacy, _ = ixi_paired_loaders(old)
+    assert current.sampler.fingerprint == legacy.sampler.fingerprint
+    args.ixi_t1_weight = 0.5
+    changed, _ = ixi_paired_loaders(args)
+    assert changed.sampler.fingerprint != current.sampler.fingerprint
+
+
 def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_file, tmp_path):
     manifest = json.loads(manifest_file.read_text())
     out = tmp_path / "prepared"

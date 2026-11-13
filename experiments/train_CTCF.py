@@ -18,7 +18,7 @@ from torch import optim
 from datasets.LUMIR import LUMIR_SHAPE
 from datasets.synthetic import build_synth_loaders
 from experiments.core.cli_common import add_common_args
-from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args
+from experiments.core.cli_ctcf import add_ctcf_train_args, ctcf_overrides_from_args, ixi_similarity_weights
 from experiments.core.data_loaders import baseline_loader_builder, ixi_paired_loaders
 from experiments.core.distributed import accumulation_steps
 from experiments.core.inference_runtime import load_checkpoint_state
@@ -422,7 +422,14 @@ class Runner:
         with torch.autocast(device_type="cuda", enabled=False):
             if t2 is not None:
                 d1, d2 = self.contrast_terms(x, y, def_xy, def_yx, flow_xy, flow_yx, t2)
-                L_ncc = (d1 if args.ixi_arm == "b0" else 0.5 * (d1 + d2)) * args.w_ncc
+                a, b = ixi_similarity_weights(args)
+                if b == 0:
+                    similarity = a * d1
+                elif a == b:
+                    similarity = a * (d1 + d2)
+                else:
+                    similarity = a * d1 + b * d2
+                L_ncc = similarity * args.w_ncc
             elif args.sim == "mse":
                 L_ncc = (
                     0.5 * (F.mse_loss(def_xy.float(), y.float()) + F.mse_loss(def_yx.float(), x.float())) * args.w_mse
@@ -695,6 +702,7 @@ def main(args=None):
         args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
     if args.ixi_pairs:
+        ixi_similarity_weights(args)
         if (
             args.ds != "IXI"
             or args.image_channels != 2
@@ -710,6 +718,8 @@ def main(args=None):
         ):
             raise ValueError("Paired IXI uses two image channels, batch1 and only the core label-free NCC losses")
         build_loaders = ixi_paired_loaders
+    elif args.ixi_t1_weight is not None or args.ixi_t2_weight is not None:
+        raise ValueError("Contrast coefficients require --ixi_pairs")
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if (world > 1 or args.global_batch_size) and args.ds != "LUMIR":
         raise ValueError("global batch/DDP is currently supported for the LUMIR training protocol")

@@ -231,6 +231,8 @@ def main() -> None:
         }
     atomic_write_json(args.out / "manifest.json", manifest)
     print(f"{len(files)} displacements -> {archive}")
+    if args.certified and manifest["certified"]["global_homeomorphism_pairs"] != len(files):
+        raise RuntimeError("Certified export is incomplete; see individual verdicts (raw export is independent)")
 
 
 if __name__ == "__main__":

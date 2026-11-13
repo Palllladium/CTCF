@@ -124,7 +124,11 @@ def observe(runner, manifest, directory, *, save_fields=False):
                 if save_fields:
                     save_flow_npz_atomic(directory / "pairs" / name / "FF.npz", flow)
             write_results(
-                rows, str(directory), runner.args.ixi_arm, runner.args.init_ckpt, "IXI exploratory short control"
+                rows,
+                str(directory),
+                runner.args.ixi_arm,
+                f"live:{runner.args.exp}/{directory.name}",
+                "IXI exploratory short control",
             )
     finally:
         runner.model.train(previous_mode)
@@ -144,19 +148,28 @@ class DiagnosticRunner(Runner):
             observe(self, self.observation_manifest, self.observation_out / f"step{self.completed_updates}")
 
     def on_val_end(self, epoch, _dice, _jac):
-        if epoch in (0, 2):
-            observe(self, self.observation_manifest, self.observation_out / f"epoch{epoch + 1}", save_fields=epoch == 2)
+        if epoch + 1 in (1, 3, self.args.max_epoch):
+            observe(self, self.observation_manifest, self.observation_out / f"epoch{epoch + 1}", save_fields=epoch >= 2)
 
 
 def short_train(args):
     manifest = read_paired_manifest(args.manifest, require_t2=args.arm != "b0")
     options = training_args(args, args.arm)
-    options.max_epoch, options.w_reg, options.seed, options.exp = 3, args.w_reg, args.seed, args.exp
+    epochs = getattr(args, "epochs", 3)
+    options.max_epoch, options.w_reg, options.seed, options.exp = epochs, args.w_reg, args.seed, args.exp
+    options.ixi_t1_weight, options.ixi_t2_weight = getattr(args, "t1_weight", None), getattr(args, "t2_weight", None)
     checkpoint = Path("results") / args.exp / "ckpt/last.pth"
     start = 0
     if checkpoint.exists():
         saved = torch.load(checkpoint, map_location="cpu")
-        expected = {"w_reg": args.w_reg, "ixi_arm": args.arm, "seed": args.seed, "max_epoch": 3}
+        expected = {
+            "w_reg": args.w_reg,
+            "ixi_arm": args.arm,
+            "seed": args.seed,
+            "max_epoch": epochs,
+            "ixi_t1_weight": options.ixi_t1_weight,
+            "ixi_t2_weight": options.ixi_t2_weight,
+        }
         if any(saved["arguments"].get(key) != value for key, value in expected.items()):
             raise ValueError("Short control checkpoint uses another recipe")
         start = int(saved["epoch"]) + 1
@@ -167,7 +180,7 @@ def short_train(args):
     if not start:
         observe(runner, manifest, args.out / "epoch0")
     run_train(options, runner, build_loaders=ixi_paired_loaders)
-    if not (args.out / "epoch3/per_case.csv").exists():
+    if not all((args.out / f"epoch{epoch}/per_case.csv").exists() for epoch in {3, epochs}):
         raise ValueError("Short control lacks its final observation")
     atomic_write_json(
         args.out / "report.json",
@@ -176,7 +189,10 @@ def short_train(args):
             "w_reg": args.w_reg,
             "seed": args.seed,
             "checkpoint_sha256": sha256_file(checkpoint),
-            "updates": 1197,
+            "updates": epochs * 399,
+            "epochs": epochs,
+            "t1_weight": options.ixi_t1_weight,
+            "t2_weight": options.ixi_t2_weight,
             "exp": args.exp,
             "manifest_sha256": manifest["fingerprint"],
         },
@@ -300,6 +316,7 @@ def smoothing_controls(args):
     for arm, rows in outputs.items():
         if len(rows) != 58:
             raise ValueError("Smoothing control needs all 58 directions")
+        (args.out / arm).mkdir(parents=True, exist_ok=True)
         write_results(rows, str(args.out / arm), "B0 smoothing matched to " + arm, "saved fields", "No Dice selection")
 
 
@@ -390,6 +407,9 @@ def main():
     parser.add_argument("--arm", choices=("b0", "b1", "b2"), default="b0")
     parser.add_argument("--w_reg", type=float, choices=(1, 4), default=1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--epochs", type=int, choices=(3, 10), default=3)
+    parser.add_argument("--t1_weight", type=float)
+    parser.add_argument("--t2_weight", type=float)
     parser.add_argument("--exp")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--benchmark", type=int, choices=(0, 1), default=1)

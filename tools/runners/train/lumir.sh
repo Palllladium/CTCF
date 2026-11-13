@@ -65,7 +65,7 @@ for arg in "${model_args[@]}" "${training_args[@]}"; do
 done
 for arg in "${training_args[@]}"; do
     case "$arg" in --l1_from_start|--l1_from_start=*) ;;
-    --disable_l1|--disable_l1=*|--disable_l3|--disable_l3=*|--l1_*|--l2_*|--l3_*|--use_checkpoint|--use_checkpoint=*)
+    --input_representation|--input_representation=*|--image_channels|--image_channels=*|--disable_l1|--disable_l1=*|--disable_l3|--disable_l3=*|--l1_*|--l2_*|--l3_*|--use_checkpoint|--use_checkpoint=*)
         echo "[lumir] put architecture overrides in MODEL so export uses the same configuration"; exit 1 ;;
     esac
 done

@@ -472,9 +472,11 @@ def repair_short(args):
     manifest = read_paired_manifest(args.manifest, require_t2=False)
     device = setup_device()
     reports = []
-    for source in sorted((args.arm_dir / "epoch3/pairs").glob("*/FF.npz")):
+    epoch = getattr(args, "epoch", 3)
+    suffix = "" if epoch == 3 else f"_epoch{epoch}"
+    for source in sorted((args.arm_dir / f"epoch{epoch}/pairs").glob("*/FF.npz")):
         case = {"case_id": source.parent.name, "dataset": "IXI", "source_sha256": sha256_file(source)}
-        destination = args.arm_dir / "certified" / case["case_id"]
+        destination = args.arm_dir / f"certified{suffix}" / case["case_id"]
         if (destination / "report.json").exists():
             record = load_repair_result(destination, sha256_file(source))
         else:
@@ -499,7 +501,7 @@ def repair_short(args):
     if len(reports) != 58:
         raise ValueError("Final short-control certification requires all 58 directions")
     atomic_write_json(
-        args.arm_dir / "repair_summary.json",
+        args.arm_dir / f"repair_summary{suffix}.json",
         {
             "directions": len(reports),
             "fallbacks": sum(row["fallback"] for row in reports),
@@ -594,6 +596,7 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--oasis-root", type=Path, default=Path("/data/mooncake/P/OASIS_L2R_2021_task03/All"))
     parser.add_argument("--arm-dir", type=Path)
+    parser.add_argument("--epoch", type=int, choices=(3, 10), default=3)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--shard", type=int, default=0)
     args = parser.parse_args()
