@@ -7,7 +7,7 @@ RUN_ID="${2:-B_$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid RUN_ID"; exit 1; }
 RUN="results/contrasts/$RUN_ID"
 WORKFLOW="${WORKFLOW:-$(cat "$RUN/workflow.txt" 2>/dev/null || echo main)}"
-[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism ]] || { echo "Unknown WORKFLOW"; exit 1; }
+[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism || "$WORKFLOW" = learning ]] || { echo "Unknown WORKFLOW"; exit 1; }
 if [ "$MODE" = stop ]; then
     [ -f "$RUN/runner.pid" ] || { echo "No matching live runner; no process was stopped."; exit 0; }
     read -r pid < "$RUN/runner.pid"
@@ -73,6 +73,7 @@ PIDS=()
 REQUIRED=(pretests check parent b0 b1 b2 summary consensus)
 if [ "$WORKFLOW" = followup ]; then REQUIRED=(pretests prepare profile controls anchor repair smooth summary repair_summary); fi
 if [ "$WORKFLOW" = mechanism ]; then REQUIRED=(pretests prepare controls weights t2 smooth summary lumir_check lumir_profile lumir_train lumir_cert lumir_contrasts); fi
+if [ "$WORKFLOW" = learning ]; then REQUIRED=(pretests preflight profile calibration smoke budget registrations teachers diagnostics students baselines summary); fi
 finish() {
     local code=$? includes=() arm
     trap - EXIT INT
@@ -93,10 +94,11 @@ log "RUN_ID=$RUN_ID HEAD=$HEAD GPUS=${GPU[*]} PID=$$ MANIFEST=$MANIFEST"
 FREE_DEFAULT=200
 if [ "$WORKFLOW" = followup ]; then FREE_DEFAULT=80; fi
 if [ "$WORKFLOW" = mechanism ]; then FREE_DEFAULT=100; fi
+if [ "$WORKFLOW" = learning ]; then FREE_DEFAULT=160; fi
 "$PY" -c 'import shutil,sys; sys.exit(shutil.disk_usage("results").free < int(sys.argv[1])*1024**3)' "${MIN_FREE_GIB:-$FREE_DEFAULT}"
 job() {
     local task=$1 gpu=$2 code=0; shift 2
-    if [ "$task" != prepare ] && [ "$task" != summary ] && [ "$(cat "$RUN/exit_codes/$task.txt" 2>/dev/null || true)" = 0 ]; then log "SKIP $task (completed)"; return 0; fi
+    if [[ "$task" != prepare && "$task" != preflight && "$task" != summary ]] && [ "$(cat "$RUN/exit_codes/$task.txt" 2>/dev/null || true)" = 0 ]; then log "SKIP $task (completed)"; return 0; fi
     log "START $task GPU=$gpu LOG=$LOGS/$task.log"
     CUDA_VISIBLE_DEVICES="$gpu" PYTHONUNBUFFERED=1 "$@" > "$LOGS/$task.log" 2>&1 || code=$?
     echo "$code" > "$RUN/exit_codes/$task.txt"
@@ -107,9 +109,172 @@ if [ "${PRETESTS:-1}" = 1 ]; then
     TESTS=(tools/analysis/tests/test_contrasts.py tools/analysis/tests/test_contrasts_runner.py tools/analysis/tests/test_precision.py)
     if [ "$WORKFLOW" = followup ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_repair_checks.py); fi
     if [ "$WORKFLOW" = mechanism ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_contrast_probes.py tools/analysis/tests/test_representation.py tools/analysis/tests/test_lumir_probes.py tools/analysis/tests/test_lumir.py tools/analysis/tests/test_distributed.py); fi
+    if [ "$WORKFLOW" = learning ]; then TESTS=(tools/analysis/tests/test_matching.py tools/analysis/tests/test_matching_train.py tools/analysis/tests/test_matching_eval.py tools/analysis/tests/test_matching_diagnostics.py tools/analysis/tests/test_contrast_learning.py tools/analysis/tests/test_lpba.py tools/analysis/tests/test_learning_runner.py); fi
     job pretests "" "$PY" -m pytest -q "${TESTS[@]}" \
         tools/analysis/tests/test_run_artifacts.py::RunArtifactsTest::test_failed_run_can_be_packaged_without_site_packages
 else echo 0 > "$RUN/exit_codes/pretests.txt"; log "SKIPPED pretests: PRETESTS=0"; fi
+learning() {
+    local source="${SOURCE_RUN:-results/contrasts/B_CHECK_20261110T211549Z}"
+    local bm="${BM_SOURCE_RUN:-results/contrasts/BM_20261113T143420Z}"
+    local base="${BASE_B1_CHECKPOINT:-results/BM_20261113T143420Z_b1_s1/ckpt/last.pth}"
+    local b0="${BASE_B0_CHECKPOINT:-results/BM_20261113T143420Z_b0_s1/ckpt/last.pth}"
+    local external="${LPBA_MANIFEST:-/data/mooncake/P/LPBA40_prepared/manifest.json}"
+    local stride=1 code status=0 slot pid group name ds
+    local -a common=(--manifest "$MANIFEST") arms=(base parent fine_b0 scratch_b0 scratch_b1 resampled_t1 shuffled_t2 t1_value t1_solver paired_value paired_solver paired_solver_small paired_solver_half) names weights
+    [ "${#GPU[@]}" = 4 ] || [ "${#GPU[@]}" = 8 ] || { log "Learning dispatch requires 4 or 8 GPUs"; return 1; }
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+    job preflight "" "$PY" -m experiments.contrast_learning preflight "${common[@]}" --checkpoint "$PARENT" \
+        --source "$source" --bm_source "$bm" --base_checkpoint "$base" --b0_checkpoint "$b0" \
+        --external_manifest "$external" --out "$RUN" || return 1
+    bind manifest "$MANIFEST" && bind lpba "$external" && bind base "$base" && bind b0 "$b0" || return 1
+    job profile_student_1 "${GPU[0]}" "$PY" -m experiments.train_matching profile "${common[@]}" \
+        --kind student --mode solver --source paired --base_checkpoint "$base" --stride 1 \
+        --out "$RUN/profile_student_1" --max_peak_gib 60 || return 1
+    echo "$stride" > "$RUN/stride.txt"
+    job profile_teacher "${GPU[0]}" "$PY" -m experiments.train_matching profile "${common[@]}" \
+        --kind teacher --source paired --stride "$stride" --out "$RUN/profile_teacher" || return 1
+    echo 0 > "$RUN/exit_codes/profile.txt"
+    job calibration "${GPU[0]}" "$PY" -m experiments.matching_diagnostics calibrate "${common[@]}" \
+        --stride 1 --out "$RUN/calibration" || return 1
+    bind calibration "$RUN/calibration/calibration.json" || return 1
+    job smoke_teacher "${GPU[0]}" "$PY" -m experiments.train_matching teacher "${common[@]}" \
+        --source paired --stride "$stride" --updates 2 --save_every 2 --log_every 1 --out "$RUN/smoke/teacher" || return 1
+    job smoke_student "${GPU[0]}" "$PY" -m experiments.train_matching student "${common[@]}" --source paired \
+        --mode solver --stride "$stride" --updates 2 --save_every 2 --log_every 1 --teacher "$RUN/smoke/teacher/ckpt/last.pth" \
+        --base_checkpoint "$base" --calibration "$RUN/calibration/calibration.json" --out "$RUN/smoke/student" || return 1
+    job smoke_ixi "${GPU[0]}" "$PY" -m experiments.eval_matching evaluate --dataset IXI "${common[@]}" \
+        --base_checkpoint "$base" --metric_checkpoint "$RUN/smoke/student/ckpt/last.pth" --certify 1 --limit 1 --out "$RUN/smoke/IXI" || return 1
+    job smoke_lpba "${GPU[0]}" "$PY" -m experiments.eval_matching evaluate --dataset LPBA --manifest "$external" \
+        --base_checkpoint "$base" --metric_checkpoint "$RUN/smoke/student/ckpt/last.pth" --limit 1 --out "$RUN/smoke/LPBA" || return 1
+    job smoke_half "${GPU[0]}" "$PY" -m experiments.eval_matching evaluate --dataset IXI "${common[@]}" \
+        --base_checkpoint "$base" --metric_checkpoint "$RUN/smoke/student/ckpt/last.pth" \
+        --descriptor_stride 2 --limit 1 --out "$RUN/smoke/half" || return 1
+    job smoke_oasis "${GPU[0]}" "$PY" -m experiments.eval_matching evaluate --dataset OASIS \
+        --manifest datasets/splits/oasis_subject_disjoint_v2/pair_manifest.json --oasis_root "$DATA" \
+        --base_checkpoint "$base" --metric_checkpoint "$RUN/smoke/student/ckpt/last.pth" --limit 1 --out "$RUN/smoke/OASIS" || return 1
+    echo 0 > "$RUN/exit_codes/smoke.txt"
+    job ctcf_profile "${GPU[0]}" "$PY" -m experiments.contrast_diagnostics profile "${common[@]}" --checkpoint "$PARENT" \
+        --source "$source" --out "$RUN/ctcf_profile" --exp "${RUN_ID}_profile" --workers 8 --benchmark 1 || return 1
+    job budget "" "$PY" -m experiments.contrast_learning budget --out "$RUN" --budget_hours "${BUDGET_HOURS:-72}" || return 1
+    job prepare "" "$PY" -m experiments.contrast_learning prepare "${common[@]}" --checkpoint "$PARENT" \
+        --source "$source" --raw-root "${IXI_RAW_ROOT:-/data/mooncake/P/IXI_raw}" --threads "${PREP_THREADS:-32}" --out "$RUN/targets" || status=1
+    evaluate_learning() {
+        local name=$1 gpu=$2 weights=$3 metric=${4:-} endpoint=${5:-} ds manifest certify controls=0 failed=0
+        local -a options=(--base_checkpoint "$weights")
+        [ -z "$metric" ] || options+=(--metric_checkpoint "$metric")
+        [ -z "$endpoint" ] || options+=(--endpoint "$endpoint")
+        [ "$name" != paired_solver_half ] || options+=(--descriptor_stride 2)
+        [ "$name" != paired_solver ] || controls=1
+        for ds in IXI LPBA OASIS; do
+            certify=0
+            case "$ds" in
+                IXI) manifest="$MANIFEST"; certify=1 ;;
+                LPBA) manifest="$external" ;;
+                OASIS) manifest=datasets/splits/oasis_subject_disjoint_v2/pair_manifest.json ;;
+            esac
+            job "eval_${ds}_$name" "$gpu" "$PY" -m experiments.eval_matching evaluate --dataset "$ds" --manifest "$manifest" \
+                --oasis_root "$DATA" "${options[@]}" --out "$RUN/$ds/$name" --certify "$certify" \
+                --controls "$([ "$ds" = IXI ] && echo "$controls" || echo 0)" || failed=1
+        done
+        return "$failed"
+    }
+    registration_learning() {
+        local name=$1 gpu=$2
+        if [[ "$name" != scratch_* ]] && [ "$(cat "$RUN/exit_codes/prepare.txt" 2>/dev/null)" != 0 ]; then
+            log "HELD $name: auxiliary targets unavailable"; echo 125 > "$RUN/exit_codes/$name.txt"; return 1
+        fi
+        job "$name" "$gpu" "$PY" -m experiments.contrast_learning train "${common[@]}" --checkpoint "$PARENT" \
+            --prepared "$RUN/targets" --kind "$name" --exp "${RUN_ID}_$name" --workers 8 --out "$RUN/registration/$name" || return 1
+        evaluate_learning "$name" "$gpu" "results/${RUN_ID}_$name/ckpt/last.pth" "" "$RUN/registration/$name/report.json"
+    }
+    matching_learning() {
+        local name=$1 gpu=$2 family=${1%_*} mode=${1##*_} width=16
+        if [ "$name" = paired_solver_small ]; then family=paired; mode=solver; width=8; fi
+        job "$name" "$gpu" "$PY" -m experiments.train_matching student "${common[@]}" --source "$family" --mode "$mode" \
+            --teacher "$RUN/teachers/$family/ckpt/last.pth" --base_checkpoint "$base" --stride "$stride" --width "$width" \
+            --calibration "$RUN/calibration/calibration.json" --out "$RUN/matching/$name" || return 1
+        evaluate_learning "$name" "$gpu" "$base" "$RUN/matching/$name/ckpt/last.pth"
+    }
+    family_learning() {
+        local family=$1 first=$2 second=$3 code=0 child
+        job "teacher_$family" "$first" "$PY" -m experiments.train_matching teacher "${common[@]}" \
+            --source "$family" --stride "$stride" --out "$RUN/teachers/$family" || return 1
+        job "diagnostics_$family" "$first" "$PY" -m experiments.matching_diagnostics teacher "${common[@]}" \
+            --teacher "$RUN/teachers/$family/ckpt/last.pth" --base_checkpoint "$base" \
+            --out "$RUN/teacher_diagnostics/$family" || code=1
+        if [ "$first" = "$second" ]; then
+            matching_learning "${family}_value" "$first" || code=1
+            matching_learning "${family}_solver" "$first" || code=1
+        else
+            matching_learning "${family}_value" "$first" & child=$!
+            matching_learning "${family}_solver" "$second" || code=1
+            wait "$child" || code=1
+        fi
+        if [ "$family" = paired ]; then
+            matching_learning paired_solver_small "$first" || code=1
+            if [ "$(cat "$RUN/exit_codes/paired_solver.txt" 2>/dev/null || true)" = 0 ]; then
+                evaluate_learning paired_solver_half "$first" "$base" "$RUN/matching/paired_solver/ckpt/last.pth" || code=1
+            else
+                log "HELD paired_solver_half: trained main checkpoint unavailable"
+            fi
+        fi
+        return "$code"
+    }
+    PIDS=()
+    for slot in 0 1; do
+        ( names=(scratch_b0 scratch_b1); registration_learning "${names[$slot]}" "${GPU[$slot]}" ) & PIDS+=($!)
+    done
+    if [ "${#GPU[@]}" = 8 ]; then
+        registration_learning resampled_t1 "${GPU[2]}" & PIDS+=($!)
+        registration_learning shuffled_t2 "${GPU[3]}" & PIDS+=($!)
+        family_learning t1 "${GPU[4]}" "${GPU[5]}" & PIDS+=($!)
+        family_learning paired "${GPU[6]}" "${GPU[7]}" & PIDS+=($!)
+    else
+        ( code=0; registration_learning resampled_t1 "${GPU[2]}" || code=1; family_learning t1 "${GPU[2]}" "${GPU[2]}" || code=1; exit "$code" ) & PIDS+=($!)
+        ( code=0; registration_learning shuffled_t2 "${GPU[3]}" || code=1; family_learning paired "${GPU[3]}" "${GPU[3]}" || code=1; exit "$code" ) & PIDS+=($!)
+    fi
+    for pid in "${PIDS[@]}"; do wait "$pid" || status=1; done
+    for group in registrations teachers diagnostics students; do
+        code=0
+        case "$group" in
+            registrations) names=(scratch_b0 scratch_b1 resampled_t1 shuffled_t2) ;;
+            teachers) names=(teacher_t1 teacher_paired) ;;
+            diagnostics) names=(diagnostics_t1 diagnostics_paired) ;;
+            students) names=(t1_value t1_solver paired_value paired_solver paired_solver_small) ;;
+        esac
+        for name in "${names[@]}"; do
+            [ "$(cat "$RUN/exit_codes/$name.txt" 2>/dev/null || true)" = 0 ] || code=1
+            if [ "$group" = students ] || [ "$group" = registrations ]; then
+                for ds in IXI LPBA OASIS; do
+                    [ "$(cat "$RUN/exit_codes/eval_${ds}_$name.txt" 2>/dev/null || true)" = 0 ] || code=1
+                done
+            fi
+        done
+        if [ "$group" = students ]; then
+            for ds in IXI LPBA OASIS; do
+                [ "$(cat "$RUN/exit_codes/eval_${ds}_paired_solver_half.txt" 2>/dev/null || true)" = 0 ] || code=1
+            done
+        fi
+        echo "$code" > "$RUN/exit_codes/$group.txt"
+    done
+    PIDS=()
+    for slot in 0 1 2; do
+        ( names=(base parent fine_b0); weights=("$base" "$PARENT" "$b0"); evaluate_learning "${names[$slot]}" "${GPU[$slot]}" "${weights[$slot]}" ) & PIDS+=($!)
+    done
+    code=0
+    for pid in "${PIDS[@]}"; do wait "$pid" || code=1; done
+    echo "$code" > "$RUN/exit_codes/baselines.txt"
+    [ "$code" = 0 ] || status=1
+    job learning_summary "" "$PY" -m experiments.contrast_learning report --source "$source" --evaluations_root "$RUN/IXI" --out "$RUN" || status=1
+    job summary "" "$PY" -m experiments.eval_matching report --out "$RUN" --required_arms "${arms[@]}" || status=1
+    return "$status"
+}
+if [ "$WORKFLOW" = learning ]; then
+    failed=0
+    learning || failed=1
+    log "FINISHED exit=$failed"
+    exit "$failed"
+fi
 mechanism() {
     local source="${SOURCE_RUN:-results/contrasts/B_CHECK_20261110T211549Z}" original="${ORIGINAL_RUN:-results/contrasts/B_20261108T180120Z}"
     local -a common=(--source "$source" --original "$original" --manifest "$MANIFEST" --checkpoint "$PARENT" --out "$RUN")
