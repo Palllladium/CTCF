@@ -17,20 +17,20 @@ from experiments.core.distributed import restore_training_state, restored_state_
 from experiments.core.helpers import save_ckpt
 from experiments.core.inference_runtime import load_checkpoint_state
 from experiments.core.model_adapters import get_model_adapter
-from experiments.core.precision import configure_precision, precision_autocast
+from experiments.core.precision import configure_precision
 from models.Matching import (
     FeatureEncoder,
+    Matching,
     candidate_logits,
     feature_points,
     flow_inside_fraction,
     matching_energy,
-    refine,
     sample_voxels,
     voxel_grid,
 )
 from tools.analysis.run_artifacts import atomic_write_json, atomic_write_text, rows_to_csv, sha256_file
 from utils import setup_device
-from utils.field import _warp, legacy_sampling_displacement
+from utils.field import _warp
 
 
 def load_encoder(path, device):
@@ -59,15 +59,6 @@ def load_base(path, shape, device):
     load_checkpoint_state(model, str(path), strict=True)
     model.requires_grad_(False).eval()
     return model
-
-
-@torch.no_grad()
-def base_flow(model, moving, fixed, precision="bf16"):
-    channels = model.cfg.image_channels
-    x, y = [value[:, :1].expand(-1, channels, -1, -1, -1) for value in (moving, fixed)]
-    with precision_autocast(precision, moving.device):
-        flow = model(x, y, alpha_l1=1.0, alpha_l3=1.0)[1]
-    return legacy_sampling_displacement(flow.float())
 
 
 def refine_config(saved):
@@ -138,11 +129,11 @@ def teacher_subjects(manifest):
     return [row["id"] for row in rows if row["id"] not in heldout], sorted(heldout)
 
 
-def matching_step(encoder, teacher, base, batch, args):
+def matching_step(model, teacher, batch, args):
     x, y, t2_x, t2_y = batch
     if args.kind == "teacher":
         loss = known_warp_loss(
-            encoder,
+            model,
             source_image(x, t2_x, args.source),
             points=args.points,
             temperature=args.temperature,
@@ -150,7 +141,8 @@ def matching_step(encoder, teacher, base, batch, args):
         )
         return loss, {"known": float(loss.detach())}
     shape = x.shape[2:]
-    initial = base_flow(base, x[:, :1], y[:, :1], args.base_precision)
+    encoder = model.encoder
+    initial = model.initial_field(x[:, :1], y[:, :1])
     query_flow = initial + smooth_perturbation(shape, x.device, args.query_amplitude)
     with torch.no_grad():
         teacher_x = teacher(source_image(x, t2_x, args.source))
@@ -174,7 +166,7 @@ def matching_step(encoder, teacher, base, batch, args):
     )
     loss, outer = value + args.known_weight * known, value.new_zeros(())
     if args.mode == "solver":
-        refined = refine(student_y, student_x, query_flow, mask=support, **refine_config({"recipe": vars(args)}))
+        refined = model(x[:, :1], y[:, :1], query_flow, mask=support, features=(student_x, student_y))
         outer = matching_energy(
             teacher_y, teacher_x, refined, reg_weight=args.reg_weight, mask=support, outside_weight=args.outside_weight
         )
@@ -322,7 +314,12 @@ def run(args):
         if history:
             atomic_write_text(args.out / "metrics.csv", rows_to_csv(list(history[0]), history))
         (args.out / "ckpt").mkdir(exist_ok=True)
-    encoder.train()
+    model = (
+        Matching(encoder, refine_config(binding), base=base, base_precision=args.base_precision)
+        if args.kind == "student"
+        else encoder
+    )
+    model.train()
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
@@ -332,7 +329,7 @@ def run(args):
         tick = time.perf_counter()
         batch = training_pair(dataset, step, args.seed, device)
         optimizer.zero_grad(set_to_none=True)
-        loss, logs = matching_step(encoder, teacher, base, batch, args)
+        loss, logs = matching_step(model, teacher, batch, args)
         if not bool(torch.isfinite(loss)):
             raise FloatingPointError(f"Nonfinite matching loss at update {step + 1}")
         loss.backward()

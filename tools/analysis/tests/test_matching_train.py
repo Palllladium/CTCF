@@ -11,7 +11,7 @@ from torch import nn
 
 from datasets.IXI import IXIPairedDataset, read_ixi_manifest
 from experiments import train_matching as training
-from models.Matching import FeatureEncoder
+from models.Matching import FeatureEncoder, Matching, base_flow
 from tools.analysis.run_artifacts import sha256_file
 
 LOAD_BASE = training.load_base
@@ -302,15 +302,16 @@ def test_solver_outer_loss_has_its_own_nonzero_encoder_hypergradient(prepared, d
     torch.manual_seed(19)
     encoder = FeatureEncoder(1, width=2, channels=4, stride=1).to(device)
     teacher = FeatureEncoder(2, width=3, channels=4, stride=1).to(device).eval().requires_grad_(False)
+    model = Matching(encoder, training.refine_config({"recipe": vars(args)}), base=base)
     cpu_rng = torch.get_rng_state()
     cuda_rng = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
     args.mode = "value"
-    value_loss, _ = training.matching_step(encoder, teacher, base, batch, args)
+    value_loss, _ = training.matching_step(model, teacher, batch, args)
     torch.set_rng_state(cpu_rng)
     if cuda_rng is not None:
         torch.cuda.set_rng_state(cuda_rng, device)
     args.mode = "solver"
-    solver_loss, _ = training.matching_step(encoder, teacher, base, batch, args)
+    solver_loss, _ = training.matching_step(model, teacher, batch, args)
     gradients = torch.autograd.grad(solver_loss - value_loss, tuple(encoder.parameters()))
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
     assert sum(float(gradient.abs().sum()) for gradient in gradients) > 1e-7
@@ -340,6 +341,6 @@ def test_base_loading_preserves_scalar_or_paired_input_channels(prepared, monkey
     monkeypatch.setattr(training, "get_model_adapter", lambda _: Adapter())
     monkeypatch.setattr(training, "load_checkpoint_state", lambda *args, **kwargs: {})
     model = LOAD_BASE(path, (32, 32, 32), "cpu")
-    result = training.base_flow(model, torch.zeros(1, 1, 32, 32, 32), torch.zeros(1, 1, 32, 32, 32), "fp32")
+    result = base_flow(model, torch.zeros(1, 1, 32, 32, 32), torch.zeros(1, 1, 32, 32, 32), "fp32")
     assert captured["image_channels"] == expected
     assert result.shape == (1, 3, 32, 32, 32)

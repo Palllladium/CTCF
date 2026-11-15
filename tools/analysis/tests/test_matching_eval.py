@@ -12,7 +12,7 @@ from torch import nn
 
 from experiments import eval_matching as evaluation
 from experiments.core.inference_metrics import MetricProfile, metric_profile_for
-from models.Matching import FeatureEncoder
+from models.Matching import FeatureEncoder, Matching, model as matching_model
 from tools.analysis.run_artifacts import sha256_file
 from utils.dice import IXI_VOI_LABELS
 from utils.field_io import save_flow_npz_atomic
@@ -32,7 +32,8 @@ def test_zero_solver_steps_preserve_parent_fine_details_exactly():
     moving, fixed = torch.rand(1, 1, 16, 16, 16), torch.rand(1, 1, 16, 16, 16)
     parent = 0.2 * torch.randn(1, 3, 16, 16, 16)
     config = dict(steps=0, step_size=0.25, reg_weight=0.01, outside_weight=1.0, max_update=0.5)
-    output, diagnostics = evaluation.refine_field(encoder, moving, fixed, parent, config)
+    model = Matching(encoder, config).eval()
+    output, diagnostics = model(moving, fixed, parent, return_diagnostics=True)
     assert torch.equal(output, parent)
     assert np.isfinite(diagnostics["energy_before"])
 
@@ -49,10 +50,9 @@ def test_half_descriptors_do_not_restrict_the_correction_to_a_coarse_field(monke
         result[:, 0, 7, 7, 7] = 0.1
         return result
 
-    monkeypatch.setattr(evaluation, "refine", solver)
-    output, _ = evaluation.refine_field(
-        encoder, moving, moving, parent, {"steps": 3, "reg_weight": 0.01, "outside_weight": 1.0}
-    )
+    monkeypatch.setattr(matching_model, "refine", solver)
+    model = Matching(encoder, {"steps": 3, "reg_weight": 0.01, "outside_weight": 1.0}).eval()
+    output = model(moving, moving, parent)
     assert torch.count_nonzero(output) == 1
     assert output[0, 0, 7, 7, 7] == pytest.approx(0.1)
 
@@ -70,8 +70,8 @@ def test_inference_freezes_overlap_in_warped_moving_coordinates(monkeypatch):
         observed.append(mask)
         return start
 
-    monkeypatch.setattr(evaluation, "refine", solver)
-    evaluation.refine_field(encoder, moving, fixed, parent, config)
+    monkeypatch.setattr(matching_model, "refine", solver)
+    Matching(encoder, config).eval()(moving, fixed, parent)
     # Pulling moving(x+2) moves its three-voxel zero strip to a one-voxel strip.
     expected = torch.ones_like(fixed)
     expected[..., :1] = 0
@@ -137,15 +137,21 @@ def toy_evaluation(tmp_path, monkeypatch):
     monkeypatch.setattr(
         evaluation, "refine_config", lambda _saved: {"steps": 3, "reg_weight": 0.01, "outside_weight": 1.0}
     )
-    monkeypatch.setattr(evaluation, "load_base", lambda *_args: object())
     calls = []
 
-    def forward(_model, moving, _fixed):
-        calls.append("forward")
-        return torch.zeros(moving.shape[0], 3, *moving.shape[2:])
+    class Base(nn.Module):
+        cfg = SimpleNamespace(image_channels=2)
 
-    monkeypatch.setattr(evaluation, "base_flow", forward)
-    monkeypatch.setattr(evaluation, "refine_field", lambda _net, _x, _y, flow, _config: (flow, {}))
+        def forward(self, moving, _fixed, **_options):
+            calls.append("forward")
+            return moving, moving.new_zeros(moving.shape[0], 3, *moving.shape[2:])
+
+    monkeypatch.setattr(evaluation, "load_base", lambda *_args: Base())
+
+    def refinement(_model, _moving, _fixed, initial, *, return_diagnostics=False, **_options):
+        return (initial, {}) if return_diagnostics else initial
+
+    monkeypatch.setattr(Matching, "forward", refinement)
     monkeypatch.setattr(evaluation, "dice_per_label", lambda *_args, **_kwargs: np.array([0.8]))
     monkeypatch.setattr(evaluation, "warp_labels", lambda labels, *_args: labels)
     monkeypatch.setattr(
@@ -167,6 +173,16 @@ def toy_evaluation(tmp_path, monkeypatch):
     )
     args.out.mkdir()
     return args, calls
+
+
+def test_parent_only_evaluation_bypasses_matching(toy_evaluation, monkeypatch):
+    args, calls = toy_evaluation
+    args.metric_checkpoint, args.controls = None, 0
+    monkeypatch.setattr(evaluation, "Matching", lambda *_args, **_options: pytest.fail("Unexpected refinement"))
+    evaluation.evaluate(args)
+    assert calls == ["forward", "forward"]
+    saved = json.loads((args.out / "pairs/a__b/evaluation.json").read_text())
+    assert set(saved["rows"]) == {"FF"} and not saved["failed"]
 
 
 def test_control_failure_keeps_raw_scores_and_resume_retries_only_failed_case(toy_evaluation, monkeypatch):

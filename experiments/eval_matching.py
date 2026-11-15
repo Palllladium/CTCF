@@ -21,8 +21,8 @@ from experiments.core.field_scoring import load_saved_scores, paired_dice_delta,
 from experiments.core.inference_metrics import MetricProfile, metric_profile_for, write_results, write_trace
 from experiments.core.precision import configure_precision
 from experiments.repair_diagnostics import repair_one
-from experiments.train_matching import base_flow, load_base, load_encoder, refine_config
-from models.Matching import flow_inside_fraction, matching_energy, refine, resize_flow, sample_voxels, voxel_grid
+from experiments.train_matching import load_base, load_encoder, refine_config
+from models.Matching import Matching, base_flow, overlap_support, resize_flow, sample_voxels, voxel_grid
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from utils import Grad3d, pkload
 from utils.dice import dice_per_label
@@ -66,32 +66,6 @@ def cases(args):
         items, profile, signature = read_pairs(), metric_profile_for("OASIS"), sha256_file(args.manifest)
         count = len(pairs)
     return items, profile, signature, min(count, args.limit) if args.limit else count
-
-
-@torch.no_grad()
-def overlap_support(moving, fixed, start):
-    positions = voxel_grid(start.shape[2:], device=start.device) + start
-    support = (fixed > 0) & (sample_voxels(moving, positions) > 0)
-    if not bool(support.any()):
-        raise ValueError("T1 overlap support is empty at the initial field")
-    return support.float()
-
-
-def refine_field(encoder, moving, fixed, parent, config):
-    with torch.no_grad():
-        fm, ff = encoder(moving), encoder(fixed)
-        # Training and inference freeze T1 overlap at the initial field, not at each solver iterate.
-        support = overlap_support(moving, fixed, parent)
-    start = parent
-    end = refine(ff, fm, start, mask=support, create_graph=False, **config)
-    energy_args = {key: config[key] for key in ("reg_weight", "outside_weight")}
-    return end, {
-        "inside_fraction": float(flow_inside_fraction(end)),
-        "energy_before": float(matching_energy(ff, fm, start, mask=support, **energy_args).detach()),
-        "energy_after": float(matching_energy(ff, fm, end, mask=support, **energy_args).detach()),
-        "descriptor_shape": list(ff.shape[2:]),
-        "field_shape": list(parent.shape[2:]),
-    }
 
 
 def timed_ncc(moving, fixed, parent, seconds, config, *, max_steps=100):
@@ -219,7 +193,8 @@ def evaluate(args):
         encoder.eval().requires_grad_(False)
         if getattr(args, "descriptor_stride", None) is not None:
             encoder.stride = args.descriptor_stride
-    model, rows, trace, diagnostics = None, {"FF": [], "REP": [], "NCC": [], "R_MATCH": []}, [], []
+    base = model = None
+    rows, trace, diagnostics = {"FF": [], "REP": [], "NCC": [], "R_MATCH": []}, [], []
     failures, control_failures = [], []
     for index, (x, y, xs, ys, case) in enumerate(items):
         if args.limit and index >= args.limit:
@@ -247,10 +222,12 @@ def evaluate(args):
                 diagnostics.append(saved["diagnostics"])
                 continue
         x, y, xs, ys = [v.unsqueeze(0).to(args.device) for v in (x, y, xs, ys)]
-        if model is None:
-            model = load_base(args.base_checkpoint, x.shape[2:], args.device)
+        if base is None:
+            base = load_base(args.base_checkpoint, x.shape[2:], args.device)
+            if encoder is not None:
+                model = Matching(encoder, config, base=base).eval()
         started = sync(args.device)
-        parent = base_flow(model, x, y)
+        parent = model.initial_field(x, y) if model is not None else base_flow(base, x, y)
         if not bool(torch.isfinite(parent).all()):
             raise FloatingPointError(f"Nonfinite base field: {case}")
         base_seconds = sync(args.device) - started
@@ -258,12 +235,12 @@ def evaluate(args):
         case_trace = []
         if encoder is not None:
             started = sync(args.device)
-            flow, detail = refine_field(encoder, x, y, parent, config)
+            flow, detail = model(x, y, parent, return_diagnostics=True)
             if not bool(torch.isfinite(flow).all()):
                 raise FloatingPointError(f"Nonfinite refined field: {case}")
             extra_seconds = sync(args.device) - started
             for step in (0, 1):
-                probe = parent if step == 0 else refine_field(encoder, x, y, parent, config | {"steps": 1})[0]
+                probe = parent if step == 0 else model(x, y, parent, steps=1)
                 dice = dice_per_label(warp_labels(xs, probe, "canonical").long(), ys.long(), labels=profile.labels)
                 case_trace.append({"case_id": case, "tto_step": step, "dice_mean": float(np.mean(dice))})
         case_rows, failed = {}, False

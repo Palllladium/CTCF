@@ -114,7 +114,7 @@ def teacher_probes(args, manifest, device):
             }
         )
         if base is not None and first != second:
-            from experiments.train_matching import base_flow
+            from models.Matching import base_flow
 
             parent = base_flow(base, x[:, :1], y[:, :1])
             points = supported_points(y[:, :1], parent, args.points)

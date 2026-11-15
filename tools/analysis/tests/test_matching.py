@@ -3,19 +3,23 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
 from torch.autograd import gradcheck, gradgradcheck
 
 from models.Matching import (
     FeatureEncoder,
+    Matching,
     candidate_logits,
     flow_inside_fraction,
     matching_cost,
     matching_energy,
+    overlap_support,
     refine,
     resize_flow,
     sample_voxels,
     voxel_grid,
 )
+from utils.field import legacy_sampling_displacement
 
 
 @pytest.fixture(autouse=True)
@@ -217,3 +221,63 @@ def test_invalid_geometry_and_empty_support_fail_explicitly():
         matching_energy(image, image, flow, mask=torch.zeros_like(image))
     with pytest.raises(ValueError, match="dimensions"):
         resize_flow(flow, (1, 2, 3))
+
+
+@pytest.mark.parametrize("stride", [1, 2])
+def test_matching_assembly_preserves_field_and_encoder_hypergradient(stride):
+    torch.manual_seed(28)
+    encoder = FeatureEncoder(width=2, channels=4, stride=stride, precision="fp32").double()
+    config = dict(steps=2, step_size=0.01, reg_weight=0.03, outside_weight=1.0, max_update=0.1)
+    model = Matching(encoder, config)
+    moving, fixed = [torch.rand(1, 1, 16, 16, 16, dtype=torch.double) + 0.1 for _ in range(2)]
+    initial = torch.full((1, 3, 16, 16, 16), 0.17, dtype=torch.double)
+    fm, ff = encoder(moving), encoder(fixed)
+    mask = overlap_support(moving, fixed, initial)
+    expected = refine(ff, fm, initial, mask=mask, **config)
+    actual = model(moving, fixed, initial)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    reference = torch.autograd.grad(expected.square().mean(), tuple(encoder.parameters()))
+    gradients = torch.autograd.grad(actual.square().mean(), tuple(encoder.parameters()))
+    assert sum(float(value.abs().sum()) for value in gradients) > 0
+    for got, wanted in zip(gradients, reference, strict=True):
+        torch.testing.assert_close(got, wanted, atol=0, rtol=0)
+    model.eval()
+    with torch.no_grad():
+        evaluated = model(moving, fixed, initial)
+    assert not evaluated.requires_grad
+    torch.testing.assert_close(evaluated, expected, atol=0, rtol=0)
+
+
+def test_matching_keeps_parent_frozen_and_reuses_explicit_initial_fields():
+    from types import SimpleNamespace
+
+    class Base(nn.Module):
+        cfg = SimpleNamespace(image_channels=2)
+
+        def __init__(self):
+            super().__init__()
+            self.offset = nn.Parameter(torch.tensor(0.1))
+            self.calls = 0
+
+        def forward(self, moving, fixed, **kwargs):
+            assert not self.training and not torch.is_grad_enabled()
+            assert moving.shape[1] == fixed.shape[1] == 2
+            assert torch.equal(moving[:, :1], moving[:, 1:])
+            assert kwargs == {"alpha_l1": 1.0, "alpha_l3": 1.0}
+            self.calls += 1
+            return moving, self.offset.expand(moving.shape[0], 3, *moving.shape[2:])
+
+    config = dict(steps=0, reg_weight=0.01, outside_weight=1.0)
+    base = Base()
+    model = Matching(nn.Identity(), config, base=base, base_precision="fp32").train()
+    assert model.encoder.training and not base.training and not base.offset.requires_grad
+    image = torch.ones(1, 1, 4, 5, 6)
+    expected = legacy_sampling_displacement(torch.full((1, 3, 4, 5, 6), 0.1))
+    inferred = model(image, image)
+    torch.testing.assert_close(inferred, expected, atol=0, rtol=0)
+    model.eval()
+    explicit = model(image, image, inferred)
+    assert base.calls == 1 and not explicit.requires_grad
+    torch.testing.assert_close(explicit, expected, atol=0, rtol=0)
+    with pytest.raises(ValueError, match="explicit initial field"):
+        Matching(nn.Identity(), config)(image, image)
