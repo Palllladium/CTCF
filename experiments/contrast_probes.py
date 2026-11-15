@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from datasets.IXI import IXIPairedDataset, read_paired_manifest
+from datasets.IXI import IXIPairedDataset, read_ixi_manifest
 from experiments.contrast_diagnostics import read_csv
 from experiments.contrasts import RECIPE, build_runner, tensors
 from experiments.core.field_scoring import paired_dice_delta, score
@@ -44,7 +44,7 @@ def source_weights(source, arm):
 
 
 def prepare(args):
-    manifest = read_paired_manifest(args.manifest, verify_bytes=True)
+    manifest = read_ixi_manifest(args.manifest, verify_bytes=True)
     source_inputs = json.loads((args.source / "inputs.json").read_text())
     if (
         source_inputs["parent_sha256"] != sha256_file(args.checkpoint)
@@ -167,7 +167,7 @@ def measure(runner, batch, inputs=None, reference=None):
 
 
 def weights(args):
-    manifest = read_paired_manifest(args.manifest)
+    manifest = read_ixi_manifest(args.manifest)
     runner = build_runner(args, "b1")
     runner.model.eval()
     first, second = [source_weights(args.source, arm)[1] for arm in ("b0", "b1")]
@@ -197,7 +197,7 @@ def weights(args):
 
 
 def t2_inputs(args):
-    manifest = read_paired_manifest(args.manifest)
+    manifest = read_ixi_manifest(args.manifest)
     runner = build_runner(args, "b2")
     runner.model.load_state_dict(source_weights(args.source, "b2")[1], strict=True)
     runner.model.eval()
@@ -268,7 +268,7 @@ def match_regularity(flow, target):
 
 
 def smoothing(args):
-    manifest = read_paired_manifest(args.manifest, require_t2=False)
+    manifest = read_ixi_manifest(args.manifest, require_t2=False)
     subjects = {row["id"]: row for row in manifest["validation"]}
     inputs = json.loads((args.out / "probe_inputs.json").read_text())
     outputs, traces = {name: [] for name in ("b0", "parent")}, []

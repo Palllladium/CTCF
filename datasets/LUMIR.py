@@ -55,7 +55,7 @@ def load_lumir_volume(path: Path, shape: tuple[int, int, int] = LUMIR_SHAPE) -> 
     return data
 
 
-def labelled_t1_pairs(pairs: list[tuple[str, str]], label_dir: Path) -> list[tuple[str, str]]:
+def lumir_labelled_t1_pairs(pairs: list[tuple[str, str]], label_dir: Path) -> list[tuple[str, str]]:
     """Official pairs whose two images are T1 (modality 0000) and have a label map named like the image."""
     return [
         pair

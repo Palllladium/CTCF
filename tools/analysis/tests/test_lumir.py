@@ -14,9 +14,9 @@ from scipy.ndimage import gaussian_filter, map_coordinates
 from datasets.LUMIR import (
     LUMIRTrainDataset,
     LUMIRValDataset,
-    labelled_t1_pairs,
     load_lumir_volume,
     lumir_disp_name,
+    lumir_labelled_t1_pairs,
     read_lumir_json,
 )
 from experiments.core import data_loaders
@@ -100,7 +100,7 @@ def test_train_pairs_stay_in_the_training_list_and_scale_to_unit_range(tmp_path)
         assert min(abs(float(y[0, 0, 0, 0]) - value) for value in others) < 1e-6
 
 
-def test_validation_keeps_labelled_t1_pairs_as_moving_then_fixed(tmp_path):
+def test_validation_keeps_lumir_labelled_t1_pairs_as_moving_then_fixed(tmp_path):
     pairs = [
         (VAL.format("3455_0000"), VAL.format("3454_0000")),
         (VAL.format("4024_0000"), VAL.format("4033_0001")),
@@ -110,7 +110,7 @@ def test_validation_keeps_labelled_t1_pairs_as_moving_then_fixed(tmp_path):
         _write(tmp_path / VAL.format(name), np.full(SHAPE, 25.5 * (value + 1)))
     for value, name in enumerate(("3454_0000", "3455_0000", "4024_0000", "4033_0001")):
         _write(tmp_path / "simplelabelsVal" / f"LUMIRMRI_{name}.nii.gz", np.full(SHAPE, value + 1))
-    kept = labelled_t1_pairs(pairs, tmp_path / "simplelabelsVal")
+    kept = lumir_labelled_t1_pairs(pairs, tmp_path / "simplelabelsVal")
     assert kept == pairs[:1]
     x, y, x_seg, y_seg = LUMIRValDataset(tmp_path, kept, tmp_path / "simplelabelsVal", SHAPE)[0]
     assert float(x.max()) == pytest.approx(0.1) and float(y.max()) == pytest.approx(0.2)

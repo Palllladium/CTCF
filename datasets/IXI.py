@@ -67,7 +67,7 @@ class IXIBrainInferDataset(Dataset):
         return len(self.paths)
 
 
-def read_paired_manifest(
+def read_ixi_manifest(
     path: str | Path, *, require_review: bool = True, verify_bytes: bool = False, require_t2: bool = True
 ) -> dict:
     """Read the prepared Train/Val cohort and its frozen bidirectional validation pairs."""

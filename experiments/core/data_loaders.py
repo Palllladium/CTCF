@@ -139,7 +139,7 @@ def ixi_loaders(
 
 
 def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
-    manifest = IXI.read_paired_manifest(args.ixi_pairs, require_t2=args.ixi_arm != "b0")
+    manifest = IXI.read_ixi_manifest(args.ixi_pairs, require_t2=args.ixi_arm != "b0")
     args.ixi_manifest_sha256 = manifest["fingerprint"]
     runtime_keys = {"exp", "resume", "init_ckpt", "gpu", "paths", "quiet", "use_tb", "num_workers", "save_ckpt"}
     settings = {key: value for key, value in vars(args).items() if key not in runtime_keys}
@@ -167,7 +167,7 @@ def lumir_loaders(args, val_bs: int = 1) -> tuple[DataLoader, DataLoader]:
     paths = resolve_lumir_paths(args)
     training, _ = LUMIR.read_lumir_json(paths["train_json"])
     _, official_pairs = LUMIR.read_lumir_json(paths["val_json"])
-    pairs = LUMIR.labelled_t1_pairs(official_pairs, paths["label_dir"])
+    pairs = LUMIR.lumir_labelled_t1_pairs(official_pairs, paths["label_dir"])
     if not pairs:
         raise RuntimeError(f"LUMIR: no official validation pair has two T1 label maps in {paths['label_dir']}")
     print(

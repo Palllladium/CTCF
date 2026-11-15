@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from datasets.IXI import IXIPairedDataset, read_paired_manifest
+from datasets.IXI import IXIPairedDataset, read_ixi_manifest
 from experiments.contrasts import RECIPE, sync, tensors, training_args
 from experiments.core.data_loaders import ixi_paired_loaders
 from experiments.core.field_scoring import paired_dice_delta, score
@@ -63,7 +63,7 @@ def prepare(args):
     if (args.source / "head.txt").read_text().strip() != BASE_HEAD:
         raise ValueError("Follow-up requires the reviewed source revision")
     source = json.loads((args.source / "parent/recipe.json").read_text())
-    manifest = read_paired_manifest(args.manifest, verify_bytes=True)
+    manifest = read_ixi_manifest(args.manifest, verify_bytes=True)
     if (
         source["checkpoint_sha256"] != sha256_file(args.checkpoint)
         or source["manifest_sha256"] != manifest["fingerprint"]
@@ -153,7 +153,7 @@ class DiagnosticRunner(Runner):
 
 
 def short_train(args):
-    manifest = read_paired_manifest(args.manifest, require_t2=args.arm != "b0")
+    manifest = read_ixi_manifest(args.manifest, require_t2=args.arm != "b0")
     options = training_args(args, args.arm)
     epochs = getattr(args, "epochs", 3)
     options.max_epoch, options.w_reg, options.seed, options.exp = epochs, args.w_reg, args.seed, args.exp
@@ -274,7 +274,7 @@ def profile(args):
 
 
 def smoothing_controls(args):
-    manifest = read_paired_manifest(args.manifest, require_t2=False)
+    manifest = read_ixi_manifest(args.manifest, require_t2=False)
     subjects = {row["id"]: row for row in manifest["validation"]}
     from utils import SegNorm, pkload
 

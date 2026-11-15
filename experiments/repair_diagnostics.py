@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from datasets.IXI import read_paired_manifest
+from datasets.IXI import read_ixi_manifest
 from experiments.core.field_scoring import score
 from experiments.core.inference_metrics import metric_profile_for
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
@@ -438,7 +438,7 @@ def load_repair_result(directory, source_sha=None):
 
 def repair_saved(args):
     inputs = json.loads((args.out / "inputs.json").read_text())
-    manifest = read_paired_manifest(args.manifest, require_t2=False)
+    manifest = read_ixi_manifest(args.manifest, require_t2=False)
     device = setup_device()
     cases = [case for case in inputs["cases"] if not case["old_pass"] or case["control"]]
     errors = []
@@ -469,7 +469,7 @@ def repair_saved(args):
 
 
 def repair_short(args):
-    manifest = read_paired_manifest(args.manifest, require_t2=False)
+    manifest = read_ixi_manifest(args.manifest, require_t2=False)
     device = setup_device()
     reports = []
     epoch = getattr(args, "epoch", 3)

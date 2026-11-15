@@ -14,7 +14,7 @@ import torch
 from scipy import ndimage
 from torch import nn
 
-from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS, IXIPairedDataset, IXIPairSampler, read_paired_manifest
+from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS, IXIPairedDataset, IXIPairSampler, read_ixi_manifest
 from experiments.contrasts import RECIPE, check as readiness_check, evaluate, training_args
 from experiments.core import field_scoring
 from experiments.core.data_loaders import ixi_paired_loaders
@@ -157,7 +157,7 @@ def manifest_file(tmp_path):
 
 
 def test_paired_data_separates_input_observation_and_remaps_validation_labels(manifest_file):
-    manifest = read_paired_manifest(manifest_file)
+    manifest = read_ixi_manifest(manifest_file)
     b0, b1, b2 = [IXIPairedDataset(manifest, arm) for arm in ("b0", "b1", "b2")]
     x0, y0, _, _ = b0[(0, 1)]
     x1, y1, tx, _ = b1[(0, 1)]
@@ -172,7 +172,7 @@ def test_paired_data_separates_input_observation_and_remaps_validation_labels(ma
     assert labels.unique().tolist() == [21]  # FreeSurfer 41 -> the established dense protocol index.
     for row in manifest["validation"]:
         Path(row["t2"]).unlink()
-    t1_only = read_paired_manifest(manifest_file, require_t2=False)
+    t1_only = read_ixi_manifest(manifest_file, require_t2=False)
     for arm in ("b0", "b1"):
         assert IXIPairedDataset(t1_only, arm, validation=True)[0][0].shape[0] == 2
     with pytest.raises(FileNotFoundError):
@@ -196,14 +196,14 @@ def test_manifest_rejects_unreviewed_or_invalid_split_and_pairs(manifest_file, d
         manifest["validation_pairs"][1] = manifest["validation_pairs"][0]
     manifest_file.write_text(json.dumps(manifest))
     with pytest.raises(ValueError):
-        read_paired_manifest(manifest_file)
+        read_ixi_manifest(manifest_file)
 
 
 def test_readiness_rechecks_the_prepared_image_bytes(manifest_file):
-    manifest = read_paired_manifest(manifest_file, verify_bytes=True)
+    manifest = read_ixi_manifest(manifest_file, verify_bytes=True)
     np.save(manifest["training"][0]["t2"], np.zeros(manifest["shape"], np.float32))
     with pytest.raises(ValueError, match="bytes changed"):
-        read_paired_manifest(manifest_file, verify_bytes=True)
+        read_ixi_manifest(manifest_file, verify_bytes=True)
 
 
 def test_paired_loader_resume_binding_and_common_pair_stream(manifest_file):
@@ -287,7 +287,7 @@ def test_finalisation_requires_review_and_preserves_the_frozen_cohort(manifest_f
     args.reviewed = tmp_path / "reviewed.txt"
     args.reviewed.write_text("\n".join(reviewed))
     finalise(args, rows)
-    prepared = read_paired_manifest(out / "manifest.json", verify_bytes=True)
+    prepared = read_ixi_manifest(out / "manifest.json", verify_bytes=True)
     assert prepared["validation_pairs"] == [["Val_0", "Val_1"], ["Val_1", "Val_0"]]
     assert prepared["training_exclusions"] == list(PAIRED_TRAIN_EXCLUSIONS)
     assert len(cohort(mapping)) == 6 and len(cohort(mapping, include_excluded=True)) == 8

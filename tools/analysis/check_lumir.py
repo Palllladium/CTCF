@@ -12,7 +12,7 @@ import scipy
 import torch
 import torch.distributed as dist
 
-from datasets.LUMIR import LUMIR_SHAPE, labelled_t1_pairs, load_lumir_volume, lumir_name_parts, read_lumir_json
+from datasets.LUMIR import LUMIR_SHAPE, load_lumir_volume, lumir_labelled_t1_pairs, lumir_name_parts, read_lumir_json
 from experiments.core.path_profiles import resolve_lumir_paths
 from experiments.core.precision import configure_precision
 from models.CTCF.configs import CONFIGS
@@ -26,7 +26,7 @@ def check_data(paths, pairs_source, expected_coarse_pairs=18) -> dict:
         raise ValueError("2024/2025 training lists differ; verify the intended official training protocol")
     if {lumir_name_parts(p)[0] for p in training} & {lumir_name_parts(p)[0] for pair in validation25 for p in pair}:
         raise ValueError("LUMIR25 validation subjects overlap the training list")
-    coarse = labelled_t1_pairs(validation25, paths["label_dir"])
+    coarse = lumir_labelled_t1_pairs(validation25, paths["label_dir"])
     if len(coarse) != expected_coarse_pairs:
         raise ValueError(f"expected {expected_coarse_pairs} public coarse-labelled T1 pairs, found {len(coarse)}")
     images = {paths["train_root"] / p for p in training}

@@ -132,7 +132,7 @@ def test_smoothing_keeps_search_status_in_trace_and_writes_real_numeric_tables(t
         json.dumps({"fields": {arm: dict.fromkeys(cases, "sha") for arm in ("b0", "b1", "parent")}})
     )
     manifest = {"validation": [{"id": f"{a}{i}", "t1": "unused"} for i in range(29) for a in ("a", "b")]}
-    monkeypatch.setattr(contrast_probes, "read_paired_manifest", lambda *_, **__: manifest)
+    monkeypatch.setattr(contrast_probes, "read_ixi_manifest", lambda *_, **__: manifest)
     monkeypatch.setattr(contrast_probes, "sha256_file", lambda *_: "sha")
     monkeypatch.setattr(contrast_probes, "load_flow_npz", lambda *_: torch.zeros(1, 3, 3, 3, 3))
     monkeypatch.setattr(

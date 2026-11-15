@@ -13,9 +13,9 @@ import torch
 from datasets.LUMIR import (
     LUMIR_INTENSITY_MAX,
     LUMIR_SHAPE,
-    labelled_t1_pairs,
     load_lumir_volume,
     lumir_disp_name,
+    lumir_labelled_t1_pairs,
     read_lumir_json,
 )
 from experiments.core.cli_common import add_common_args
@@ -143,7 +143,9 @@ def main() -> None:
     paths = resolve_lumir_paths(args, required=(root_key, json_key))
     _, pairs = read_lumir_json(paths[json_key])
     labelled = (
-        set(labelled_t1_pairs(pairs, paths["label_dir"])) if args.certified and paths["label_dir"].exists() else ()
+        set(lumir_labelled_t1_pairs(pairs, paths["label_dir"]))
+        if args.certified and paths["label_dir"].exists()
+        else ()
     )
     model = get_model_adapter("ctcf").build(
         time_steps=args.time_steps,

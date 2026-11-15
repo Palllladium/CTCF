@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 
-from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS, IXIPairedDataset, IXIPairSampler, read_paired_manifest
+from datasets.IXI import PAIRED_TRAIN_EXCLUSIONS, IXIPairedDataset, IXIPairSampler, read_ixi_manifest
 from experiments.core.field_scoring import paired_dice_delta, score_saved_field
 from experiments.core.helpers import build_val_dice_fn
 from experiments.core.inference_metrics import metric_profile_for, write_results
@@ -353,7 +353,7 @@ def main():
     if args.manifest is None or args.checkpoint is None:
         parser.error("check/evaluate need --manifest and --checkpoint")
     configure_precision(args.precision, args.device)
-    manifest = read_paired_manifest(
+    manifest = read_ixi_manifest(
         args.manifest, verify_bytes=args.stage == "check", require_t2=args.stage == "check" or args.arm == "b2"
     )
     if args.stage == "train":
