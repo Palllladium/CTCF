@@ -6,6 +6,8 @@ import argparse
 import csv
 import json
 import math
+import os
+import shutil
 import time
 from pathlib import Path
 
@@ -26,7 +28,7 @@ from models.Matching import Matching, base_flow, overlap_support, resize_flow, s
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from utils import Grad3d, pkload
 from utils.dice import dice_per_label
-from utils.field_io import load_flow_npz
+from utils.field_io import load_flow_npz, save_flow_npz_atomic
 from utils.losses import local_ncc_map
 
 
@@ -159,6 +161,8 @@ def certified_scores(flow, case, seconds, xs, ys, directory, profile, dataset):
 def evaluate(args):
     if args.controls and args.metric_checkpoint is None:
         raise ValueError("Matching controls require a refinement checkpoint")
+    if getattr(args, "raw_from", None) is not None and args.controls:
+        raise ValueError("Repair-only evaluation does not rerun optional inference controls")
     items, profile, data_hash, expected_count = cases(args)
     binding = {
         "base_sha256": sha256_file(args.base_checkpoint),
@@ -172,6 +176,8 @@ def evaluate(args):
         "endpoint_sha256": sha256_file(args.endpoint) if getattr(args, "endpoint", None) else None,
         "repair_policy": "standard80_then_accepted_extended_IXI_recovery" if args.certify else None,
         "descriptor_stride_override": getattr(args, "descriptor_stride", None),
+        "solver_steps_override": getattr(args, "solver_steps", None),
+        "save_raw": bool(getattr(args, "save_raw", False)),
     }
     if getattr(args, "endpoint", None):
         endpoint = json.loads(args.endpoint.read_text())
@@ -183,12 +189,38 @@ def evaluate(args):
     if recipe.exists() and json.loads(recipe.read_text()) != binding:
         raise ValueError("Evaluation inputs or policy changed; use another output directory")
     atomic_write_json(recipe, binding)
-    encoder, metadata = load_encoder(args.metric_checkpoint, args.device) if args.metric_checkpoint else (None, None)
+    raw_from = getattr(args, "raw_from", None)
+    cache_from = getattr(args, "cache_from", None)
+    for source in (raw_from, cache_from):
+        if source is not None:
+            previous = json.loads((source / "recipe.json").read_text())
+            keys = (
+                "base_sha256",
+                "metric_sha256",
+                "manifest_sha256",
+                "dataset",
+                "limit",
+                "expected_cases",
+                "endpoint_sha256",
+                "descriptor_stride_override",
+                "solver_steps_override",
+            )
+            if any(previous.get(key) != binding.get(key) for key in keys):
+                raise ValueError(f"Cached fields belong to another endpoint or dataset: {source}")
+            if source.resolve() == args.out.resolve():
+                raise ValueError("Source cache must be a separate output directory")
+    encoder, metadata = (
+        load_encoder(args.metric_checkpoint, args.device)
+        if args.metric_checkpoint and raw_from is None
+        else (None, None)
+    )
     if metadata and (metadata["kind"] != "student" or metadata["base_sha256"] != binding["base_sha256"]):
         raise ValueError("Refinement checkpoint belongs to another base model")
     if metadata and metadata["step"] != metadata["recipe"]["updates"]:
         raise ValueError("Refinement checkpoint has not completed its fixed training budget")
     config = refine_config(metadata) if metadata else None
+    if config and getattr(args, "solver_steps", None) is not None:
+        config["steps"] = args.solver_steps
     if encoder is not None:
         encoder.eval().requires_grad_(False)
         if getattr(args, "descriptor_stride", None) is not None:
@@ -201,6 +233,8 @@ def evaluate(args):
             break
         directory = args.out / "pairs" / case
         cache = directory / "evaluation.json"
+        if cache_from is not None and not cache.exists():
+            adopt_case(cache_from / "pairs" / case, directory, certified=bool(args.certify))
         if cache.exists():
             saved = json.loads(cache.read_text())
             if not saved["failed"]:
@@ -216,56 +250,74 @@ def evaluate(args):
                     for mode, row in stored.items():
                         if any(saved["rows"][mode].get(key) != value for key, value in row.items()):
                             raise ValueError(f"Cached metrics differ from saved field scores: {case}/{mode}")
+                if binding["save_raw"] and saved.get("raw_sha256") != sha256_file(directory / "FF.npz"):
+                    raise ValueError(f"Cached raw field changed: {case}")
                 for mode, row in saved["rows"].items():
                     rows[mode].append(row)
                 trace.extend(saved["trace"])
                 diagnostics.append(saved["diagnostics"])
                 continue
         x, y, xs, ys = [v.unsqueeze(0).to(args.device) for v in (x, y, xs, ys)]
-        if base is None:
+        imported = (raw_from / "pairs" / case) if raw_from is not None else None
+        if imported is not None:
+            saved = json.loads((imported / "evaluation.json").read_text())
+            raw_path = imported / "FF.npz"
+            if saved.get("raw_sha256") != sha256_file(raw_path) or saved["rows"]["FF"]["case_id"] != case:
+                raise ValueError(f"Raw field cache is missing or modified: {case}")
+            flow = load_flow_npz(raw_path).to(args.device)
+            case_trace, diagnostic = saved["trace"], dict(saved["diagnostics"])
+            base_seconds, extra_seconds = diagnostic["base_seconds"], diagnostic["extra_seconds"]
+            case_rows = {"FF": saved["rows"]["FF"]}
+        elif base is None:
             base = load_base(args.base_checkpoint, x.shape[2:], args.device)
             if encoder is not None:
                 model = Matching(encoder, config, base=base).eval()
-        started = sync(args.device)
-        parent = model.initial_field(x, y) if model is not None else base_flow(base, x, y)
-        if not bool(torch.isfinite(parent).all()):
-            raise FloatingPointError(f"Nonfinite base field: {case}")
-        base_seconds = sync(args.device) - started
-        flow, detail, extra_seconds = parent, {}, 0.0
-        case_trace = []
-        if encoder is not None:
+        if imported is None:
             started = sync(args.device)
-            flow, detail = model(x, y, parent, return_diagnostics=True)
-            if not bool(torch.isfinite(flow).all()):
-                raise FloatingPointError(f"Nonfinite refined field: {case}")
-            extra_seconds = sync(args.device) - started
-            for step in (0, 1):
-                probe = parent if step == 0 else model(x, y, parent, steps=1)
-                dice = dice_per_label(warp_labels(xs, probe, "canonical").long(), ys.long(), labels=profile.labels)
-                case_trace.append({"case_id": case, "tto_step": step, "dice_mean": float(np.mean(dice))})
-        case_rows, failed = {}, False
-        if args.certify:
-            scored, report = certified_scores(
-                flow,
-                case,
-                base_seconds + extra_seconds,
-                xs,
-                ys,
-                directory,
-                profile,
-                args.dataset,
+            parent = model.initial_field(x, y) if model is not None else base_flow(base, x, y)
+            if not bool(torch.isfinite(parent).all()):
+                raise FloatingPointError(f"Nonfinite base field: {case}")
+            base_seconds = sync(args.device) - started
+            flow, detail, extra_seconds, case_trace = parent, {}, 0.0, []
+            if encoder is not None:
+                started = sync(args.device)
+                flow, detail = model(x, y, parent, return_diagnostics=True)
+                if not bool(torch.isfinite(flow).all()):
+                    raise FloatingPointError(f"Nonfinite refined field: {case}")
+                extra_seconds = sync(args.device) - started
+                for step in (0, 1):
+                    probe = parent if step == 0 else model(x, y, parent, steps=1)
+                    dice = dice_per_label(warp_labels(xs, probe, "canonical").long(), ys.long(), labels=profile.labels)
+                    case_trace.append({"case_id": case, "tto_step": step, "dice_mean": float(np.mean(dice))})
+            case_rows = {"FF": score(flow, case, base_seconds + extra_seconds, xs, ys, 0, "canonical", profile=profile)}
+            case_trace.append(
+                {
+                    "case_id": case,
+                    "tto_step": config["steps"] if config else 0,
+                    "dice_mean": case_rows["FF"]["dice_mean"],
+                }
             )
-            for mode, row in scored.items():
-                case_rows[mode] = row
-            if report["errors"] or not report["global_homeomorphism"]:
-                failures.append(case)
+            diagnostic = {"case_id": case, "base_seconds": base_seconds, "extra_seconds": extra_seconds, **detail}
+        failed = False
+        directory.mkdir(parents=True, exist_ok=True)
+        if binding["save_raw"] or args.certify:
+            save_flow_npz_atomic(directory / "FF.npz", flow)
+        snapshot = {"rows": case_rows, "trace": case_trace, "diagnostics": diagnostic, "failed": True}
+        if (directory / "FF.npz").exists():
+            snapshot["raw_sha256"] = sha256_file(directory / "FF.npz")
+        atomic_write_json(cache, snapshot)
+        if args.certify:
+            try:
+                scored, report = certified_scores(
+                    flow, case, base_seconds + extra_seconds, xs, ys, directory, profile, args.dataset
+                )
+                case_rows.update(scored)
+                failed = bool(report["errors"] or not report["global_homeomorphism"])
+            except Exception as error:  # Isolate repair failures; retain FF and continue the remaining frozen cases.
+                diagnostic["repair_error"] = repr(error)
                 failed = True
-        else:
-            case_rows["FF"] = score(flow, case, base_seconds + extra_seconds, xs, ys, 0, "canonical", profile=profile)
-        case_trace.append(
-            {"case_id": case, "tto_step": config["steps"] if config else 0, "dice_mean": case_rows["FF"]["dice_mean"]}
-        )
-        diagnostic = {"case_id": case, "base_seconds": base_seconds, "extra_seconds": extra_seconds, **detail}
+            if failed:
+                failures.append(case)
         # Keep the primary readout if an optional control fails or execution is interrupted.
         atomic_write_json(cache, {"rows": case_rows, "trace": case_trace, "diagnostics": diagnostic, "failed": True})
         if encoder is not None and args.controls:
@@ -291,15 +343,9 @@ def evaluate(args):
             except (RuntimeError, ValueError, OSError, FloatingPointError) as error:
                 diagnostic["control_error"] = repr(error)
                 control_failures.append(case)
-        atomic_write_json(
-            cache,
-            {
-                "rows": case_rows,
-                "trace": case_trace,
-                "diagnostics": diagnostic,
-                "failed": failed or case in control_failures,
-            },
-        )
+        if (directory / "FF.npz").exists():
+            snapshot["raw_sha256"] = sha256_file(directory / "FF.npz")
+        atomic_write_json(cache, snapshot | {"failed": failed or case in control_failures})
         for mode, row in case_rows.items():
             rows[mode].append(row)
         trace.extend(case_trace)
@@ -351,6 +397,55 @@ def evaluate(args):
         raise RuntimeError("Raw scores saved; some repaired fields lack a global certificate")
     if control_failures:
         raise RuntimeError("Primary scores saved; some optional controls failed")
+
+
+def adopt_case(source, destination, *, certified):
+    """Reuse saved field bytes, never modifying the source attempt's JSON or arrays."""
+    if not (source / "FF.npz").is_file() or not (source / "report.json").is_file():
+        return
+    report = json.loads((source / "report.json").read_text())
+    if report.get("field_sha256", {}).get("FF") != sha256_file(source / "FF.npz"):
+        raise ValueError(f"Source FF bytes do not match their report: {source}")
+    saved = json.loads((source / "evaluation.json").read_text()) if (source / "evaluation.json").exists() else {}
+    rows = json.loads((source / "metrics.json").read_text())
+    if certified:
+        if not report.get("global_homeomorphism") or report.get("errors"):
+            return
+        load_saved_scores(source)
+    modes = ("FF", "REP") if certified else ("FF",)
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in source.iterdir():
+        if path.name in ("metrics.json", "report.json"):
+            shutil.copy2(path, destination / path.name)
+        elif path.name in {f"{mode}.npz" for mode in modes}:
+            target = destination / path.name
+            if target.exists():
+                if sha256_file(path) != sha256_file(target):
+                    raise ValueError(f"Interrupted cache adoption left different field bytes: {target}")
+                continue
+            try:
+                os.link(path, target)
+            except OSError:
+                temporary = target.with_name(f".{target.name}.tmp")
+                shutil.copy2(path, temporary)
+                temporary.replace(target)
+    atomic_write_json(
+        destination / "evaluation.json",
+        {
+            "rows": {mode: rows[mode] for mode in modes},
+            "trace": saved.get("trace", []),
+            "diagnostics": saved.get(
+                "diagnostics",
+                {
+                    "base_seconds": rows["FF"]["time_sec"],
+                    "extra_seconds": 0,
+                    "timing_scope": "historical total; component times unavailable",
+                },
+            ),
+            "failed": False,
+            "raw_sha256": sha256_file(destination / "FF.npz"),
+        },
+    )
 
 
 def comparison(first, second, dataset, *, certified=False):
@@ -489,6 +584,10 @@ def main():
     parser.add_argument("--base_checkpoint", type=Path)
     parser.add_argument("--metric_checkpoint", type=Path)
     parser.add_argument("--descriptor_stride", type=int, choices=(1, 2))
+    parser.add_argument("--solver_steps", type=int, choices=(0, 1, 3))
+    parser.add_argument("--save_raw", action="store_true")
+    parser.add_argument("--raw_from", type=Path)
+    parser.add_argument("--cache_from", type=Path)
     parser.add_argument("--endpoint", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0)

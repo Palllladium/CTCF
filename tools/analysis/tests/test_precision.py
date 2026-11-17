@@ -85,3 +85,18 @@ def test_legacy_checkpoint_retains_fp16_policy(tmp_path):
     torch.save({"state_dict": model.state_dict()}, path)
     report = load_checkpoint_state(model, str(path), True)
     assert report["precision"] == "fp16" and not report["precision_recorded"]
+
+
+def test_ncc_mode_cannot_silently_change_on_resume(monkeypatch):
+    model = torch.nn.Linear(2, 2)
+    saved = {"epoch": 0, "precision": "bf16"}
+    monkeypatch.setattr(helpers, "load_checkpoint_if_exists", lambda *a, **k: saved)
+    args = SimpleNamespace(resume="last.pth", precision="bf16", ncc_mode="stable")
+    runner = SimpleNamespace(model=model, optimizer=None)
+    with pytest.raises(ValueError, match="resume NCC mode"):
+        helpers.resume_from_ckpt(args, runner, Mock(), torch.device("cpu"), -1)
+    args.ncc_mode = "legacy"
+    assert helpers.resume_from_ckpt(args, runner, Mock(), torch.device("cpu"), -1)[0] == 1
+    saved["ncc_mode"] = "stable"
+    args.ncc_mode = "stable"
+    assert helpers.resume_from_ckpt(args, runner, Mock(), torch.device("cpu"), -1)[0] == 1

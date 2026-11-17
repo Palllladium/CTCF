@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import math
 import time
 from fractions import Fraction
 from pathlib import Path
@@ -314,6 +315,15 @@ def repair_one(raw, old, case, labels, directory):
     selected = None
     current = old.clone() if old is not None else project(identity_collar(raw, 4), tri_iters=80)[0]
     applied = case.get("old_tri_iters", 80)
+    if (
+        isinstance(applied, bool)
+        or not isinstance(applied, (int, float))
+        or not math.isfinite(applied)
+        or applied < 0
+        or int(applied) != applied
+    ):
+        raise ValueError("The saved trilinear iteration count must be a nonnegative integer")
+    applied = int(applied)
     for limit in (160, 320, 640):
         current, detail = trilinear_project(
             current, eps=0.0011, damp=0.6, max_iters=limit - applied, fixed_mask=boundary_vertex_mask(current)

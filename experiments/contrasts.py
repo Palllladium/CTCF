@@ -221,18 +221,14 @@ def check(args, manifest):
         "pair": pair_report,
         "profiles": profiles,
         "estimated_gpu_hours": estimate,
-        "budget_gpu_hours": args.budget_hours,
         "budget_components_hours": {
             "training": training_hours,
             "epoch_validation": validation_hours,
             "final_fields": final_hours,
             "consensus_reserve": args.consensus_reserve_hours,
         },
-        "budget_note": "Estimate from short full-size probes, not a measured complete run",
-        "passed": expansion["passed"]
-        and dose["passed"]
-        and not pair_report["errors"]
-        and estimate <= args.budget_hours,
+        "budget_note": "Descriptive estimate from short full-size probes, not a GPU-hour limit",
+        "passed": expansion["passed"] and dose["passed"] and not pair_report["errors"],
     }
     atomic_write_json(args.out / "report.json", report)
     if not report["passed"]:
@@ -343,7 +339,6 @@ def main():
     parser.add_argument("--precision", choices=("bf16", "fp32", "tf32"), default="bf16")
     parser.add_argument("--device", type=torch.device, default=torch.device("cuda:0"))
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--budget_hours", type=float, default=72)
     parser.add_argument("--consensus_reserve_hours", type=float, default=8)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)

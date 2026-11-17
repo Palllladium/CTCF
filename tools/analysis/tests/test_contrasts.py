@@ -507,8 +507,9 @@ def test_rigid_registration_starts_from_headers_and_reports_center_motion(monkey
     assert motion["rigid_shift_mm"] == pytest.approx(5) and motion["rigid_angle_deg"] == pytest.approx(30)
 
 
+@pytest.mark.parametrize("ncc_mode", ("legacy", "stable"))
 @pytest.mark.parametrize("arm", ("b0", "b1", "b2"))
-def test_native_trainer_executes_the_paired_step_with_a_fresh_optimizer(arm, monkeypatch):
+def test_native_trainer_executes_the_paired_step_with_a_fresh_optimizer(arm, ncc_mode, monkeypatch):
     monkeypatch.setattr(cascade, "_build_level2", lambda config, _: TinyL2(config))
     config = copy.deepcopy(CONFIGS["CTCF-CascadeA-Mamba"])
     config.img_size, config.level1_base_ch, config.level3_base_ch = (32, 32, 32), 2, 2
@@ -533,6 +534,8 @@ def test_native_trainer_executes_the_paired_step_with_a_fresh_optimizer(arm, mon
             "4",
             "--precision",
             "fp32",
+            "--ncc_mode",
+            ncc_mode,
         ]
     )
     runner = Runner(args, torch.device("cpu"))
@@ -543,6 +546,47 @@ def test_native_trainer_executes_the_paired_step_with_a_fresh_optimizer(arm, mon
     loss.backward()
     runner.optimizer.step()
     assert runner.optimizer.state and all(torch.isfinite(p).all() for p in runner.model.parameters())
+
+
+def test_region_averaged_training_honors_the_stable_ncc_mode(monkeypatch):
+    from utils import losses
+
+    monkeypatch.setattr(cascade, "_build_level2", lambda config, _: TinyL2(config))
+    config = copy.deepcopy(CONFIGS["CTCF-CascadeA-Mamba"])
+    config.img_size, config.level1_base_ch, config.level3_base_ch = (32, 32, 32), 2, 2
+    monkeypatch.setitem(CONFIGS, "CTCF-CascadeA-Mamba", config)
+    args = parse_args(
+        [
+            "--config",
+            "CTCF-CascadeA-Mamba",
+            "--l3_svf",
+            "0",
+            "--finetune",
+            "1",
+            "--precision",
+            "fp32",
+            "--ncc_mode",
+            "stable",
+            "--ncc_regions",
+            "labels",
+            "--w_reg",
+            "1",
+        ]
+    )
+    runner = Runner(args, torch.device("cpu"))
+    actual, calls = losses.stable_ncc_map, []
+
+    def observe(*values, **options):
+        calls.append(True)
+        return actual(*values, **options)
+
+    monkeypatch.setattr(losses, "stable_ncc_map", observe)
+    x, y = [torch.rand(1, 1, 32, 32, 32) for _ in range(2)]
+    labels = torch.ones_like(x, dtype=torch.long)
+    loss, logs = runner.train_step([x, y, labels, labels], 0)
+    assert len(calls) == 2 and -1 <= logs["ncc"] <= 0
+    loss.backward()
+    assert torch.isfinite(loss)
 
 
 def test_preparation_checks_all_train_laterality_and_refreshes_old_cache(tmp_path, monkeypatch):

@@ -94,7 +94,6 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", type=torch.device, default=torch.device("cuda:0"))
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--budget_hours", type=float, default=8)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     configure_precision("bf16", args.device)
@@ -129,7 +128,6 @@ def main():
         control = smoothing_control(parent, training, banks, args.device)
         atomic_write_json(control_file, control)
     rows, failures, elapsed_cases, individuals = {}, {}, [], {}
-    budget_held = False
     selected = pairs[: args.limit] if args.limit else pairs
     for index, (moving, fixed) in enumerate(selected):
         started = time.perf_counter()
@@ -199,9 +197,6 @@ def main():
             },
         )
         print(f"[CONSENSUS CASE] {index + 1}/{len(selected)} {case_id}", flush=True)
-        if index == 1 and control["wall_seconds"] + np.mean(elapsed_cases) * len(selected) > args.budget_hours * 3600:
-            budget_held = True
-            break
     for (arm, mode), values in rows.items():
         destination = args.out / arm / mode
         destination.mkdir(parents=True, exist_ok=True)
@@ -241,17 +236,12 @@ def main():
         {
             "directions": len(elapsed_cases),
             "failures": failures,
-            "budget_held": budget_held,
             "certification_policy": {arm: list(certificate_modes(arm)) for arm in PRIMARY},
             "diagnostic_variants": "K1/K4 and Dev bank: repaired Dice only, no certified claim",
             "timing": "per-direction wall time includes every arm, repair, disk and CPU certification",
             "interpretation": "K1 may benefit from composition; Dev-bank is transductive, not the primary result",
         },
     )
-    if budget_held:
-        raise RuntimeError(
-            "Consensus profile exceeds its reserve; saved partial results are not a negative hypothesis verdict"
-        )
     if failures:
         raise RuntimeError("Raw consensus scores saved; some final fields were not globally certified")
 

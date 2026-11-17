@@ -81,8 +81,9 @@ class TrainContext:
         ncc_win: tuple[int, int, int] = (9, 9, 9),
         reg_penalty: str = "l2",
         interp: str = "bilinear",
+        ncc_mode: str = "legacy",
     ):
-        self.ncc: Any = NCCVxm(win=ncc_win)
+        self.ncc: Any = NCCVxm(win=ncc_win, mode=ncc_mode)
         self.reg: Any = Grad3d(penalty=reg_penalty)
         self.reg_model: Any = RegisterModel(img_size=vol_size, mode=interp).to(device)
 
@@ -408,6 +409,7 @@ def run_train(args, runner, build_loaders=loaders_baseline) -> None:
         }
         if hasattr(runner.model, "input_representation"):
             state["input_representation"] = runner.model.input_representation
+        state["ncc_mode"] = getattr(args, "ncc_mode", "legacy")
         if getattr(args, "ixi_pairs", ""):
             state["arguments"] = vars(args)
         if save_ckpt_enabled:

@@ -55,7 +55,7 @@ from utils.anatomy import (
 )
 from utils.feature_similarity import LearnedSimilarity, load_feature_net
 from utils.field import differentiable_local_clip
-from utils.losses import local_ncc_map, region_mean
+from utils.losses import region_mean
 
 # One-hot channel count covering OASIS (labels 0-35) and IXI (0-36); soft_dice_loss drops
 # absent/background channels, so an over-wide count is harmless.
@@ -139,7 +139,9 @@ class Runner:
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, amsgrad=True)
         self.img_size = tuple(self.model.img_size_full)
-        self.ctx = TrainContext(device, vol_size=self.img_size, ncc_win=(9, 9, 9))
+        self.ctx = TrainContext(
+            device, vol_size=self.img_size, ncc_win=(9, 9, 9), ncc_mode=getattr(args, "ncc_mode", "legacy")
+        )
         self.reg_nearest = RegisterModel(self.img_size, mode="nearest").to(device) if self.is_synth else None
         # Differentiable (bilinear) warp of one-hot labels for the weakly-supervised Dice loss.
         if args.certified_steps > 0:
@@ -437,9 +439,8 @@ class Runner:
             elif args.ncc_regions == "labels":
                 # The control's exact per-voxel map (same operator, argument order, window and eps): only the
                 # averaging changes, from every voxel to every labelled structure of the fixed image.
-                win, eps = ctx.ncc.win, ctx.ncc.eps
-                per_structure_xy = region_mean(local_ncc_map(def_xy.float(), y.float(), win, eps), y_seg)
-                per_structure_yx = region_mean(local_ncc_map(def_yx.float(), x.float(), win, eps), x_seg)
+                per_structure_xy = region_mean(ctx.ncc.local_map(def_xy.float(), y.float()), y_seg)
+                per_structure_yx = region_mean(ctx.ncc.local_map(def_yx.float(), x.float()), x_seg)
                 L_ncc = -0.5 * (per_structure_xy + per_structure_yx) * args.w_ncc
             else:
                 L_ncc = 0.5 * (ctx.ncc(def_xy.float(), y.float()) + ctx.ncc(def_yx.float(), x.float())) * args.w_ncc

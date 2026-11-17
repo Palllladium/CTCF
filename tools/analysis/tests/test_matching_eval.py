@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import pickle
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -337,3 +338,161 @@ def test_report_cli_does_not_initialize_cuda(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("sys.argv", ["eval_matching", "report", "--out", str(tmp_path)])
     evaluation.main()
+
+
+def test_repair_exception_keeps_every_raw_case_and_repair_only_never_loads_models(toy_evaluation, monkeypatch):
+    args, calls = toy_evaluation
+    args.controls, args.save_raw = 0, True
+    evaluation.evaluate(args)
+    source = args.out
+    raw_hash = sha256_file(source / "pairs/a__b/FF.npz")
+    args.out = source.parent / "repair"
+    args.out.mkdir()
+    args.raw_from, args.certify = source, 1
+    monkeypatch.setattr(evaluation, "load_base", lambda *_args: pytest.fail("Repair loaded the base"))
+    monkeypatch.setattr(evaluation, "load_encoder", lambda *_args: pytest.fail("Repair loaded descriptors"))
+
+    def broken_repair(*_args):
+        raise TypeError("a producer returned a float counter")
+
+    monkeypatch.setattr(evaluation, "certified_scores", broken_repair)
+    with pytest.raises(RuntimeError, match="Raw scores saved"):
+        evaluation.evaluate(args)
+    assert len(calls) == 2
+    saved = json.loads((args.out / "report.json").read_text())
+    assert saved["cases"] == 2 and saved["failures"] == ["a__b", "b__a"]
+    with (args.out / "FF/per_case.csv").open(newline="") as stream:
+        assert len(list(csv.DictReader(stream))) == 2
+    assert sha256_file(source / "pairs/a__b/FF.npz") == raw_hash
+
+
+def test_source_cache_is_read_only_and_cannot_mix_endpoints(toy_evaluation, monkeypatch):
+    args, calls = toy_evaluation
+    args.controls, args.save_raw = 0, True
+    evaluation.evaluate(args)
+    source = args.out
+    for folder in (source / "pairs").iterdir():
+        saved = json.loads((folder / "evaluation.json").read_text())
+        (folder / "metrics.json").write_text(json.dumps(saved["rows"]))
+        (folder / "report.json").write_text(
+            json.dumps({"field_sha256": {"FF": sha256_file(folder / "FF.npz")}, "global_homeomorphism": False})
+        )
+    original = (source / "pairs/a__b/evaluation.json").read_bytes()
+    args.cache_from, args.out = source, source.parent / "new_attempt"
+    args.out.mkdir()
+    monkeypatch.setattr(evaluation, "load_base", lambda *_args: pytest.fail("Cached FF loaded the model"))
+    evaluation.evaluate(args)
+    assert len(calls) == 2
+    assert (source / "pairs/a__b/evaluation.json").read_bytes() == original
+    args.base_checkpoint.write_bytes(b"another endpoint")
+    args.out = source.parent / "wrong_attempt"
+    args.out.mkdir()
+    with pytest.raises(ValueError, match="another endpoint or dataset"):
+        evaluation.evaluate(args)
+
+
+def test_raw_bytes_are_checked_before_repair_only_loading(toy_evaluation):
+    args, _calls = toy_evaluation
+    args.controls, args.save_raw = 0, True
+    evaluation.evaluate(args)
+    source = args.out
+    save_flow_npz_atomic(source / "pairs/a__b/FF.npz", torch.ones(1, 3, 8, 8, 8))
+    args.raw_from, args.out, args.certify = source, source.parent / "recheck", 1
+    args.out.mkdir()
+    with pytest.raises(ValueError, match="missing or modified"):
+        evaluation.evaluate(args)
+
+
+def test_certified_case_adoption_reuses_verified_fields_and_is_itself_resumable(toy_evaluation, monkeypatch):
+    args, calls = toy_evaluation
+    args.certify, args.controls, args.save_raw = 1, 0, True
+    get_cases = evaluation.cases
+
+    def samples(options):
+        items, _profile, signature, count = get_cases(options)
+        profile = metric_profile_for("IXI")
+        return items, MetricProfile((1,), profile.jac_metrics, profile.jac_log), signature, count
+
+    monkeypatch.setattr(evaluation, "cases", samples)
+    evaluation.evaluate(args)
+    original = args.out
+    args.out, args.cache_from = original.parent / "certified_copy", original
+    args.out.mkdir()
+    monkeypatch.setattr(evaluation, "load_base", lambda *_args: pytest.fail("Adopted fields triggered inference"))
+    evaluation.evaluate(args)
+    evaluation.evaluate(args)
+    assert calls == ["forward", "forward"]
+    assert json.loads((args.out / "report.json").read_text())["complete_certified_endpoint"]
+
+
+@pytest.mark.parametrize("certified", (False, True))
+def test_interrupted_adoption_does_not_publish_the_source_completion_marker(tmp_path, monkeypatch, certified):
+    source, destination = tmp_path / "source", tmp_path / "adopted"
+    source.mkdir()
+    rows = {mode: {"case_id": "a__b", "time_sec": 0.1, "dice_mean": 0.8} for mode in ("FF", "REP")}
+    (source / "evaluation.json").write_text(json.dumps({"rows": rows, "trace": [], "diagnostics": {}, "failed": False}))
+    (source / "metrics.json").write_text(json.dumps(rows))
+    for mode in rows:
+        save_flow_npz_atomic(source / f"{mode}.npz", torch.zeros(1, 3, 5, 6, 7))
+    (source / "report.json").write_text(
+        json.dumps(
+            {
+                "field_sha256": {mode: sha256_file(source / f"{mode}.npz") for mode in rows},
+                "global_homeomorphism": True,
+                "errors": [],
+            }
+        )
+    )
+    source_cache = (source / "evaluation.json").read_bytes()
+    original_iterdir, original_copy = Path.iterdir, evaluation.shutil.copy2
+    order = ("evaluation.json", "metrics.json", "report.json", "FF.npz", "REP.npz")
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda path: iter(source / name for name in order) if path == source else original_iterdir(path),
+    )
+
+    def interrupted_copy(src, target, *args, **kwargs):
+        if src == source / "metrics.json":
+            raise OSError("simulated copy interruption")
+        return original_copy(src, target, *args, **kwargs)
+
+    monkeypatch.setattr(evaluation.shutil, "copy2", interrupted_copy)
+    with pytest.raises(OSError, match="copy interruption"):
+        evaluation.adopt_case(source, destination, certified=certified)
+    assert not (destination / "evaluation.json").exists()
+    monkeypatch.setattr(evaluation.shutil, "copy2", original_copy)
+    evaluation.adopt_case(source, destination, certified=certified)
+    saved = json.loads((destination / "evaluation.json").read_text())
+    assert set(saved["rows"]) == ({"FF", "REP"} if certified else {"FF"})
+    assert (destination / "FF.npz").is_file() and not saved["failed"]
+    assert (source / "evaluation.json").read_bytes() == source_cache
+
+
+def test_interrupted_cross_device_field_copy_can_be_resumed(tmp_path, monkeypatch):
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    save_flow_npz_atomic(source / "FF.npz", torch.zeros(1, 3, 5, 6, 7))
+    (source / "metrics.json").write_text(json.dumps({"FF": {"case_id": "a__b", "time_sec": 0.1, "dice_mean": 0.8}}))
+    (source / "report.json").write_text(json.dumps({"field_sha256": {"FF": sha256_file(source / "FF.npz")}}))
+
+    def no_hardlink(*_args):
+        raise OSError("cross-device link unavailable")
+
+    original_copy = evaluation.shutil.copy2
+
+    def incomplete_copy(src, target, *args, **kwargs):
+        if src.name == "FF.npz":
+            target.write_bytes(b"incomplete field")
+            raise OSError("interrupted field copy")
+        return original_copy(src, target, *args, **kwargs)
+
+    monkeypatch.setattr(evaluation.os, "link", no_hardlink)
+    monkeypatch.setattr(evaluation.shutil, "copy2", incomplete_copy)
+    with pytest.raises(OSError, match="interrupted field copy"):
+        evaluation.adopt_case(source, destination, certified=False)
+    assert not (destination / "FF.npz").exists()
+    assert not (destination / "evaluation.json").exists()
+    monkeypatch.setattr(evaluation.shutil, "copy2", original_copy)
+    evaluation.adopt_case(source, destination, certified=False)
+    assert sha256_file(destination / "FF.npz") == sha256_file(source / "FF.npz")

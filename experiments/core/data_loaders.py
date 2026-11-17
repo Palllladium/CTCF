@@ -143,6 +143,8 @@ def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
     args.ixi_manifest_sha256 = manifest["fingerprint"]
     runtime_keys = {"exp", "resume", "init_ckpt", "gpu", "paths", "quiet", "use_tb", "num_workers", "save_ckpt"}
     settings = {key: value for key, value in vars(args).items() if key not in runtime_keys}
+    if settings.get("ncc_mode") == "legacy":
+        settings.pop("ncc_mode")
     for key in ("input_representation", "ixi_t1_weight", "ixi_t2_weight"):
         if settings.get(key) is None:
             settings.pop(key, None)

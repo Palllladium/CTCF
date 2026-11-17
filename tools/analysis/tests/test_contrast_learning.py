@@ -46,6 +46,23 @@ def test_sampling_control_never_uses_native_t2_intensities():
     assert report["coverage"] == 1
 
 
+def test_normalisation_only_matches_the_roundtrip_coverage_and_never_resamples_t1():
+    shape = (9, 10, 11)
+    t1 = np.indices(shape).sum(0).astype(np.float32) + 1
+    native = image(np.zeros((8, 9, 10), dtype=np.float32))
+    geometry = dict(direction=np.eye(3).ravel().tolist(), spacing=[1.0] * 3, origin=[0.0] * 3)
+    values, report = resample_t1_control(
+        t1, native, geometry, sitk.AffineTransform(3), sitk.Euler3DTransform(), normalisation_only=True
+    )
+    lo, hi = np.percentile(t1[:8, :9, :10], [1, 99])
+    np.testing.assert_allclose(values, np.clip((t1 - lo) / (hi - lo), 0, 1), atol=1e-7)
+    assert report["percentiles"] == [lo, hi]
+    assert report["coverage"] == pytest.approx(8 * 9 * 10 / (9 * 10 * 11))
+    # The control retains original T1 values beyond native coverage; the roundtrip cannot.
+    roundtrip, other = resample_t1_control(t1, native, geometry, sitk.AffineTransform(3), sitk.Euler3DTransform())
+    assert report == other and values[-1, -1, -1] == 1 and roundtrip[-1, -1, -1] == 0
+
+
 def test_noncommuting_physical_roundtrip_matches_independent_scipy_reference():
     shape = (13, 14, 15)
     z, y, x = np.indices(shape)
@@ -264,7 +281,7 @@ def test_preflight_binds_real_legacy_report_schema_and_rejects_changed_endpoint_
         contrast_learning.preflight(cohort)
 
 
-def test_budget_uses_selected_stride_update_counts_and_explicit_unmeasured_reserve(tmp_path):
+def test_cost_describes_update_counts_without_a_gpu_hour_gate(tmp_path):
     (tmp_path / "stride.txt").write_text("1\n")
     for path, seconds in (
         ("ctcf_profile/report.json", 1.0),
@@ -272,17 +289,29 @@ def test_budget_uses_selected_stride_update_counts_and_explicit_unmeasured_reser
         ("profile_teacher/profile.json", 3.0),
     ):
         atomic_write_json(tmp_path / path, dict(update_seconds=seconds, passed=True))
-    args = SimpleNamespace(out=tmp_path, budget_hours=100)
-    contrast_learning.budget(args)
-    saved = json.loads((tmp_path / "budget.json").read_text())
+    args = SimpleNamespace(out=tmp_path)
+    contrast_learning.cost(args)
+    saved = json.loads((tmp_path / "cost.json").read_text())
     expected = (2 * 39900 + 2 * 1197 + 2 * 4000 * 3 + 5 * 4000 * 2) / 3600 + 12
     assert saved["estimated_gpu_hours"] == pytest.approx(expected)
-    assert saved["stride"] == 1 and saved["passed"]
+    assert saved["stride"] == 1 and "passed" not in saved and "budget_gpu_hours" not in saved
     assert saved["profiles"]["student"]["file_sha256"] == sha256_file(tmp_path / "profile_student_1/profile.json")
-    args.budget_hours = expected - 1
-    with pytest.raises(RuntimeError, match="exceeds"):
-        contrast_learning.budget(args)
-    assert not json.loads((tmp_path / "budget.json").read_text())["passed"]
+
+
+@pytest.mark.parametrize("mode,epochs", (("stable", (1, 3, 8, 9, 10)), ("legacy", (1, 3, 10))))
+def test_stable_endpoint_has_terminal_regional_readouts_without_changing_legacy(tmp_path, monkeypatch, mode, epochs):
+    runner = object.__new__(contrast_learning.ReadoutRunner)
+    runner.args = SimpleNamespace(finetune=1, max_epoch=10, ncc_mode=mode)
+    runner.observation_manifest, runner.observation_out = {}, tmp_path
+    observed = []
+    monkeypatch.setattr(
+        contrast_learning,
+        "observe",
+        lambda _runner, _manifest, path: observed.append(int(path.name.removeprefix("epoch"))),
+    )
+    for epoch in range(10):
+        runner.on_val_end(epoch, 0, 0)
+    assert tuple(observed) == epochs
 
 
 def test_report_reads_shared_evaluations_and_requires_identical_scratch_initializations(tmp_path):

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Paired IXI contrasts, frozen consensus and bounded follow-up diagnostics.
+# Paired IXI contrasts, frozen consensus and follow-up diagnostics.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 MODE="${1:-start}"
@@ -7,7 +7,7 @@ RUN_ID="${2:-B_$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid RUN_ID"; exit 1; }
 RUN="results/contrasts/$RUN_ID"
 WORKFLOW="${WORKFLOW:-$(cat "$RUN/workflow.txt" 2>/dev/null || echo main)}"
-[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism || "$WORKFLOW" = learning ]] || { echo "Unknown WORKFLOW"; exit 1; }
+[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism || "$WORKFLOW" = learning || "$WORKFLOW" = closure ]] || { echo "Unknown WORKFLOW"; exit 1; }
 if [ "$MODE" = stop ]; then
     [ -f "$RUN/runner.pid" ] || { echo "No matching live runner; no process was stopped."; exit 0; }
     read -r pid < "$RUN/runner.pid"
@@ -73,7 +73,8 @@ PIDS=()
 REQUIRED=(pretests check parent b0 b1 b2 summary consensus)
 if [ "$WORKFLOW" = followup ]; then REQUIRED=(pretests prepare profile controls anchor repair smooth summary repair_summary); fi
 if [ "$WORKFLOW" = mechanism ]; then REQUIRED=(pretests prepare controls weights t2 smooth summary lumir_check lumir_profile lumir_train lumir_cert lumir_contrasts); fi
-if [ "$WORKFLOW" = learning ]; then REQUIRED=(pretests preflight profile calibration smoke budget registrations teachers diagnostics students baselines summary); fi
+if [ "$WORKFLOW" = learning ]; then REQUIRED=(pretests preflight profile calibration smoke cost registrations teachers diagnostics students baselines summary); fi
+if [ "$WORKFLOW" = closure ]; then REQUIRED=(pretests preflight targets recovery completion numerics stable_profile stable diagnostics certificates summary); fi
 finish() {
     local code=$? includes=() arm
     trap - EXIT INT
@@ -110,9 +111,96 @@ if [ "${PRETESTS:-1}" = 1 ]; then
     if [ "$WORKFLOW" = followup ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_repair_checks.py); fi
     if [ "$WORKFLOW" = mechanism ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_contrast_probes.py tools/analysis/tests/test_representation.py tools/analysis/tests/test_lumir_probes.py tools/analysis/tests/test_lumir.py tools/analysis/tests/test_distributed.py); fi
     if [ "$WORKFLOW" = learning ]; then TESTS=(tools/analysis/tests/test_matching.py tools/analysis/tests/test_matching_train.py tools/analysis/tests/test_matching_eval.py tools/analysis/tests/test_matching_diagnostics.py tools/analysis/tests/test_contrast_learning.py tools/analysis/tests/test_lpba.py tools/analysis/tests/test_learning_runner.py); fi
+    if [ "$WORKFLOW" = closure ]; then TESTS=(tools/analysis/tests/test_ncc.py tools/analysis/tests/test_matching_eval.py tools/analysis/tests/test_contrast_audit.py tools/analysis/tests/test_closure_runner.py tools/analysis/tests/test_contrast_learning.py tools/analysis/tests/test_repair_checks.py tools/analysis/tests/test_precision.py::test_ncc_mode_cannot_silently_change_on_resume tools/analysis/tests/test_contrasts.py::test_native_trainer_executes_the_paired_step_with_a_fresh_optimizer); fi
     job pretests "" "$PY" -m pytest -q "${TESTS[@]}" \
         tools/analysis/tests/test_run_artifacts.py::RunArtifactsTest::test_failed_run_can_be_packaged_without_site_packages
 else echo 0 > "$RUN/exit_codes/pretests.txt"; log "SKIPPED pretests: PRETESTS=0"; fi
+closure() {
+    local source="${SOURCE_RUN:-results/contrasts/B_LEARN_20261115T213527Z}"
+    local base="${BASE_B1_CHECKPOINT:-results/BM_20261113T143420Z_b1_s1/ckpt/last.pth}"
+    local b0="${BASE_B0_CHECKPOINT:-results/BM_20261113T143420Z_b0_s1/ckpt/last.pth}"
+    local external="${LPBA_MANIFEST:-/data/mooncake/P/LPBA40_prepared/manifest.json}"
+    local status=0 code=0 index lane count=2 train_lanes=1 train_slot=2 diagnostic_slot=3 pid
+    local -a common=(--manifest "$MANIFEST" --source "$source" --checkpoint "$PARENT" --base_checkpoint "$base" --b0_checkpoint "$b0" --external_manifest "$external" --raw_root "${IXI_RAW_ROOT:-/data/mooncake/P/IXI_raw}" --threads "${PREP_THREADS:-32}") complete_pids=() other_pids=() train_pids=()
+    [ "${#GPU[@]}" = 4 ] || [ "${#GPU[@]}" = 8 ] || { log "Closure requires 4 or 8 GPUs"; return 1; }
+    if [ "${#GPU[@]}" = 8 ]; then count=4; train_lanes=3; train_slot=4; diagnostic_slot=7; fi
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+    job preflight "" "$PY" -m experiments.contrast_audit preflight "${common[@]}" --out "$RUN" || return 1
+    bind manifest "$MANIFEST" && bind lpba "$external" && bind base "$base" && bind b0 "$b0" || return 1
+    for ((lane=0; lane<count; lane++)); do
+        job "complete_${count}_$lane" "${GPU[$lane]}" "$PY" -m experiments.contrast_audit complete "${common[@]}" --out "$RUN" --lane "$lane" --lanes "$count" & complete_pids+=($!)
+    done
+    (
+        code=0
+        job teacher_audit "${GPU[$diagnostic_slot]}" "$PY" -m experiments.contrast_audit teachers "${common[@]}" --out "$RUN/teacher_audit" || code=1
+        for ds in IXI LPBA OASIS; do
+            case "$ds" in IXI) manifest="$MANIFEST" ;; LPBA) manifest="$external" ;; OASIS) manifest=datasets/splits/oasis_subject_disjoint_v2/pair_manifest.json ;; esac
+            job "solver_$ds" "${GPU[$diagnostic_slot]}" "$PY" -m experiments.contrast_audit solvers "${common[@]}" --dataset "$ds" --manifest "$manifest" --oasis_root "$DATA" --out "$RUN/solver_curves/$ds" || code=1
+        done
+        for family in finetune scratch; do
+            job "regional_$family" "${GPU[$diagnostic_slot]}" "$PY" -m experiments.contrast_audit regional "${common[@]}" --family "$family" --out "$RUN/regional/$family" || code=1
+        done
+        exit "$code"
+    ) & other_pids+=($!)
+    job recovery "${GPU[$train_slot]}" "$PY" -m experiments.contrast_audit recovery "${common[@]}" --out "$RUN/recovery" || status=1
+    if job targets "" "$PY" -m experiments.contrast_audit targets "${common[@]}" --out "$RUN/targets"; then
+        if job numerics "${GPU[$train_slot]}" "$PY" -m experiments.contrast_audit inputs "${common[@]}" --prepared "$RUN/targets" --out "$RUN/numerics" &&
+           job stable_profile "${GPU[$train_slot]}" "$PY" -m experiments.contrast_audit profile "${common[@]}" --prepared "$RUN/targets" --out "$RUN/stable_profile"; then
+            stable_arm() {
+                local name=$1 gpu=$2 kind=${1%_s*} seed=${1##*_s} ds manifest certify code=0
+                local weights="results/${RUN_ID}_$name/ckpt/last.pth" endpoint="$RUN/registration/$name/report.json"
+                job "stable_$name" "$gpu" "$PY" -m experiments.contrast_learning train --manifest "$MANIFEST" --checkpoint "$PARENT" \
+                    --prepared "$RUN/targets" --kind "$kind" --epochs 10 --seed "$seed" --ncc_mode stable \
+                    --exp "${RUN_ID}_$name" --workers 8 --out "$RUN/registration/$name" || return 1
+                job "raw_$name" "$gpu" "$PY" -m experiments.eval_matching evaluate --manifest "$MANIFEST" --base_checkpoint "$weights" \
+                    --endpoint "$endpoint" --save_raw --out "$RUN/stable/raw/$name" || return 1
+                job "cert_$name" "$gpu" "$PY" -m experiments.eval_matching evaluate --manifest "$MANIFEST" --base_checkpoint "$weights" \
+                    --endpoint "$endpoint" --raw_from "$RUN/stable/raw/$name" --save_raw --certify 1 --out "$RUN/stable/IXI/$name" || code=1
+                if [[ "$kind" = b0 || "$kind" = b1 ]]; then
+                    for ds in LPBA OASIS; do
+                        manifest="$external"; [ "$ds" != OASIS ] || manifest=datasets/splits/oasis_subject_disjoint_v2/pair_manifest.json
+                        job "eval_${ds}_$name" "$gpu" "$PY" -m experiments.eval_matching evaluate --dataset "$ds" --manifest "$manifest" \
+                            --oasis_root "$DATA" --base_checkpoint "$weights" --endpoint "$endpoint" --out "$RUN/stable/$ds/$name" || code=1
+                    done
+                fi
+                return "$code"
+            }
+            for ((lane=0; lane<train_lanes; lane++)); do
+                (
+                    code=0; names=(b0_s0 b1_s0 normalised_t1_s0 resampled_t1_s0 shuffled_t2_s0 b0_s1 b1_s1)
+                    for ((index=lane; index<${#names[@]}; index+=train_lanes)); do
+                        stable_arm "${names[$index]}" "${GPU[$((train_slot+lane))]}" || code=1
+                    done
+                    exit "$code"
+                ) & train_pids+=($!)
+            done
+        else
+            log "HELD stable trainings: numerical audit or native training profile failed"
+            echo 125 > "$RUN/exit_codes/stable.txt"; status=1
+        fi
+    else
+        log "HELD stable trainings: targets unavailable"
+        echo 125 > "$RUN/exit_codes/stable.txt"; status=1
+    fi
+    code=0; for pid in "${complete_pids[@]}"; do wait "$pid" || code=1; done
+    echo "$code" > "$RUN/exit_codes/completion.txt"; [ "$code" = 0 ] || status=1
+    code=0; for pid in "${other_pids[@]}"; do wait "$pid" || code=1; done
+    echo "$code" > "$RUN/exit_codes/diagnostics.txt"; [ "$code" = 0 ] || status=1
+    if [ "${#train_pids[@]}" -gt 0 ]; then
+        code=0; for pid in "${train_pids[@]}"; do wait "$pid" || code=1; done
+        echo "$code" > "$RUN/exit_codes/stable.txt"; [ "$code" = 0 ] || status=1
+    fi
+    job certificates "${GPU[0]}" "$PY" -m experiments.contrast_audit certificates "${common[@]}" \
+        --completion_root "$RUN" --seqvp_root "${SEQVP_ROOT:-/data/mooncake/P/seq_vp_3d}" --out "$RUN/certificates" || status=1
+    job summary "" "$PY" -m experiments.contrast_audit summary "${common[@]}" --out "$RUN" || status=1
+    return "$status"
+}
+if [ "$WORKFLOW" = closure ]; then
+    failed=0
+    closure || failed=1
+    log "FINISHED exit=$failed"
+    exit "$failed"
+fi
 learning() {
     local source="${SOURCE_RUN:-results/contrasts/B_CHECK_20261110T211549Z}"
     local bm="${BM_SOURCE_RUN:-results/contrasts/BM_20261113T143420Z}"
@@ -155,7 +243,7 @@ learning() {
     echo 0 > "$RUN/exit_codes/smoke.txt"
     job ctcf_profile "${GPU[0]}" "$PY" -m experiments.contrast_diagnostics profile "${common[@]}" --checkpoint "$PARENT" \
         --source "$source" --out "$RUN/ctcf_profile" --exp "${RUN_ID}_profile" --workers 8 --benchmark 1 || return 1
-    job budget "" "$PY" -m experiments.contrast_learning budget --out "$RUN" --budget_hours "${BUDGET_HOURS:-72}" || return 1
+    job cost "" "$PY" -m experiments.contrast_learning cost --out "$RUN" || return 1
     job prepare "" "$PY" -m experiments.contrast_learning prepare "${common[@]}" --checkpoint "$PARENT" \
         --source "$source" --raw-root "${IXI_RAW_ROOT:-/data/mooncake/P/IXI_raw}" --threads "${PREP_THREADS:-32}" --out "$RUN/targets" || status=1
     evaluate_learning() {
@@ -415,7 +503,7 @@ if [ "$WORKFLOW" = followup ]; then
     exit "$failed"
 fi
 consensus() {
-    job consensus "$1" "$PY" -m experiments.dispatch1.eval_consensus --checkpoint "$PARENT" --data "$DATA" --out "$RUN/consensus" --budget_hours "${CONSENSUS_HOURS:-8}"
+    job consensus "$1" "$PY" -m experiments.dispatch1.eval_consensus --checkpoint "$PARENT" --data "$DATA" --out "$RUN/consensus"
 }
 failed=0
 CONSENSUS_PID=""
@@ -436,7 +524,7 @@ arm() {
 if [ "${RUN_B:-1}" = 1 ] && [ -f "$MANIFEST" ]; then
     bind manifest "$MANIFEST"
     if job check "${GPU[0]}" "$PY" -m experiments.contrasts check --manifest "$MANIFEST" --checkpoint "$PARENT" --out "$RUN/check" \
-        --budget_hours "${BUDGET_HOURS:-72}" --consensus_reserve_hours "${CONSENSUS_HOURS:-8}"; then
+        --consensus_reserve_hours "${CONSENSUS_HOURS:-8}"; then
         for ((slot=0; slot<slots; slot++)); do
             (
                 status=0

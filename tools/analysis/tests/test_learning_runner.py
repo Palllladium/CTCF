@@ -62,6 +62,11 @@ def learning_dispatch(dispatch):
                 (out / "calibration.json").write_text("{}")
             elif os.environ.get("LEARNING_FAIL_DIAGNOSTIC") == "1":
                 raise SystemExit(8)
+        if module == "contrast_audit":
+            if stage == "targets":
+                (out / "ready.json").write_text("{}")
+            if stage == os.environ.get("CLOSURE_FAIL_STAGE"):
+                raise SystemExit(11)
         if module == "contrast_learning":
             if stage == "prepare":
                 if os.environ.get("LEARNING_FAIL_PREPARE") == "1":
@@ -86,6 +91,7 @@ def learning_dispatch(dispatch):
         "train_matching",
         "eval_matching",
         "matching_diagnostics",
+        "contrast_audit",
     ):
         (root / f"experiments/{name}.py").write_text(stub, newline="\n")
     if os.name == "nt":
@@ -111,7 +117,6 @@ def learning_dispatch(dispatch):
             GPUS="2 3 4 5",
             MIN_FREE_GIB="0",
             PRETESTS="1",
-            BUDGET_HOURS="72",
             PREP_THREADS="32",
             OMP_NUM_THREADS="1",
             OPENBLAS_NUM_THREADS="1",

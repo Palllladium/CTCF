@@ -46,6 +46,12 @@ CTCF_OVERRIDE_KEYS = (
 def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     add_precision_arg(p)
     p.add_argument(
+        "--ncc_mode",
+        choices=("legacy", "stable"),
+        default="legacy",
+        help="Legacy FP32 NCC or stable binary64 local moments.",
+    )
+    p.add_argument(
         "--oasis_split", default="", help="Train/Dev manifest; validation uses the adjacent pair_manifest.json"
     )
     p.add_argument("--ixi_pairs", default="", help="Prepared, reviewed IXI T1/T2 subject-pair manifest.")

@@ -27,7 +27,7 @@ from tools.analysis.prepare_ixi import linear_matrix, processed_image
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from utils import pkload, setup_device
 
-KINDS = ("scratch_b0", "scratch_b1", "resampled_t1", "shuffled_t2")
+KINDS = ("scratch_b0", "scratch_b1", "resampled_t1", "shuffled_t2", "b0", "b1", "normalised_t1")
 
 
 def derangement(size, seed=20261114):
@@ -39,7 +39,7 @@ def derangement(size, seed=20261114):
     return assigned.tolist()
 
 
-def resample_t1_control(t1, native_t2, geometry, processed_to_t1, t1_to_t2):
+def resample_t1_control(t1, native_t2, geometry, processed_to_t1, t1_to_t2, *, normalisation_only=False):
     """Use only the native T2 grid: processed T1 -> native T2 grid -> processed grid."""
     for index, transform in enumerate((processed_to_t1, t1_to_t2)):
         matrix = linear_matrix(transform)
@@ -47,8 +47,10 @@ def resample_t1_control(t1, native_t2, geometry, processed_to_t1, t1_to_t2):
             raise ValueError("The frozen raw T1-to-T2 transform must be rigid")
     fixed = processed_image(t1, geometry)
     pull = sitk.CompositeTransform([t1_to_t2, processed_to_t1])
-    native = sitk.Resample(fixed, native_t2, pull.GetInverse(), sitk.sitkLinear, 0.0)
-    restored = sitk.GetArrayFromImage(sitk.Resample(native, fixed, pull, sitk.sitkLinear, 0.0))
+    restored = t1
+    if not normalisation_only:
+        native = sitk.Resample(fixed, native_t2, pull.GetInverse(), sitk.sitkLinear, 0.0)
+        restored = sitk.GetArrayFromImage(sitk.Resample(native, fixed, pull, sitk.sitkLinear, 0.0))
     coverage = sitk.Image(native_t2.GetSize(), sitk.sitkUInt8) + 1
     coverage.CopyInformation(native_t2)
     covered = sitk.GetArrayFromImage(sitk.Resample(coverage, fixed, pull, sitk.sitkNearestNeighbor, 0)) > 0
@@ -173,7 +175,7 @@ def prepare(args):
     if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
         raise ValueError("Target-control sources changed; use a new output directory")
     atomic_write_json(binding_path, binding)
-    altered = {kind: copy.deepcopy(manifest) for kind in KINDS[2:]}
+    altered = {kind: copy.deepcopy(manifest) for kind in ("resampled_t1", "shuffled_t2")}
     for index, (row, (qc_path, qc, raw, transforms)) in enumerate(zip(manifest["training"], raw_rows, strict=True)):
         destination = args.out / "targets/resampled_t1/Train" / row["id"] / "aux.npy"
         report_path = destination.with_suffix(".json")
@@ -227,7 +229,7 @@ def prepare(args):
 
 
 def active_manifest(args):
-    if args.kind.startswith("scratch_"):
+    if args.kind.startswith("scratch_") or args.kind in ("b0", "b1"):
         return args.manifest
     if args.prepared is None:
         raise ValueError("Auxiliary controls require --prepared from the prepare stage")
@@ -235,15 +237,16 @@ def active_manifest(args):
 
 
 def options_for(args):
-    arm = "b0" if args.kind == "scratch_b0" else "b1"
+    arm = "b0" if args.kind in ("scratch_b0", "b0") else "b1"
     options = training_args(args, arm)
     options.exp, options.ixi_pairs = args.exp, str(active_manifest(args))
-    options.w_reg, options.seed, options.num_workers = 1, 0, args.workers
+    options.w_reg, options.seed, options.num_workers = 1, getattr(args, "seed", 0), args.workers
+    options.ncc_mode = getattr(args, "ncc_mode", "legacy")
     if args.kind.startswith("scratch_"):
         options.init_ckpt, options.finetune, options.lr = "", 0, 1e-4
         options.max_epoch, options.schedule_max_epoch = 100, 100
     else:
-        options.max_epoch = 3
+        options.max_epoch = getattr(args, "epochs", 3)
     return options
 
 
@@ -253,7 +256,10 @@ class ReadoutRunner(Runner):
         self.observation_manifest, self.observation_out = manifest, out
 
     def on_val_end(self, epoch, _dice, _jac):
-        if epoch + 1 in ({5, 20, 50, 100} if not self.args.finetune else {1, 3}):
+        readouts = {5, 20, 50, 100} if not self.args.finetune else {1, 3, self.args.max_epoch}
+        if self.args.finetune and getattr(self.args, "ncc_mode", "legacy") == "stable":
+            readouts |= {self.args.max_epoch - 2, self.args.max_epoch - 1}
+        if epoch + 1 in readouts:
             observe(self, self.observation_manifest, self.observation_out / f"epoch{epoch + 1}")
 
 
@@ -278,7 +284,7 @@ def train(args):
     checkpoint = Path("results") / args.exp / "ckpt/last.pth"
     if checkpoint.exists():
         options.init_ckpt, options.resume = "", str(checkpoint)
-    device = setup_device(seed=0, deterministic=False)
+    device = setup_device(seed=options.seed, deterministic=False)
     configure_precision(args.precision, device)
     runner = ReadoutRunner(options, device, source, args.out)
     if checkpoint.exists():
@@ -308,10 +314,10 @@ def train(args):
     )
 
 
-def budget(args):
+def cost(args):
     stride = int((args.out / "stride.txt").read_text().strip())
-    if stride != 1 or not math.isfinite(args.budget_hours) or args.budget_hours <= 0:
-        raise ValueError("Budget requires native descriptors and a positive GPU-hour limit")
+    if stride != 1:
+        raise ValueError("Cost measurement requires native descriptors")
     profiles = {}
     for name, path in (
         ("ctcf", args.out / "ctcf_profile/report.json"),
@@ -337,14 +343,10 @@ def budget(args):
         "profiles": profiles,
         "components_gpu_hours": components,
         "estimated_gpu_hours": estimate,
-        "budget_gpu_hours": args.budget_hours,
-        "passed": estimate <= args.budget_hours,
-        "scope": "Measured update-time extrapolation plus an unmeasured fixed 12 GPU-hour readout/repair reserve; CPU source preparation excluded. No wall-clock deadline.",
+        "scope": "Measured update-time extrapolation plus an unmeasured fixed readout/repair reserve; descriptive only, with no GPU-hour gate or runtime deadline.",
         "student_scope": "Five student trainings; the smaller encoder is conservatively charged at the main student's measured update time. Half-resolution descriptors are an inference-only ablation of identical weights.",
     }
-    atomic_write_json(args.out / "budget.json", output)
-    if not output["passed"]:
-        raise RuntimeError("Profiled package exceeds the agreed GPU-hour budget; no automatic recipe reduction")
+    atomic_write_json(args.out / "cost.json", output)
 
 
 def report(args):
@@ -362,7 +364,7 @@ def report(args):
         missing.append("Scratch B0/B1 did not share the same initial model")
     for mode in ("FF", "REP"):
         tables = {}
-        for kind in KINDS:
+        for kind in KINDS[:4]:
             path = evaluations / kind / mode / "per_case.csv"
             if path.exists():
                 tables[kind] = read_csv(path)
@@ -378,7 +380,7 @@ def report(args):
             except (OSError, ValueError) as error:
                 missing.append(str(error))
         contrasts = [("scratch_b1", "scratch_b0")]
-        contrasts += [(arm, control) for arm in KINDS for control in ("b0", "b1")]
+        contrasts += [(arm, control) for arm in KINDS[:4] for control in ("b0", "b1")]
         for arm, control in contrasts:
             if arm in tables and control in tables:
                 comparisons[f"{mode}_{arm}-{control}"] = paired_dice_delta(tables[arm], tables[control])
@@ -398,7 +400,7 @@ def report(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("preflight", "prepare", "train", "budget", "report"))
+    parser.add_argument("stage", choices=("preflight", "prepare", "train", "cost", "report"))
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--prepared", type=Path)
@@ -415,9 +417,13 @@ def main():
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--budget_hours", type=float, default=72)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--ncc_mode", choices=("legacy", "stable"), default="legacy")
     args = parser.parse_args()
-    if args.stage not in ("report", "budget") and args.manifest is None:
+    if args.epochs < 1:
+        parser.error("--epochs must be positive")
+    if args.stage not in ("report", "cost") and args.manifest is None:
         parser.error("--manifest is required")
     if args.stage == "prepare" and args.checkpoint is None:
         parser.error("prepare requires --checkpoint for the frozen reference binding")
@@ -429,7 +435,7 @@ def main():
     ):
         parser.error("preflight requires the parent, BM source/endpoints and external manifest")
     args.out.mkdir(parents=True, exist_ok=True)
-    {"preflight": preflight, "prepare": prepare, "train": train, "budget": budget, "report": report}[args.stage](args)
+    {"preflight": preflight, "prepare": prepare, "train": train, "cost": cost, "report": report}[args.stage](args)
 
 
 if __name__ == "__main__":

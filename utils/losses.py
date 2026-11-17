@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -30,10 +32,17 @@ class Grad3d(nn.Module):
 class NCCVxm(nn.Module):
     """Local normalised cross-correlation loss; squared correlation, sign-flipped."""
 
-    def __init__(self, win=None, eps: float = 1e-5):
+    def __init__(self, win=None, eps: float = 1e-5, mode: str = "legacy"):
         super().__init__()
+        if mode not in ("legacy", "stable"):
+            raise ValueError("NCC mode must be legacy or stable")
         self.win = win
         self.eps = eps
+        self.mode = mode
+
+    def local_map(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+        function = stable_ncc_map if self.mode == "stable" else local_ncc_map
+        return function(y_true, y_pred, win=self.win, eps=self.eps)
 
     def forward(
         self,
@@ -47,7 +56,7 @@ class NCCVxm(nn.Module):
         do not switch it on in training without re-tuning w_reg, since masking rescales the
         similarity term relative to the regulariser.
         """
-        cc = local_ncc_map(y_true, y_pred, win=self.win, eps=self.eps)
+        cc = self.local_map(y_true, y_pred)
         if mask is None:
             return -torch.mean(cc)
 
@@ -62,8 +71,8 @@ def local_ncc_map(y_true: torch.Tensor, y_pred: torch.Tensor, win=None, eps: flo
 
     In exact arithmetic it lies in [0, 1]. The window variances are differences of large sums, so on a
     near-flat window FP32 cancellation leaves noise that the clamp does not catch and the value can land far
-    outside (a constant 0.9 volume gives ~1e5). Exact zeros, as in the background, give exactly 0; the brain
-    of the Learn2Reg OASIS volumes has no window flat enough to matter.
+    outside (a constant 0.9 volume gives ~1e5). Exact zero background gives exactly 0; flat nonzero
+    windows require stable accumulation rather than an assumption about the dataset.
     """
     ii, ji = y_true, y_pred
     ndims = len(ii.shape) - 2
@@ -90,6 +99,39 @@ def local_ncc_map(y_true: torch.Tensor, y_pred: torch.Tensor, win=None, eps: flo
     i_var = torch.clamp(i2_sum - 2 * ui * i_sum + ui * ui * win_size, min=eps)
     j_var = torch.clamp(j2_sum - 2 * uj * j_sum + uj * uj * win_size, min=eps)
     return (cross * cross) / (i_var * j_var)
+
+
+def stable_ncc_map(y_true: torch.Tensor, y_pred: torch.Tensor, win=None, eps: float = 1e-5) -> torch.Tensor:
+    """Squared NCC with separable binary64 moments and roundoff-aware flat-window handling."""
+    if y_true.shape != y_pred.shape or y_true.ndim not in (3, 4, 5) or y_true.shape[1] != 1:
+        raise ValueError("Stable NCC requires equal single-channel 1D, 2D or 3D images")
+    if not math.isfinite(eps) or eps <= 0:
+        raise ValueError("NCC epsilon must be finite and positive")
+    dimensions = y_true.ndim - 2
+    window = [9] * dimensions if win is None else list(win)
+    if len(window) != dimensions or any(
+        isinstance(n, bool) or not isinstance(n, int) or n < 1 or n % 2 == 0 for n in window
+    ):
+        raise ValueError("NCC windows must contain one positive odd integer per dimension")
+    a, b = y_true.double(), y_pred.double()
+    moments = torch.cat((a, b, a.square(), b.square(), a * b), dim=1)
+    conv = getattr(F, f"conv{dimensions}d")
+    for axis, width in enumerate(window):
+        kernel_shape = [1] * dimensions
+        kernel_shape[axis] = width
+        kernel = moments.new_ones(5, 1, *kernel_shape)
+        padding = [0] * dimensions
+        padding[axis] = width // 2
+        moments = conv(moments, kernel, padding=tuple(padding), groups=5)
+    sa, sb, saa, sbb, sab = moments.split(1, dim=1)
+    count = math.prod(window)
+    va, vb, covariance = saa - sa.square() / count, sbb - sb.square() / count, sab - sa * sb / count
+    rounding = 64 * sum(window) * torch.finfo(torch.float64).eps
+    floor_a = rounding * torch.maximum(saa.abs(), (sa.square() / count).abs()).clamp_min(1)
+    floor_b = rounding * torch.maximum(sbb.abs(), (sb.square() / count).abs()).clamp_min(1)
+    valid = (va > floor_a) & (vb > floor_b)
+    correlation = covariance.square() / (va.clamp_min(eps) * vb.clamp_min(eps))
+    return torch.where(valid, correlation.clamp(0, 1), 0).to(y_true.dtype)
 
 
 def region_mean(values: torch.Tensor, regions: torch.Tensor) -> torch.Tensor:

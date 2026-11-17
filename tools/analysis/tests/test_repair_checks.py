@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from experiments.core.field_scoring import score_saved_field
+from experiments.core.inference_metrics import metric_profile_for
 from experiments.repair_diagnostics import (
     cell_probe,
     certify_candidate,
@@ -18,6 +20,7 @@ from experiments.repair_diagnostics import (
 from utils.cert_boundary import boundary_report, global_verdict
 from utils.cert_exact import certify_flow_exact
 from utils.field import boundary_vertex_mask, identity_collar
+from utils.field_io import load_flow_npz
 
 
 def test_normal_band_fixes_a_collar_induced_fold_and_preserves_the_anchor():
@@ -72,6 +75,28 @@ def test_both_projection_stages_keep_the_exact_zero_boundary():
     mask = boundary_vertex_mask(raw).expand_as(raw)
     assert not repaired.masked_select(mask).any()
     assert not after_digital.masked_select(mask).any()
+
+
+def test_real_recovery_accepts_float_counter_from_saved_metric_columns(tmp_path):
+    torch.set_num_threads(2)
+    raw = torch.zeros(1, 3, 7, 7, 7)
+    labels = [torch.ones(1, 1, 7, 7, 7, dtype=torch.long)] * 2
+    original = tmp_path / "producer"
+    score_saved_field(raw, "a__b", 0, *labels, original, profile=metric_profile_for("IXI"))
+    report = json.loads((original / "report.json").read_text())
+    counter = report["repair"]["tri_proj_iters"]
+    assert isinstance(counter, float)
+    result = repair_one(
+        raw,
+        load_flow_npz(original / "REP.npz"),
+        {"dataset": "IXI", "case_id": "a__b", "old_tri_iters": counter},
+        labels,
+        tmp_path / "consumer",
+    )
+    assert result["selected"] == "continue_160" and not result["fallback"]
+    assert result["global_REP"]["global_homeomorphism"]
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        repair_one(raw, raw, {"dataset": "IXI", "case_id": "a__b", "old_tri_iters": 80.5}, labels, tmp_path / "invalid")
 
 
 @pytest.mark.parametrize("width", (0, 20))
