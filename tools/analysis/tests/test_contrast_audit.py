@@ -14,6 +14,7 @@ from experiments.train_matching import teacher_subjects
 from models.Matching import FeatureEncoder, voxel_grid
 from tools.analysis.run_artifacts import atomic_write_json, sha256_file
 from tools.analysis.tests.test_contrast_learning import cohort as cohort
+from utils.field_io import save_flow_npz_atomic
 from utils.losses import stable_ncc_map
 
 
@@ -129,6 +130,31 @@ def test_report_cli_does_not_touch_cuda(tmp_path, monkeypatch):
     monkeypatch.setattr(audit, "configure_precision", lambda *_args: pytest.fail("CPU report configured CUDA"))
     monkeypatch.setattr("sys.argv", ["contrast_audit", "summary", "--out", str(tmp_path)])
     audit.main()
+
+
+def test_recovery_cli_certifies_both_frozen_cases_from_saved_fields(tmp_path, monkeypatch):
+    shape = (37, 38, 39)
+    image = torch.ones(1, *shape)
+    labels = torch.where(voxel_grid(shape)[:, :1] < 18, 2, 7)[0]
+    field = torch.zeros(1, 3, *shape)
+    field[:, 0] = 0.1
+    names = ("subject_557__subject_85", "subject_92__subject_478")
+    source, output = tmp_path / "source", tmp_path / "recovery"
+    for name in names:
+        save_flow_npz_atomic(source / "IXI/base/pairs" / name / "FF.npz", field)
+    items = [(image, image, labels, labels, name) for name in names]
+    monkeypatch.setattr(audit, "cases", lambda _args: (items,))
+    monkeypatch.setattr(audit, "load_base", lambda *_args: pytest.fail("Saved fields must not rerun the model"))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["contrast_audit", "recovery", "--source", str(source), "--out", str(output), "--device", "cpu"],
+    )
+    audit.main()
+    reports = audit.read(output / "report.json")["cases"]
+    assert {row["case"]["case_id"] for row in reports} == set(names)
+    assert all(row["case"]["dataset"] == "IXI" for row in reports)
+    assert all(row["global_REP"]["global_homeomorphism"] and not row["fallback"] for row in reports)
+    assert all((output / row["case"]["case_id"] / row["selected"] / "REP.npz").is_file() for row in reports)
 
 
 @pytest.fixture

@@ -272,7 +272,7 @@ def recovery(args):
                 base = load_base(args.base_checkpoint, x.shape[1:], args.device)
             raw = base_flow(base, x[None].to(args.device), y[None].to(args.device))
         labels = [v[None].to(args.device) for v in (xs, ys)]
-        report = repair_one(raw, None, {"case_id": case, "old_tri_iters": 80.0}, labels, directory)
+        report = repair_one(raw, None, {"dataset": "IXI", "case_id": case, "old_tri_iters": 80.0}, labels, directory)
         reports.append(report)
     if len(reports) != 2:
         raise ValueError("The two frozen recovery cases are absent")
