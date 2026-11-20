@@ -340,6 +340,8 @@ def repair_one(raw, old, case, labels, directory):
                 selected = name
                 break
     for width in (4, 8, 16):
+        if selected is not None and not case.get("diagnostics", True):
+            break
         collared = identity_collar(raw, width)
         field, after_digital, detail = project(collared, tri_iters=640)
         stages[f"collar_{width}"] = spatial_report(collared, labels[1], raw)

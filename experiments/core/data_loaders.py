@@ -141,8 +141,19 @@ def ixi_loaders(
 def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
     manifest = IXI.read_ixi_manifest(args.ixi_pairs, require_t2=args.ixi_arm != "b0")
     args.ixi_manifest_sha256 = manifest["fingerprint"]
+    label_path = getattr(args, "ixi_label_ids", "")
+    label_ids = None
+    if bool(label_path) != bool(args.w_dice > 0):
+        raise ValueError("Paired IXI Dice requires both --w_dice > 0 and --ixi_label_ids")
+    if label_path:
+        label_ids = Path(label_path).read_text(encoding="utf-8").splitlines()
+        if len(label_ids) < 2 or len(label_ids) != len(set(label_ids)):
+            raise ValueError("Paired IXI label IDs must contain at least two distinct Train IDs")
+        args.ixi_label_ids_sha256 = hashlib.sha256(Path(label_path).read_bytes()).hexdigest()
     runtime_keys = {"exp", "resume", "init_ckpt", "gpu", "paths", "quiet", "use_tb", "num_workers", "save_ckpt"}
     settings = {key: value for key, value in vars(args).items() if key not in runtime_keys}
+    if not label_path:
+        settings.pop("ixi_label_ids", None)
     if settings.get("ncc_mode") == "legacy":
         settings.pop("ncc_mode")
     for key in ("input_representation", "ixi_t1_weight", "ixi_t2_weight"):
@@ -153,7 +164,7 @@ def ixi_paired_loaders(args) -> tuple[DataLoader, DataLoader]:
         "settings": settings,
     }
     fingerprint = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
-    train = IXI.IXIPairedDataset(manifest, args.ixi_arm)
+    train = IXI.IXIPairedDataset(manifest, args.ixi_arm, label_ids=label_ids)
     sampler = IXI.IXIPairSampler(
         len(train), args.seed, fingerprint, samples=args.max_train_iters if args.max_train_iters > 0 else None
     )

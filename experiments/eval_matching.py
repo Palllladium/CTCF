@@ -32,9 +32,12 @@ from utils.field_io import load_flow_npz, save_flow_npz_atomic
 from utils.losses import local_ncc_map
 
 
-def cases(args):
+def cases(args, *, lane=0, lanes=1):
+    if not 0 <= lane < lanes:
+        raise ValueError("Require 0 <= lane < lanes")
     if args.dataset == "IXI":
         manifest = read_ixi_manifest(args.manifest, require_t2=False)
+        manifest["validation_pairs"] = manifest["validation_pairs"][lane::lanes]
         dataset = IXIPairedDataset(manifest, "b0", validation=True)
         profile = metric_profile_for("IXI")
         names = ["__".join(pair) for pair in manifest["validation_pairs"]]
@@ -45,6 +48,7 @@ def cases(args):
         from datasets.LPBA40 import LPBAPairDataset, read_lpba_manifest
 
         manifest = read_lpba_manifest(args.manifest)
+        manifest["pairs"] = manifest["pairs"][lane::lanes]
         dataset = LPBAPairDataset(manifest)
         common = metric_profile_for("IXI")
         profile = MetricProfile(tuple(manifest["label_ids"]), common.jac_metrics, common.jac_log)
@@ -53,7 +57,7 @@ def cases(args):
     else:
         split = Path("datasets/splits/oasis_subject_disjoint_v2/split_manifest.json")
         _, development = oasis_subject_paths(args.oasis_root, split)
-        pairs = oasis_validation_pairs(development, args.manifest)
+        pairs = oasis_validation_pairs(development, args.manifest)[lane::lanes]
 
         def read_pairs():
             for moving, fixed in pairs:
@@ -107,10 +111,10 @@ def timed_ncc(moving, fixed, parent, seconds, config, *, max_steps=100):
     }
 
 
-def certified_scores(flow, case, seconds, xs, ys, directory, profile, dataset):
+def certified_scores(flow, case, seconds, xs, ys, directory, profile, dataset, *, repair_fn=None):
     started = time.perf_counter()
     options = dict(profile=profile, certify_modes=("REP",), cache=False, repair_columns=False)
-    rows, report = score_saved_field(flow, case, seconds, xs, ys, directory, **options)
+    rows, report = score_saved_field(flow, case, seconds, xs, ys, directory, repair_fn=repair_fn, **options)
     recovery = {"used": False, "fallback": False, "selected": "standard80"}
     if dataset == "IXI" and not report["global_homeomorphism"]:
         recovery["used"] = True
@@ -124,6 +128,7 @@ def certified_scores(flow, case, seconds, xs, ys, directory, profile, dataset):
                     "dataset": dataset,
                     "case_id": case,
                     "old_tri_iters": report.get("repair", {}).get("tri_proj_iters", 80),
+                    "diagnostics": False,
                 },
                 (xs, ys),
                 directory / "recovery",
@@ -152,7 +157,12 @@ def certified_scores(flow, case, seconds, xs, ys, directory, profile, dataset):
             recovery_fallback=int(recovery["fallback"]),
             identity_used=int(identity),
         )
-    report.update(repair_policy="standard80_then_accepted_extended_IXI_recovery", recovery=recovery)
+    policy = (
+        "standard80_then_accepted_extended_IXI_recovery"
+        if repair_fn is None
+        else "provided_boundary_repair_then_accepted_extended_IXI_recovery"
+    )
+    report.update(repair_policy=policy, recovery=recovery)
     atomic_write_json(directory / "metrics.json", rows)
     atomic_write_json(directory / "report.json", report)
     return rows, report

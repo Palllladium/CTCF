@@ -56,6 +56,7 @@ def add_ctcf_train_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--ixi_pairs", default="", help="Prepared, reviewed IXI T1/T2 subject-pair manifest.")
     p.add_argument("--ixi_arm", choices=("b0", "b1", "b2"), default="b0", help="Paired IXI input/loss contrast arm.")
+    p.add_argument("--ixi_label_ids", default="", help="Train IDs allowed in the optional paired IXI Dice loss.")
     p.add_argument("--ixi_t1_weight", type=float, default=None, help="Override the paired IXI T1 NCC coefficient.")
     p.add_argument("--ixi_t2_weight", type=float, default=None, help="Override the paired IXI T2 NCC coefficient.")
     p.add_argument(

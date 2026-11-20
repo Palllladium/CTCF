@@ -7,7 +7,7 @@ RUN_ID="${2:-B_$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid RUN_ID"; exit 1; }
 RUN="results/contrasts/$RUN_ID"
 WORKFLOW="${WORKFLOW:-$(cat "$RUN/workflow.txt" 2>/dev/null || echo main)}"
-[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism || "$WORKFLOW" = learning || "$WORKFLOW" = closure ]] || { echo "Unknown WORKFLOW"; exit 1; }
+[[ "$WORKFLOW" = main || "$WORKFLOW" = followup || "$WORKFLOW" = mechanism || "$WORKFLOW" = learning || "$WORKFLOW" = closure || "$WORKFLOW" = interventions ]] || { echo "Unknown WORKFLOW"; exit 1; }
 if [ "$MODE" = stop ]; then
     [ -f "$RUN/runner.pid" ] || { echo "No matching live runner; no process was stopped."; exit 0; }
     read -r pid < "$RUN/runner.pid"
@@ -75,6 +75,7 @@ if [ "$WORKFLOW" = followup ]; then REQUIRED=(pretests prepare profile controls 
 if [ "$WORKFLOW" = mechanism ]; then REQUIRED=(pretests prepare controls weights t2 smooth summary lumir_check lumir_profile lumir_train lumir_cert lumir_contrasts); fi
 if [ "$WORKFLOW" = learning ]; then REQUIRED=(pretests preflight profile calibration smoke cost registrations teachers diagnostics students baselines summary); fi
 if [ "$WORKFLOW" = closure ]; then REQUIRED=(pretests preflight targets recovery completion numerics stable_profile stable diagnostics certificates summary); fi
+if [ "$WORKFLOW" = interventions ]; then REQUIRED=(pretests prepare recovery fields collect edits selection select supervision final hybrids summary); fi
 finish() {
     local code=$? includes=() arm
     trap - EXIT INT
@@ -96,7 +97,10 @@ FREE_DEFAULT=200
 if [ "$WORKFLOW" = followup ]; then FREE_DEFAULT=80; fi
 if [ "$WORKFLOW" = mechanism ]; then FREE_DEFAULT=100; fi
 if [ "$WORKFLOW" = learning ]; then FREE_DEFAULT=160; fi
-"$PY" -c 'import shutil,sys; sys.exit(shutil.disk_usage("results").free < int(sys.argv[1])*1024**3)' "${MIN_FREE_GIB:-$FREE_DEFAULT}"
+if [ "$WORKFLOW" = interventions ]; then FREE_DEFAULT=800; fi
+SPACE_CREDIT_ROOT=""
+if [ "$WORKFLOW" = interventions ]; then SPACE_CREDIT_ROOT="$RUN"; fi
+"$PY" -c 'import shutil,sys; from pathlib import Path; used=sum(p.stat().st_size for p in Path(sys.argv[2]).rglob("*") if p.is_file() and not p.is_symlink()) if sys.argv[2] else 0; sys.exit(shutil.disk_usage("results").free + used < int(sys.argv[1])*1024**3)' "${MIN_FREE_GIB:-$FREE_DEFAULT}" "$SPACE_CREDIT_ROOT"
 job() {
     local task=$1 gpu=$2 code=0; shift 2
     if [[ "$task" != prepare && "$task" != preflight && "$task" != summary ]] && [ "$(cat "$RUN/exit_codes/$task.txt" 2>/dev/null || true)" = 0 ]; then log "SKIP $task (completed)"; return 0; fi
@@ -112,9 +116,84 @@ if [ "${PRETESTS:-1}" = 1 ]; then
     if [ "$WORKFLOW" = mechanism ]; then TESTS+=(tools/analysis/tests/test_contrast_checks.py tools/analysis/tests/test_contrast_probes.py tools/analysis/tests/test_representation.py tools/analysis/tests/test_lumir_probes.py tools/analysis/tests/test_lumir.py tools/analysis/tests/test_distributed.py); fi
     if [ "$WORKFLOW" = learning ]; then TESTS=(tools/analysis/tests/test_matching.py tools/analysis/tests/test_matching_train.py tools/analysis/tests/test_matching_eval.py tools/analysis/tests/test_matching_diagnostics.py tools/analysis/tests/test_contrast_learning.py tools/analysis/tests/test_lpba.py tools/analysis/tests/test_learning_runner.py); fi
     if [ "$WORKFLOW" = closure ]; then TESTS=(tools/analysis/tests/test_ncc.py tools/analysis/tests/test_matching_eval.py tools/analysis/tests/test_contrast_audit.py tools/analysis/tests/test_closure_runner.py tools/analysis/tests/test_contrast_learning.py tools/analysis/tests/test_repair_checks.py tools/analysis/tests/test_precision.py::test_ncc_mode_cannot_silently_change_on_resume tools/analysis/tests/test_contrasts.py::test_native_trainer_executes_the_paired_step_with_a_fresh_optimizer); fi
+    if [ "$WORKFLOW" = interventions ]; then TESTS=(tools/analysis/tests/test_weight_editing.py tools/analysis/tests/test_interventions_runner.py tools/analysis/tests/test_ncc.py tools/analysis/tests/test_contrasts.py::test_optional_representation_and_dose_preserve_legacy_resume_binding); fi
     job pretests "" "$PY" -m pytest -q "${TESTS[@]}" \
         tools/analysis/tests/test_run_artifacts.py::RunArtifactsTest::test_failed_run_can_be_packaged_without_site_packages
 else echo 0 > "$RUN/exit_codes/pretests.txt"; log "SKIPPED pretests: PRETESTS=0"; fi
+interventions() {
+    local source="${SOURCE_RUN:-results/contrasts/BC_20261118T105250Z}"
+    local external="${LPBA_MANIFEST:-/data/mooncake/P/LPBA40_prepared/manifest.json}"
+    local status=0 code=0 seed pid fields_pid supervision_pid split lane slot final_suffix=""
+    local -a common=(--out "$RUN" --manifest "$MANIFEST" --external_manifest "$external" --checkpoint "$PARENT" --source "$source" --history_run "${BM_SOURCE_RUN:-results/contrasts/BM_20261113T143420Z}" --oasis_root "$DATA") collect_pids=() selection_pids=() final_pids=() supervised=()
+    [ "${#GPU[@]}" = 4 ] || { log "Interventions require four GPUs"; return 1; }
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+    job prepare "" "$PY" -m experiments.weight_interventions prepare "${common[@]}" || return 1
+    bind manifest "$MANIFEST" && bind lpba "$external" || return 1
+    (
+        code=0
+        job recovery "${GPU[2]}" "$PY" -m experiments.weight_interventions recovery "${common[@]}" || code=1
+        job fields "${GPU[2]}" "$PY" -m experiments.weight_interventions fields "${common[@]}" || code=1
+        exit "$code"
+    ) & fields_pid=$!
+    (
+        job dice_calibration "${GPU[3]}" "$PY" -m experiments.contrast_supervision calibrate --out "$RUN" --manifest "$MANIFEST" --checkpoint "$PARENT" --exp "${RUN_ID}_supervised" &&
+        job dice_profile "${GPU[3]}" "$PY" -m experiments.contrast_supervision profile --out "$RUN" --manifest "$MANIFEST" --checkpoint "$PARENT" --exp "${RUN_ID}_supervised_profile" &&
+        job supervision "${GPU[3]}" "$PY" -m experiments.contrast_supervision train --out "$RUN" --manifest "$MANIFEST" --checkpoint "$PARENT" --exp "${RUN_ID}_supervised"
+    ) & supervision_pid=$!
+    for seed in 0 1; do
+        job "collect_s$seed" "${GPU[$seed]}" "$PY" -m experiments.weight_interventions collect "${common[@]}" --seed "$seed" & collect_pids+=($!)
+    done
+    code=0
+    for pid in "${collect_pids[@]}"; do wait "$pid" || code=1; done
+    echo "$code" > "$RUN/exit_codes/collect.txt"
+    if [ "$code" = 0 ] && job edits "" "$PY" -m experiments.weight_interventions edits "${common[@]}"; then
+        for seed in 0 1; do
+            job "selection_s$seed" "${GPU[$seed]}" "$PY" -m experiments.weight_interventions selection "${common[@]}" --seed "$seed" & selection_pids+=($!)
+        done
+        code=0
+        for pid in "${selection_pids[@]}"; do wait "$pid" || code=1; done
+        echo "$code" > "$RUN/exit_codes/selection.txt"
+        if [ "$code" != 0 ] || ! job select "" "$PY" -m experiments.weight_interventions select "${common[@]}"; then status=1; fi
+    else status=1; fi
+    if wait "$supervision_pid"; then
+        supervised=(--supervised_checkpoint "results/${RUN_ID}_supervised/ckpt/last.pth")
+        final_suffix="_with_s"
+        job hybrids "${GPU[3]}" "$PY" -m experiments.weight_interventions hybrids "${common[@]}" || status=1
+    else
+        status=1
+        log "HELD supervised readouts: calibration, memory profile or fitting failed; weight and field diagnostics continue"
+        echo 125 > "$RUN/exit_codes/supervision.txt"
+        echo 125 > "$RUN/exit_codes/hybrids.txt"
+    fi
+    if [ -f "$RUN/selection.json" ]; then
+        for lane in 0 1 2; do
+            slot=$lane; [ "$lane" != 2 ] || slot=3
+            (
+                code=0
+                for split in sealed IXI LPBA OASIS; do
+                    job "final_${split}_${lane}${final_suffix}" "${GPU[$slot]}" "$PY" -m experiments.weight_interventions final "${common[@]}" "${supervised[@]}" --split "$split" --lane "$lane" --lanes 3 || code=1
+                done
+                exit "$code"
+            ) & final_pids+=($!)
+        done
+        code=0
+        for pid in "${final_pids[@]}"; do wait "$pid" || code=1; done
+        echo "$code" > "$RUN/exit_codes/final.txt"
+        [ "$code" = 0 ] || status=1
+    else
+        echo 125 > "$RUN/exit_codes/final.txt"
+        status=1
+    fi
+    wait "$fields_pid" || status=1
+    job summary "" "$PY" -m experiments.weight_interventions summary "${common[@]}" || status=1
+    return "$status"
+}
+if [ "$WORKFLOW" = interventions ]; then
+    failed=0
+    interventions || failed=1
+    log "FINISHED exit=$failed"
+    exit "$failed"
+fi
 closure() {
     local source="${SOURCE_RUN:-results/contrasts/B_LEARN_20261115T213527Z}"
     local base="${BASE_B1_CHECKPOINT:-results/BM_20261113T143420Z_b1_s1/ckpt/last.pth}"

@@ -53,6 +53,7 @@ from utils.anatomy import (
     tissue_posteriors,
     with_background,
 )
+from utils.dice import IXI_VOI_LABELS
 from utils.feature_similarity import LearnedSimilarity, load_feature_net
 from utils.field import differentiable_local_clip
 from utils.losses import region_mean
@@ -81,6 +82,18 @@ def _gradient_ratio(base, aux, tensors) -> float:
     if any(not math.isfinite(n) or n <= 0.0 for n in norms):
         raise RuntimeError(f"calibration requires finite nonzero gradients of both losses, got {norms}")
     return norms[0] / norms[1]
+
+
+def paired_ixi_dice(flow_xy, flow_yx, x_seg, y_seg, labelled, sampler):
+    """Bidirectional IXI30 soft Dice, with supervision only on explicitly allowed pairs."""
+    if not labelled.any():
+        return (flow_xy.float().sum() + flow_yx.float().sum()) * 0
+    with torch.autocast(device_type=flow_xy.device.type, enabled=False):
+        labels = flow_xy.new_tensor((0, *IXI_VOI_LABELS), dtype=torch.long).view(1, -1, 1, 1, 1)
+        x_oh, y_oh = [(seg[labelled] == labels).float() for seg in (x_seg, y_seg)]
+        xy = sampler((x_oh, flow_xy[labelled].float()))
+        yx = sampler((y_oh, flow_yx[labelled].float()))
+        return 0.5 * (soft_dice_loss(xy, y_oh) + soft_dice_loss(yx, x_oh))
 
 
 def certified_crop_warp(flow, moving, sweeps, size, origin):
@@ -353,8 +366,14 @@ class Runner:
             logs.update(base=float(loss.detach()), kw_weighted=float(weighted.detach()), all=float(total.detach()))
             return total, logs
         if getattr(args, "ixi_pairs", ""):
-            x, y, t2_x, t2_y = [value.to(self.device).float() for value in batch]
-            loss, logs, flow_xy, flow_yx = self._pair_loss(x, y, None, None, epoch, t2=(t2_x, t2_y))
+            x, y, t2_x, t2_y = [value.to(self.device).float() for value in batch[:4]]
+            xs = ys = labelled = None
+            if len(batch) == 7:
+                xs, ys = [value.to(self.device).long() for value in batch[4:6]]
+                labelled = batch[6].to(self.device).bool()
+            elif args.w_dice > 0:
+                raise RuntimeError("Paired IXI Dice requires separate labels and pair availability")
+            loss, logs, flow_xy, flow_yx = self._pair_loss(x, y, xs, ys, epoch, t2=(t2_x, t2_y), labelled=labelled)
             ids = None
         else:
             x, y, x_seg, y_seg, ids = self._unpack(batch)
@@ -392,7 +411,7 @@ class Runner:
             )
         return d1, d2
 
-    def _pair_loss(self, x, y, x_seg, y_seg, epoch, t2=None):
+    def _pair_loss(self, x, y, x_seg, y_seg, epoch, t2=None, labelled=None):
         args, ctx = self.args, self.ctx
 
         schedule_max_epoch = args.schedule_max_epoch if args.schedule_max_epoch > 0 else args.max_epoch
@@ -465,7 +484,9 @@ class Runner:
             L_jac = 0.5 * (jac_pen(flow_xy) + jac_pen(flow_yx)) * W_jac
 
         L_dice = torch.zeros((), device=self.device, dtype=flow_xy.dtype)
-        if args.w_dice > 0.0 and x_seg is not None:
+        if args.w_dice > 0.0 and labelled is not None:
+            L_dice = paired_ixi_dice(flow_xy, flow_yx, x_seg, y_seg, labelled, self.reg_bilin) * args.w_dice
+        elif args.w_dice > 0.0 and x_seg is not None:
             x_oh = F.one_hot(x_seg.squeeze(1), _SEG_NUM_CLASSES).permute(0, 4, 1, 2, 3).float()
             y_oh = F.one_hot(y_seg.squeeze(1), _SEG_NUM_CLASSES).permute(0, 4, 1, 2, 3).float()
             warp_xy = self.reg_bilin((x_oh, flow_xy))
@@ -534,6 +555,8 @@ class Runner:
             "alpha_l3": alpha_l3,
             "warm": warm,
         }
+        if labelled is not None:
+            logs["dice_labelled_pairs"] = float(labelled.float().mean())
         if t2 is not None:
             logs.update(ncc_t1=float(d1.detach()), ncc_t2=float(d2.detach()))
         if tri_stats is not None:
@@ -702,13 +725,15 @@ def main(args=None):
     if args.w_reg is None:
         args.w_reg = 4.0 if args.ds.upper() == "IXI" else 1.0
     build_loaders = build_synth_loaders if args.ds == "SYNTH" else baseline_loader_builder(args)
+    label_ids = getattr(args, "ixi_label_ids", "")
     if args.ixi_pairs:
         ixi_similarity_weights(args)
+        if bool(label_ids) != bool(args.w_dice > 0):
+            raise ValueError("Paired IXI Dice requires both --w_dice > 0 and --ixi_label_ids")
         if (
             args.ds != "IXI"
             or args.image_channels != 2
             or args.batch_size != 1
-            or args.w_dice
             or args.anatomy_loss != "none"
             or args.ncc_regions != "none"
             or args.sim != "ncc"
@@ -717,8 +742,12 @@ def main(args=None):
             or args.certified_steps
             or args.ema_lambda
         ):
-            raise ValueError("Paired IXI uses two image channels, batch1 and only the core label-free NCC losses")
+            raise ValueError(
+                "Paired IXI uses two image channels, batch1, core NCC losses and optional explicit Train Dice"
+            )
         build_loaders = ixi_paired_loaders
+    elif label_ids:
+        raise ValueError("--ixi_label_ids requires --ixi_pairs")
     elif args.ixi_t1_weight is not None or args.ixi_t2_weight is not None:
         raise ValueError("Contrast coefficients require --ixi_pairs")
     world = int(os.environ.get("WORLD_SIZE", "1"))

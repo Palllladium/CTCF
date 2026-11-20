@@ -268,6 +268,8 @@ def recovery(args):
         if source.exists():
             raw = load_flow_npz(source).to(args.device)
         else:
+            if args.base_checkpoint is None:
+                raise FileNotFoundError(f"Required saved recovery field: {source}")
             if base is None:
                 base = load_base(args.base_checkpoint, x.shape[1:], args.device)
             raw = base_flow(base, x[None].to(args.device), y[None].to(args.device))

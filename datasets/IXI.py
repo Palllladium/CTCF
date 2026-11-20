@@ -130,13 +130,21 @@ class IXIPairSampler(Sampler):
 
 
 class IXIPairedDataset(Dataset):
-    """Subject pairs with separate model inputs, training-only T2 observations and evaluation labels."""
+    """IXI pairs with separate inputs and training-only T2 observations.
 
-    def __init__(self, manifest: dict, arm: str, *, validation: bool = False):
+    Default training items contain four tensors. Explicit ``label_ids`` adds
+    two dense segmentations and a flag permitting Dice only when both IDs match.
+    Validation always returns the original four input/label tensors.
+    """
+
+    def __init__(self, manifest: dict, arm: str, *, validation: bool = False, label_ids=None):
         if arm not in {"b0", "b1", "b2"}:
             raise ValueError(f"Unknown IXI contrast arm {arm}")
         self.rows = manifest["validation" if validation else "training"]
         self.arm, self.validation = arm, validation
+        self.label_ids = None if label_ids is None else frozenset(label_ids)
+        if self.label_ids is not None and (validation or not self.label_ids <= {row["id"] for row in self.rows}):
+            raise ValueError("Training label IDs must be a subset of the paired IXI training subjects")
         self.shape = tuple(manifest["shape"])
         index = {row["id"]: i for i, row in enumerate(self.rows)}
         self.pairs = [(index[a], index[b]) for a, b in manifest["validation_pairs"]] if validation else None
@@ -154,10 +162,22 @@ class IXIPairedDataset(Dataset):
             side = torch.from_numpy(np.ascontiguousarray(labels[None], dtype=np.int16)).long()
         else:
             side = torch.from_numpy(np.ascontiguousarray((t2 if t2 is not None else t1)[None], dtype=np.float32))
-        return torch.from_numpy(inputs), side
+        if self.label_ids is None:
+            return torch.from_numpy(inputs), side
+        allowed = row["id"] in self.label_ids
+        if allowed:
+            _, labels = SegNorm()([t1, labels])
+        else:
+            labels = np.zeros(self.shape, dtype=np.int16)
+        segmentation = torch.from_numpy(np.ascontiguousarray(labels[None], dtype=np.int16)).long()
+        return torch.from_numpy(inputs), side, segmentation, allowed
 
     def __getitem__(self, index):
         moving, fixed = self.pairs[index] if self.validation else index
+        if self.label_ids is not None:
+            x, x_side, xs, xa = self._subject(moving)
+            y, y_side, ys, ya = self._subject(fixed)
+            return x, y, x_side, y_side, xs, ys, xa and ya
         x, x_side = self._subject(moving)
         y, y_side = self._subject(fixed)
         return x, y, x_side, y_side
